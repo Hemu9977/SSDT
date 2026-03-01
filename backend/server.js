@@ -12,7 +12,7 @@ const zapAuthRoutes = require('./routes/zapAuthRoutes');
 const webCheckRoutes = require('./routes/webCheckRoutes');
 
 // Validate required environment variables
-const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'VT_API_KEY'];
+const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingVars.length > 0) {

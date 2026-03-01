@@ -17,11 +17,6 @@ const scanResultSchema = new mongoose.Schema({
     type: Object,
     default: null
   },
-  // VirusTotal scan result
-  vtResult: {
-    type: Object,
-    default: null
-  },
   pagespeedResult: {
     type: Object,
     default: null

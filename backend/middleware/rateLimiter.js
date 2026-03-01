@@ -110,7 +110,7 @@ const scanLimiter = isRateLimitEnabled ? rateLimit({
 }) : createBypassMiddleware();
 
 // Strict rate limiter for combined scans (1 scan per minute by default)
-// This respects external API limits: Mozilla Observatory (1/min), VirusTotal, PageSpeed, Gemini
+// This respects external API limits: Mozilla Observatory (1/min), PageSpeed, Gemini
 const combinedScanLimiter = isRateLimitEnabled ? rateLimit({
   windowMs: COMBINED_SCAN_RATE_LIMIT_WINDOW_MS,
   max: COMBINED_SCAN_RATE_LIMIT_MAX,
@@ -128,7 +128,7 @@ const combinedScanLimiter = isRateLimitEnabled ? rateLimit({
     const retryAfterSeconds = Math.ceil(COMBINED_SCAN_RATE_LIMIT_WINDOW_MS / 1000);
     console.log(`⚠️  Combined scan rate limit exceeded for ${identifier} on ${req.path}`);
     res.status(429).json({
-      error: `You can only perform one combined scan per ${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}. This helps us respect API limits from VirusTotal, Mozilla Observatory, PageSpeed, and Gemini.`,
+      error: `You can only perform one combined scan per ${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}. This helps us respect API limits from Mozilla Observatory, PageSpeed, and Gemini.`,
       retryAfter: `${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}`,
       retryAfterSeconds: retryAfterSeconds
     });

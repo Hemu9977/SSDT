@@ -81,11 +81,6 @@ const Hero = ({ historicalScan }) => {
         analysisId: historicalScan.analysisId,
         createdAt: historicalScan.createdAt,
 
-        // VT data - Hero uses vtStats and vtResult
-        hasVtResult: !!historicalScan.vtData,
-        vtResult: historicalScan.vtData,
-        vtStats: historicalScan.vtData || {},
-
         // PSI data - extract scores from raw pagespeedResult structure
         // Raw structure: psiData.lighthouseResult.categories.performance.score (0-1)
         hasPsiResult: !!historicalScan.psiData,
@@ -232,8 +227,7 @@ const Hero = ({ historicalScan }) => {
 
         // Calculate progress based on what's completed
         let progress = 10;
-        if (data.hasVtResult) progress = 30;
-        if (data.hasPsiResult && data.hasObservatoryResult) progress = 50;
+        if (data.hasPsiResult && data.hasObservatoryResult) progress = 30;
         if (data.zapPending) progress = 60;
         if (data.hasZapResult) progress = 85;
         if (data.hasRefinedReport) progress = 95;
@@ -480,15 +474,13 @@ const Hero = ({ historicalScan }) => {
         } else {
           // Show progress indicators based on what we have
           let statusMessage = 'Analyzing...';
-          const hasVt = analysisData.hasVtResult;
           const hasPsi = analysisData.hasPsiResult;
           const hasObs = analysisData.hasObservatoryResult;
           const hasZap = analysisData.hasZapResult;
           const zapPending = analysisData.zapPending;
           const hasAi = analysisData.hasRefinedReport;
 
-          if (!hasVt) statusMessage = '🔍 Running VirusTotal scan...';
-          else if (!hasPsi || !hasObs) statusMessage = '📊 Fetching PageSpeed & Observatory...';
+          if (!hasPsi || !hasObs) statusMessage = '📊 Fetching PageSpeed & Observatory...';
           else if (zapPending && analysisData.zapData) {
             const zapPhase = analysisData.zapData.phase || 'scanning';
             const zapProgress = analysisData.zapData.progress || 0;
@@ -588,7 +580,7 @@ const Hero = ({ historicalScan }) => {
       }));
 
       setLoadingProgress(30);
-      setLoadingStage('Running VirusTotal security scan...');
+      setLoadingStage('Running security scans...');
 
       // Check if stop was clicked during the initial API call
       if (stopPollingRef.current) {
@@ -625,29 +617,9 @@ const Hero = ({ historicalScan }) => {
     if (!report && !loading) return null;
 
     // Extract data - will be null/empty during loading
-    const vtStats = report?.vtStats || {};
     const psiScores = report?.psiScores || {};
     const observatoryData = report?.observatoryData || null;
     const refinedReport = report?.refinedReport;
-    const engines = report?.vtResult?.data?.attributes?.results || {};
-
-    const categoryDescriptions = {
-      malicious: "High Risk",
-      suspicious: "Potential Risk",
-      harmless: "No Risk Detected",
-      undetected: "No Info Available",
-    };
-
-    const totalEngines = Object.keys(engines).length;
-    const maliciousCount = vtStats.malicious || 0;
-    const suspiciousCount = vtStats.suspicious || 0;
-    const maliciousPercentage = totalEngines > 0 ? ((maliciousCount / totalEngines) * 100).toFixed(1) : 0;
-
-    let riskLevel = "Safe";
-    let riskClass = "risk-safe";
-    if (maliciousPercentage > 50) { riskLevel = "High Risk"; riskClass = "risk-high"; }
-    else if (maliciousPercentage > 10) { riskLevel = "Medium Risk"; riskClass = "risk-medium"; }
-    else if (maliciousPercentage > 0) { riskLevel = "Low Risk"; riskClass = "risk-low"; }
 
     const getScoreClass = (score) => score >= 90 ? 'score-good' : score >= 50 ? 'score-medium' : 'score-poor';
     const getObservatoryGradeColor = (grade) => {
@@ -752,23 +724,6 @@ const Hero = ({ historicalScan }) => {
 
         {/* Combined Scores Grid */}
         <div className="score-cards-grid">
-          {/* Security (VirusTotal) */}
-          {/* Security (VirusTotal) */}
-          <div className="score-card">
-            <h4 className="score-card__title">🛡️ Security</h4>
-            {report?.hasVtResult ? (
-              <>
-                <span className={`score-card__value ${riskClass}`}>{riskLevel}</span>
-                <p className="score-card__label">{maliciousCount}/{totalEngines} malicious</p>
-              </>
-            ) : (
-              <div className="score-card__loading loading-pulse">
-                <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
-                <LoadingPlaceholder height="0.85rem" width="50%" />
-              </div>
-            )}
-          </div>
-
           {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
           {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
           <div className="score-card">
@@ -1409,16 +1364,7 @@ const Hero = ({ historicalScan }) => {
           </details>
         )}
 
-        {/* Existing VirusTotal Summary */}
-        <div className="report-summary">
-          <h4>🔒 VirusTotal Security Details</h4>
-          <p><b>Total engines scanned:</b> {totalEngines}</p>
-          <p><b>Malicious detections:</b> {maliciousCount} ({maliciousPercentage}%)</p>
-          <p><b>Suspicious detections:</b> {suspiciousCount}</p>
-          <p><b>Risk Level:</b> <span className={`risk-level ${riskClass}`}>{riskLevel}</span></p>
-        </div>
-
-        {/* Existing Observatory Summary */}
+        {/* Observatory Summary */}
         {observatoryData ? (
           <div className="report-summary" style={{ marginTop: '2rem' }}>
             <h4>🔒 Mozilla Observatory Security Configuration</h4>
@@ -1445,32 +1391,6 @@ const Hero = ({ historicalScan }) => {
             </p>
           </div>
         )}
-
-        {/* Detailed Engine Results */}
-        <details style={{ marginTop: '2rem' }} data-no-translate>
-          <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px' }}>
-            📋 View Detailed Engine Results ({totalEngines} engines)
-          </summary>
-          <table className="report-table" style={{ marginTop: '1rem' }}>
-            <thead>
-              <tr><th>Engine</th><th>Method</th><th>Category</th><th>Meaning</th><th>Result</th></tr>
-            </thead>
-            <tbody>
-              {Object.entries(engines).map(([engine, val], index) => (
-                <tr key={engine} className={index % 2 === 0 ? "even-row" : "odd-row"}>
-                  <td>{engine}</td>
-                  <td>{val.method || "-"}</td>
-                  <td>{val.category || "-"}</td>
-                  <td>{categoryDescriptions[val.category] || "-"}</td>
-                  <td>{val.result || "-"}</td>
-                </tr>
-              ))}
-              {Object.keys(engines).length === 0 && (
-                <tr><td colSpan={5} className="no-results">No engine results available yet. Analysis may still be processing.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </details>
 
         {/* Download Reports Section */}
         {report?.analysisId && report?.status === 'completed' && (

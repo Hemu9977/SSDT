@@ -28,8 +28,8 @@ function getApiKeys() {
 }
 
 /**
- * Refine and combine VirusTotal, PageSpeed, Observatory, ZAP, urlscan, and WebCheck reports using Gemini AI
- * @param {Object} vtReport - VirusTotal scan result
+ * Refine and combine PageSpeed, Observatory, ZAP, urlscan, and WebCheck reports using Gemini AI
+ * @param {Object} _unused - Reserved parameter (unused, pass null)
  * @param {Object} psiReport - PageSpeed Insights report
  * @param {Object} observatoryReport - Mozilla Observatory scan result
  * @param {string} url - The scanned URL
@@ -38,7 +38,7 @@ function getApiKeys() {
  * @param {Object} webCheckReport - WebCheck comprehensive scan results (optional)
  * @returns {Promise<string>} - AI-generated refined report in Markdown format
  */
-async function refineReport(vtReport, psiReport, observatoryReport, url, zapReport = null, urlscanReport = null, webCheckReport = null) {
+async function refineReport(_unused, psiReport, observatoryReport, url, zapReport = null, urlscanReport = null, webCheckReport = null) {
   const apiKeys = getApiKeys();
 
   if (apiKeys.length === 0) {
@@ -66,13 +66,6 @@ async function refineReport(vtReport, psiReport, observatoryReport, url, zapRepo
       // Initialize Gemini AI with current API key
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Extract key data from reports
-      const vtStats = vtReport?.data?.attributes?.stats || {};
-      const vtCategories = vtReport?.data?.attributes?.categories || {};
-      const vtTotalEngines = Object.values(vtStats).reduce((sum, val) => sum + val, 0);
-      const vtMaliciousCount = vtStats.malicious || 0;
-      const vtSuspiciousCount = vtStats.suspicious || 0;
 
       // Extract PageSpeed scores
       const lighthouseResult = psiReport?.lighthouseResult || {};
@@ -121,13 +114,6 @@ async function refineReport(vtReport, psiReport, observatoryReport, url, zapRepo
 
       // Build the prompt for Gemini
       const prompt = `You are a cybersecurity and web performance expert. Analyze the following reports for the URL: ${url}
-
-VirusTotal Security Report:
-- Total Engines Scanned: ${vtTotalEngines}
-- Malicious Detections: ${vtMaliciousCount}
-- Suspicious Detections: ${vtSuspiciousCount}
-- Categories: ${JSON.stringify(vtCategories)}
-- Full VT Stats: ${JSON.stringify(vtStats)}
 
 PageSpeed Insights Performance Report:
 - Performance Score: ${performanceScore}/100
@@ -181,7 +167,7 @@ Generate a comprehensive, professional analysis report that includes:
 1. Executive Summary (2-3 sentences): Overall assessment of the URL's security and performance.
 
 2. Security Analysis:
-   - Risk level (Low/Medium/High) based on VirusTotal results
+   - Risk level (Low/Medium/High) based on OWASP ZAP and urlscan.io results
    - Mozilla Observatory security grade and configuration assessment (if available)
    - OWASP ZAP vulnerability findings and their severity (if available)
    - urlscan.io website analysis and threat detection (if available)
@@ -389,13 +375,11 @@ async function formatScanDataForPdf(scanResult) {
   }
 
   // Extract all scan data
-  const vtStats = scanResult.vtResult?.data?.attributes?.stats || {};
-  const malicious = vtStats.malicious || 0;
-  const suspicious = vtStats.suspicious || 0;
-  const harmless = vtStats.harmless || 0;
-  const undetected = vtStats.undetected || 0;
-  const totalEngines = Object.values(vtStats).reduce((sum, val) => sum + val, 0);
-  const overallRisk = malicious > 0 ? 'High' : suspicious > 0 ? 'Medium' : 'Low';
+  // Derive overall risk from ZAP findings and urlscan verdict
+  const zapHighCount = scanResult.zapResult?.riskCounts?.High || 0;
+  const zapMediumCount = scanResult.zapResult?.riskCounts?.Medium || 0;
+  const urlscanMalicious = scanResult.urlscanResult?.verdicts?.overall?.malicious || false;
+  const overallRisk = (zapHighCount > 0 || urlscanMalicious) ? 'High' : zapMediumCount > 0 ? 'Medium' : 'Low';
 
   const categories = scanResult.pagespeedResult?.lighthouseResult?.categories || {};
   const performanceScore = Math.round((categories.performance?.score || 0) * 100);
@@ -413,13 +397,6 @@ Target URL: ${scanResult.target}
 Scan ID: ${scanResult.analysisId}
 Status: ${scanResult.status}
 Overall Risk Level: ${overallRisk}
-
-VIRUSTOTAL ANALYSIS:
-- Total Engines Scanned: ${totalEngines}
-- Malicious Detections: ${malicious}
-- Suspicious: ${suspicious}
-- Harmless: ${harmless}
-- Undetected: ${undetected}
 
 PAGESPEED INSIGHTS:
 - Performance Score: ${performanceScore}/100
@@ -489,17 +466,6 @@ Return a JSON object with this EXACT structure:
     "riskLabel": { "en": "Overall Risk Level", "ja": "Japanese translation" }
   },
   "sections": [
-    {
-      "id": "virustotal",
-      "title": { "en": "VirusTotal Analysis", "ja": "Japanese translation" },
-      "items": [
-        { "label": { "en": "Total Engines", "ja": "Japanese" }, "value": "${totalEngines}", "type": "stat" },
-        { "label": { "en": "Malicious", "ja": "Japanese" }, "value": "${malicious}", "type": "danger" },
-        { "label": { "en": "Suspicious", "ja": "Japanese" }, "value": "${suspicious}", "type": "warning" },
-        { "label": { "en": "Harmless", "ja": "Japanese" }, "value": "${harmless}", "type": "success" },
-        { "label": { "en": "Undetected", "ja": "Japanese" }, "value": "${undetected}", "type": "stat" }
-      ]
-    },
     {
       "id": "pagespeed",
       "title": { "en": "PageSpeed Insights", "ja": "Japanese translation" },

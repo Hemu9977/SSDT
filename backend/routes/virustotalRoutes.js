@@ -1,8 +1,5 @@
 const express = require('express');
-const multer = require('multer');
-const fs = require('fs').promises;
-const path = require('path');
-const { scanFile, scanUrl, getAnalysis, getFileReport } = require('../services/virustotalService');
+const crypto = require('crypto');
 const { getPageSpeedReport } = require('../services/pagespeedService');
 const { scanHost } = require('../services/observatoryService');
 const { refineReport } = require('../services/geminiService');
@@ -19,22 +16,6 @@ const router = express.Router();
 
 // In-memory lock to prevent parallel Gemini AI report calls for the same scan
 const geminiInProgress = new Set();
-
-// Configure multer
-const upload = multer({
-  dest: 'uploads/',
-  limits: {
-    fileSize: 32 * 1024 * 1024 // 32MB limit
-  },
-  fileFilter: (req, file, cb) => {
-    console.log(`📎 Receiving file: ${file.originalname} (${file.mimetype})`);
-    cb(null, true);
-  }
-});
-
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, '../uploads');
-fs.mkdir(uploadsDir, { recursive: true }).catch(console.error);
 
 // URL validation helper
 const isValidUrl = (urlString) => {
@@ -55,195 +36,7 @@ const isValidUrl = (urlString) => {
   }
 };
 
-// 1️⃣ Scan a file (Protected route)
-router.post('/file', auth, upload.single('file'), async (req, res) => {
-  let filePath = null;
-
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    filePath = req.file.path;
-    console.log(`🔐 User ${req.user.id} uploaded file: ${req.file.originalname}`);
-
-    // Call VirusTotal API
-    const vtResp = await scanFile(filePath);
-
-    // DEBUG: Log the entire response
-    console.log('📋 VirusTotal Response:', JSON.stringify(vtResp, null, 2));
-
-    // Extract analysis ID - try multiple possible locations
-    let analysisId = null;
-
-    if (vtResp?.data?.id) {
-      analysisId = vtResp.data.id;
-    } else if (vtResp?.id) {
-      analysisId = vtResp.id;
-    } else if (vtResp?.data?.attributes?.id) {
-      analysisId = vtResp.data.attributes.id;
-    }
-
-    console.log(`🔑 Extracted Analysis ID: ${analysisId}`);
-
-    if (!analysisId) {
-      console.error('❌ No analysis ID found in response:', vtResp);
-      return res.status(500).json({
-        error: 'No analysis ID received from VirusTotal',
-        vtResponse: vtResp
-      });
-    }
-
-    // Save to database with user reference
-    const scan = new ScanResult({
-      target: req.file.originalname,
-      analysisId: analysisId,
-      status: 'queued',
-      userId: req.user.id
-    });
-    await scan.save();
-
-    res.json({
-      success: true,
-      message: 'File uploaded and sent for scanning',
-      analysisId: analysisId,
-      filename: req.file.originalname
-    });
-  } catch (err) {
-    console.error('❌ File scan error:', err);
-    console.error('❌ Error stack:', err.stack);
-    res.status(500).json({
-      error: 'Failed to scan file',
-      details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  } finally {
-    // Clean up uploaded file
-    if (filePath) {
-      try {
-        await fs.unlink(filePath);
-        console.log(`🗑️  Deleted temporary file: ${filePath}`);
-      } catch (unlinkErr) {
-        console.error('Failed to delete temp file:', unlinkErr.message);
-      }
-    }
-  }
-});
-
-// 2️⃣ Scan a URL (Protected route)
-router.post('/url', auth, async (req, res) => {
-  try {
-    const { url } = req.body;
-
-    if (!url || typeof url !== 'string') {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-
-    console.log(`🔐 User ${req.user.id} submitted URL: ${url}`);
-
-    // Call VirusTotal API
-    const vtResp = await scanUrl(url);
-
-    // DEBUG: Log the entire response
-    console.log('📋 VirusTotal Response:', JSON.stringify(vtResp, null, 2));
-
-    // Extract analysis ID - try multiple possible locations
-    let analysisId = null;
-
-    if (vtResp?.data?.id) {
-      analysisId = vtResp.data.id;
-    } else if (vtResp?.id) {
-      analysisId = vtResp.id;
-    } else if (vtResp?.data?.attributes?.id) {
-      analysisId = vtResp.data.attributes.id;
-    }
-
-    console.log(`🔑 Extracted Analysis ID: ${analysisId}`);
-
-    if (!analysisId) {
-      console.error('❌ No analysis ID found in response:', vtResp);
-      return res.status(500).json({
-        error: 'No analysis ID received from VirusTotal',
-        vtResponse: vtResp
-      });
-    }
-
-    // Save to database with user reference
-    const scan = new ScanResult({
-      target: url,
-      analysisId: analysisId,
-      status: 'queued',
-      userId: req.user.id
-    });
-    await scan.save();
-
-    res.json({
-      success: true,
-      message: 'URL submitted for analysis',
-      analysisId: analysisId,
-      url: url
-    });
-  } catch (err) {
-    console.error('❌ URL scan error:', err);
-    console.error('❌ Error stack:', err.stack);
-    res.status(500).json({
-      error: 'Failed to scan URL',
-      details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  }
-});
-
-// 3️⃣ Check analysis result (Protected route)
-router.get('/analysis/:id', auth, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id) {
-      return res.status(400).json({ error: 'Analysis ID is required' });
-    }
-
-    console.log(`📊 Fetching analysis for ID: ${id}`);
-
-    const vtResp = await getAnalysis(id);
-
-    // DEBUG: Log response
-    console.log('📋 Analysis Response:', JSON.stringify(vtResp, null, 2));
-
-    // Update database record
-    const scan = await ScanResult.findOneAndUpdate(
-      { analysisId: id },
-      {
-        result: vtResp,
-        status: vtResp?.data?.attributes?.status || 'unknown'
-      },
-      { new: true }
-    );
-
-    if (!scan) {
-      return res.status(404).json({
-        error: 'Analysis not found in database',
-        vtData: vtResp
-      });
-    }
-
-    res.json({
-      success: true,
-      ...scan.toObject(),
-      stats: vtResp?.data?.attributes?.stats
-    });
-  } catch (err) {
-    console.error('❌ Analysis retrieval error:', err);
-    console.error('❌ Error stack:', err.stack);
-    res.status(500).json({
-      error: 'Failed to retrieve analysis',
-      details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  }
-});
-
-// 4️⃣ Get user's scan history (Protected route)
+// 1️⃣ Get user's scan history (Protected route)
 router.get('/history', auth, async (req, res) => {
   try {
     const { page = 1, limit = 10, status = 'completed' } = req.query;
@@ -323,11 +116,6 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt
     };
-
-    // Add VirusTotal results
-    if (scan.vtResult) {
-      response.vtData = scan.vtResult;
-    }
 
     // Add PageSpeed results
     if (scan.pagespeedResult) {
@@ -440,7 +228,6 @@ router.get('/active-scan', auth, async (req, res) => {
     }
 
     // Extract key metrics for the response (same as combined-analysis)
-    const vtStats = activeScan.vtResult?.data?.attributes?.stats || null;
     const lighthouseResult = activeScan.pagespeedResult?.lighthouseResult || {};
     const categories = lighthouseResult.categories || {};
 
@@ -573,7 +360,6 @@ router.get('/active-scan', auth, async (req, res) => {
       target: activeScan.target,
       status: activeScan.status,
       // Progress indicators
-      hasVtResult: !!activeScan.vtResult,
       hasPsiResult: !!activeScan.pagespeedResult,
       hasObservatoryResult: !!activeScan.observatoryResult,
       hasZapResult: !!activeScan.zapResult && (activeScan.zapResult.status === 'completed' || activeScan.zapResult.status === 'completed_partial'),
@@ -583,14 +369,12 @@ router.get('/active-scan', auth, async (req, res) => {
       hasWebCheckResult: !!activeScan.webCheckResult && (activeScan.webCheckResult.status === 'completed' || activeScan.webCheckResult.status === 'completed_partial' || activeScan.webCheckResult.status === 'completed_with_errors'),
       webCheckPending: !!activeScan.webCheckResult && activeScan.webCheckResult.status === 'running',
       // Summary data (for quick display)
-      vtStats,
       psiScores,
       observatoryData,
       zapData,
       urlscanData,
       webCheckData,
       // Full data (for complete display - especially for completed scans)
-      vtResult: activeScan.vtResult || null,
       pagespeedResult: activeScan.pagespeedResult || null,
       observatoryResult: activeScan.observatoryResult || null,
       zapResult: activeScan.zapResult || null,
@@ -610,7 +394,7 @@ router.get('/active-scan', auth, async (req, res) => {
   }
 });
 
-// 5️⃣ Combined URL Scan (VirusTotal + PageSpeed + Gemini) (Protected route with strict rate limiting)
+// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
 router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
   try {
     const { url } = req.body;
@@ -627,60 +411,19 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
 
     console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url}`);
 
-    // Call VirusTotal API
-    const vtResp = await scanUrl(url);
-
-    // Extract analysis ID
-    let analysisId = null;
-    if (vtResp?.data?.id) {
-      analysisId = vtResp.data.id;
-    } else if (vtResp?.id) {
-      analysisId = vtResp.id;
-    } else if (vtResp?.data?.attributes?.id) {
-      analysisId = vtResp.data.attributes.id;
-    }
-
-    if (!analysisId) {
-      console.error('❌ No analysis ID found in response:', vtResp);
-      return res.status(500).json({
-        error: 'No analysis ID received from VirusTotal',
-        vtResponse: vtResp
-      });
-    }
-
+    // Generate unique analysis ID
+    const analysisId = crypto.randomUUID();
     console.log(`🔑 Analysis ID: ${analysisId}`);
 
-    // 👇 FIXED: Check if scan already exists to prevent Duplicate Key Error
-    let scan = await ScanResult.findOne({ analysisId: analysisId });
-
-    if (scan) {
-      console.log('📝 Existing scan found - initiating fresh scan...');
-
-      // NO CACHING - Always run fresh scans for enterprise clients who pay for real-time data
-      // Delete the old scan and create a new one to ensure fresh results
-      console.log('🗑️  Deleting old scan data to ensure fresh results...');
-      await ScanResult.deleteOne({ analysisId: analysisId });
-
-      // Create new scan
-      scan = new ScanResult({
-        target: url,
-        analysisId: analysisId,
-        status: 'queued',
-        userId: req.user.id
-      });
-      await scan.save();
-      console.log('✅ Fresh scan record created');
-    } else {
-      console.log('📝 Creating new scan record...');
-      scan = new ScanResult({
-        target: url,
-        analysisId: analysisId,
-        status: 'queued',
-        userId: req.user.id
-      });
-      await scan.save();
-    }
-    // 👆 END FIX
+    // Create new scan record - ready to start combining immediately
+    const scan = new ScanResult({
+      target: url,
+      analysisId: analysisId,
+      status: 'combining',
+      userId: req.user.id
+    });
+    await scan.save();
+    console.log('📝 Scan record created');
 
     res.json({
       success: true,
@@ -721,37 +464,9 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       });
     }
 
-    // STEP A: Check VirusTotal status
-    if (!scan.vtResult || scan.status === 'queued' || scan.status === 'pending') {
-      console.log('⏳ Checking VirusTotal status...');
-
-      const vtResp = await getAnalysis(id);
-      const vtStatus = vtResp?.data?.attributes?.status;
-
-      console.log(`📋 VT Status: ${vtStatus}`);
-
-      if (vtStatus === 'completed') {
-        // VT is complete, update the scan
-        scan.vtResult = vtResp;
-        scan.status = 'pending'; // Still need to get PSI and Gemini
-        await scan.save();
-      } else {
-        // VT still pending
-        scan.status = vtStatus || 'pending';
-        await scan.save();
-
-        return res.json({
-          success: true,
-          status: scan.status,
-          message: 'VirusTotal analysis in progress...',
-          analysisId: id
-        });
-      }
-    }
-
-    // STEP B: If VT is complete, check if we need PSI, Observatory, ZAP, urlscan and Gemini
+    // STEP A: Check if we need to run scans (PSI, Observatory, ZAP, urlscan, WebCheck, Gemini)
     // ONLY trigger scans if they haven't been started yet (not just checking for results)
-    const needsScanning = scan.vtResult && (
+    const needsScanning = (
       !scan.pagespeedResult ||
       !scan.observatoryResult ||
       !scan.urlscanResult ||
@@ -765,7 +480,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     const webCheckNotStarted = !scan.webCheckResult || (!scan.webCheckResult.status && !scan.webCheckResult.error);
 
     if (needsScanning || zapNotStarted || webCheckNotStarted) {
-      console.log('🔄 VT complete. Running PageSpeed, Observatory, ZAP, WebCheck, urlscan and Gemini analysis...');
+      console.log('🔄 Running PageSpeed, Observatory, ZAP, WebCheck, urlscan and Gemini analysis...');
 
       try {
         // Update status to combining
@@ -1074,7 +789,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
 
           // Generate AI report with all available data
           const aiReport = await refineReport(
-            freshScan.vtResult,
+            null,
             psiReport,
             observatoryReport,
             freshScan.target,
@@ -1151,7 +866,6 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
 
     // STEP D: Return results (partial or complete)
     // Extract key metrics for easy access - even for partial results
-    const vtStats = scan.vtResult?.data?.attributes?.stats || null;
     const lighthouseResult = scan.pagespeedResult?.lighthouseResult || {};
     const categories = lighthouseResult.categories || {};
 
@@ -1290,7 +1004,6 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       analysisId: id,
       target: scan.target,
       // Partial data indicators
-      hasVtResult: !!scan.vtResult,
       hasPsiResult: !!scan.pagespeedResult,
       hasObservatoryResult: !!scan.observatoryResult,
       hasZapResult: !!scan.zapResult && (scan.zapResult.status === 'completed' || scan.zapResult.status === 'completed_partial'),
@@ -1300,14 +1013,12 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       webCheckPending: !!scan.webCheckResult && scan.webCheckResult.status === 'running',
       hasRefinedReport: !!scan.refinedReport,
       // Actual data (null if not yet available)
-      vtStats: vtStats,
       psiScores: psiScores,
       observatoryData: observatoryData,
       zapData: zapData,
       urlscanData: urlscanData,
       webCheckData: webCheckData,
       refinedReport: scan.refinedReport || null,
-      vtResult: scan.vtResult || null,
       pagespeedResult: scan.pagespeedResult || null,
       observatoryResult: scan.observatoryResult || null,
       zapResult: scan.zapResult || null,
@@ -1386,7 +1097,6 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
         generatedBy: 'SSDT Security Scanner',
         version: '2.0'
       },
-      virusTotal: scan.vtResult || null,
       pageSpeed: scan.pagespeedResult || null,
       observatory: scan.observatoryResult || null,
       urlscan: scan.urlscanResult || null,
@@ -1451,31 +1161,7 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
   }
 });
 
-// 8️⃣ Get file report by hash (Protected route)
-router.get('/file-report/:hash', auth, async (req, res) => {
-  try {
-    const { hash } = req.params;
-
-    if (!hash) {
-      return res.status(400).json({ error: 'File hash is required' });
-    }
-
-    const report = await getFileReport(hash);
-
-    res.json({
-      success: true,
-      report: report
-    });
-  } catch (err) {
-    console.error('❌ File report error:', err.message);
-    res.status(500).json({
-      error: 'Failed to retrieve file report',
-      details: err.message
-    });
-  }
-});
-
-// 9️⃣ Stop a combined scan and restart Docker containers (Protected route)
+// 8️⃣ Stop a combined scan and restart Docker containers (Protected route)
 router.post('/stop-scan/:id', auth, async (req, res) => {
   try {
     const { id } = req.params;

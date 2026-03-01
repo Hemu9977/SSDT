@@ -833,7 +833,6 @@ const AuthenticatedScanPanel = () => {
                   <span className="progress-percent">{scanProgress}%</span>
                   <span className="progress-phase">
                     {(() => {
-                      if (!report?.hasVtResult) return 'Running VirusTotal...';
                       if (!report?.hasPsiResult || !report?.hasObservatoryResult) return 'Fetching PageSpeed & Observatory...';
                       if (report?.zapPending) return `ZAP Auth Scan: ${scanPhase} (${scanProgress}%)...`;
                       if (!report?.hasZapResult) return 'Running authenticated ZAP scan...';
@@ -890,20 +889,6 @@ const AuthenticatedScanPanel = () => {
                 return map[grade[0]] || '#888';
               };
 
-              // VT data
-              const vtStats = report?.vtStats || {};
-              const engines = report?.vtResult?.data?.attributes?.results || {};
-              const totalEngines = Object.keys(engines).length;
-              const maliciousCount = vtStats.malicious || 0;
-              const suspiciousCount = vtStats.suspicious || 0;
-              const maliciousPercentage = totalEngines > 0 ? ((maliciousCount / totalEngines) * 100).toFixed(1) : 0;
-              let riskLevel = 'Safe'; let riskClass = 'risk-safe';
-              if (maliciousPercentage > 50) { riskLevel = 'High Risk'; riskClass = 'risk-high'; }
-              else if (maliciousPercentage > 10) { riskLevel = 'Medium Risk'; riskClass = 'risk-medium'; }
-              else if (maliciousPercentage > 0) { riskLevel = 'Low Risk'; riskClass = 'risk-low'; }
-
-              const categoryDescriptions = { malicious: 'High Risk', suspicious: 'Potential Risk', harmless: 'No Risk Detected', undetected: 'No Info Available' };
-
               // Observatory
               const observatoryData = report?.observatoryData || null;
 
@@ -945,22 +930,6 @@ const AuthenticatedScanPanel = () => {
                   <h3 className="report-title">Combined Scan Report {report?.target ? `for ${report.target}` : ''}</h3>
 
                   <div className="score-cards-grid">
-                    {/* Security (VirusTotal) */}
-                    <div className="score-card">
-                      <h4 className="score-card__title">Security</h4>
-                      {report?.hasVtResult ? (
-                        <>
-                          <span className={`score-card__value ${riskClass}`}>{riskLevel}</span>
-                          <p className="score-card__label">{maliciousCount}/{totalEngines} malicious</p>
-                        </>
-                      ) : (
-                        <div className="score-card__loading loading-pulse">
-                          <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
-                          <LoadingPlaceholder height="0.85rem" width="50%" />
-                        </div>
-                      )}
-                    </div>
-
                     {/* OWASP ZAP (Authenticated) */}
                     <div className="score-card">
                       <h4 className="score-card__title">OWASP ZAP (Auth)</h4>
@@ -1468,15 +1437,6 @@ const AuthenticatedScanPanel = () => {
                     </details>
                   )}
 
-                  {/* VirusTotal Security Details */}
-                  <div className="report-summary">
-                    <h4>VirusTotal Security Details</h4>
-                    <p><b>Total engines scanned:</b> {totalEngines}</p>
-                    <p><b>Malicious detections:</b> {maliciousCount} ({maliciousPercentage}%)</p>
-                    <p><b>Suspicious detections:</b> {suspiciousCount}</p>
-                    <p><b>Risk Level:</b> <span className={`risk-level ${riskClass}`}>{riskLevel}</span></p>
-                  </div>
-
                   {/* Observatory Summary */}
                   {observatoryData ? (
                     <div className="report-summary" style={{ marginTop: '2rem' }}>
@@ -1494,26 +1454,6 @@ const AuthenticatedScanPanel = () => {
                       <p><b>Manual Scan:</b>{' '}<a href={`https://developer.mozilla.org/en-US/observatory/analyze?host=${report?.target ? encodeURIComponent(new URL(report.target).hostname) : ''}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline', fontWeight: 'bold' }}>Run Mozilla Observatory Scan</a></p>
                     </div>
                   )}
-
-                  {/* Detailed Engine Results */}
-                  <details style={{ marginTop: '2rem' }} data-no-translate>
-                    <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px' }}>
-                      View Detailed Engine Results ({totalEngines} engines)
-                    </summary>
-                    <table className="report-table" style={{ marginTop: '1rem' }}>
-                      <thead><tr><th>Engine</th><th>Method</th><th>Category</th><th>Meaning</th><th>Result</th></tr></thead>
-                      <tbody>
-                        {Object.entries(engines).map(([engine, val], index) => (
-                          <tr key={engine} className={index % 2 === 0 ? 'even-row' : 'odd-row'}>
-                            <td>{engine}</td><td>{val.method || '-'}</td><td>{val.category || '-'}</td><td>{categoryDescriptions[val.category] || '-'}</td><td>{val.result || '-'}</td>
-                          </tr>
-                        ))}
-                        {Object.keys(engines).length === 0 && (
-                          <tr><td colSpan={5} className="no-results">No engine results available yet. Analysis may still be processing.</td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </details>
 
                   {/* Download Reports Section */}
                   {report?.analysisId && report?.status === 'completed' && (

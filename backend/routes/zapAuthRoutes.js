@@ -21,7 +21,6 @@ const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
 
 // Additional scanner services (same as normal scan)
-const { scanUrl, getAnalysis } = require('../services/virustotalService');
 const { getPageSpeedReport } = require('../services/pagespeedService');
 const { scanHost } = require('../services/observatoryService');
 const { runUrlScan } = require('../services/urlscanService');
@@ -240,26 +239,6 @@ router.post('/scan', auth, async (req, res) => {
     // Delete the session after use (one-time use)
     authSessions.delete(tempSessionId);
 
-    // Also start VirusTotal scan in the background (fire & forget)
-    // VT analysis ID is stored in the scan document for later polling
-    try {
-      const vtResp = await scanUrl(targetUrl);
-      let vtAnalysisId = vtResp?.data?.id || vtResp?.id || vtResp?.data?.attributes?.id || null;
-      if (vtAnalysisId) {
-        await ScanResult.updateOne(
-          { analysisId: scanId },
-          { $set: { vtResult: { vtAnalysisId, status: 'pending' } } }
-        );
-        console.log(`[ZAP-AUTH] VirusTotal scan submitted: ${vtAnalysisId}`);
-      }
-    } catch (vtError) {
-      console.warn(`[ZAP-AUTH] VirusTotal submission failed (non-blocking): ${vtError.message}`);
-      await ScanResult.updateOne(
-        { analysisId: scanId },
-        { $set: { vtResult: { error: vtError.message } } }
-      );
-    }
-
     res.json({
       success: true,
       scanId: result.scanId,
@@ -274,7 +253,7 @@ router.post('/scan', auth, async (req, res) => {
 /**
  * GET /api/zap-auth/status/:scanId
  * Get the status and progress of an authenticated scan.
- * Orchestrates ALL scanners (VT, PageSpeed, Observatory, URLScan, WebCheck, Gemini)
+ * Orchestrates ALL scanners (PageSpeed, Observatory, URLScan, WebCheck, Gemini)
  * alongside the authenticated ZAP scan, matching the normal combined-analysis flow.
  */
 router.get('/status/:scanId', auth, async (req, res) => {
@@ -286,24 +265,8 @@ router.get('/status/:scanId', auth, async (req, res) => {
       return res.status(404).json({ error: 'Scan not found or access denied' });
     }
 
-    // ── STEP A: Check VirusTotal status ──
-    if (scan.vtResult && scan.vtResult.vtAnalysisId && !scan.vtResult.data) {
-      try {
-        const vtResp = await getAnalysis(scan.vtResult.vtAnalysisId);
-        const vtStatus = vtResp?.data?.attributes?.status;
-        if (vtStatus === 'completed') {
-          scan.vtResult = vtResp;
-          await ScanResult.updateOne({ analysisId: scanId }, { $set: { vtResult: vtResp } });
-          console.log('[ZAP-AUTH] VirusTotal analysis completed');
-        }
-      } catch (vtErr) {
-        console.warn('[ZAP-AUTH] VT poll error (non-blocking):', vtErr.message);
-      }
-    }
-
-    // ── STEP B: When VT is done, trigger fast scans (only once) ──
-    const vtDone = scan.vtResult && (scan.vtResult.data || scan.vtResult.error);
-    const needsFastScans = vtDone && (!scan.pagespeedResult || !scan.observatoryResult || !scan.urlscanResult);
+    // ── STEP A: Trigger fast scans (only once) ──
+    const needsFastScans = !scan.pagespeedResult || !scan.observatoryResult || !scan.urlscanResult;
     const webCheckNotStarted = !scan.webCheckResult || (!scan.webCheckResult.status && !scan.webCheckResult.error);
 
     if (needsFastScans || webCheckNotStarted) {
@@ -474,7 +437,7 @@ router.get('/status/:scanId', auth, async (req, res) => {
           }
 
           const aiReport = await refineReport(
-            freshScan.vtResult,
+            null,
             psiReport,
             observatoryReport,
             freshScan.target,
@@ -517,7 +480,6 @@ router.get('/status/:scanId', auth, async (req, res) => {
     }
 
     // ── STEP D: Build response with all scan data (progressive loading) ──
-    const vtStats = scan.vtResult?.data?.attributes?.stats || null;
     const lighthouseResult = scan.pagespeedResult?.lighthouseResult || {};
     const categories = lighthouseResult.categories || {};
 
@@ -639,7 +601,6 @@ router.get('/status/:scanId', auth, async (req, res) => {
       progress,
       message: scan.authScanResult?.message || '',
       // Partial data indicators (same as combined-analysis)
-      hasVtResult: !!scan.vtResult?.data,
       hasPsiResult: !!scan.pagespeedResult && !scan.pagespeedResult.error,
       hasObservatoryResult: !!scan.observatoryResult && !scan.observatoryResult.error,
       hasZapResult: zapData?.status === 'completed',
@@ -649,7 +610,6 @@ router.get('/status/:scanId', auth, async (req, res) => {
       webCheckPending: webCheckData?.status === 'running',
       hasRefinedReport: !!scan.refinedReport,
       // Actual data
-      vtStats,
       psiScores,
       observatoryData,
       zapData,
@@ -657,7 +617,6 @@ router.get('/status/:scanId', auth, async (req, res) => {
       webCheckData,
       refinedReport: scan.refinedReport || null,
       // Raw results for compatibility
-      vtResult: scan.vtResult || null,
       pagespeedResult: scan.pagespeedResult || null,
       observatoryResult: scan.observatoryResult || null,
       authScanResult: scan.authScanResult || null,

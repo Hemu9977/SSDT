@@ -32,9 +32,6 @@ MONGODB_URI=mongodb://localhost:27017/ssdt
 # JWT Secret (generate a random string)
 JWT_SECRET=your-super-secret-jwt-key-here
 
-# VirusTotal API Key
-VT_API_KEY=your-virustotal-api-key
-
 # Google PageSpeed API Key
 PAGESPEED_API_KEY=your-pagespeed-api-key
 
@@ -219,7 +216,6 @@ cd frontend && npm start
 
 | Service | Get Key From |
 |---------|--------------|
-| VirusTotal | https://www.virustotal.com/gui/my-apikey |
 | Google PageSpeed | https://console.cloud.google.com/apis/credentials |
 | Gemini AI | https://aistudio.google.com/app/apikey |
 | URLScan.io | https://urlscan.io/user/profile |

@@ -21,27 +21,26 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 - **OWASP ZAP**: Two instances on ports 8080 (normal) and 8081 (authenticated scans).
 - **WebCheck**: Docker container on port 3002, runs 29 scan types via REST API (`/api/{scan-type}?url=`).
 
-## 7 Scanners
-1. **VirusTotal** - Malware/phishing detection (70+ engines)
-2. **PageSpeed Insights** - Lighthouse performance/accessibility/SEO scores
-3. **Mozilla Observatory** - HTTP security headers grading
-4. **OWASP ZAP** - Active vulnerability scanning (spider + active scan)
-5. **WebCheck** - 29 sub-scans (SSL, DNS, headers, cookies, tech stack, ports, etc.)
-6. **urlscan.io** - Screenshot + page analysis
-7. **Gemini AI** - Synthesized security report from all scanner data
+## 6 Scanners
+1. **PageSpeed Insights** - Lighthouse performance/accessibility/SEO scores
+2. **Mozilla Observatory** - HTTP security headers grading
+3. **OWASP ZAP** - Active vulnerability scanning (spider + active scan)
+4. **WebCheck** - 29 sub-scans (SSL, DNS, headers, cookies, tech stack, ports, etc.)
+5. **urlscan.io** - Screenshot + page analysis
+6. **Gemini AI** - Synthesized security report from all scanner data
 
 ## Key Components
 
 ### Normal Scan Flow (`Hero.jsx`)
 - User enters URL → `POST /api/vt/combined-analysis` → polls `/api/vt/active-scan` every 3s
 - Background scans (ZAP, WebCheck) run independently on the server
-- Results displayed in 27 score cards + 2 collapsible details sections (ZAP Report, WebCheck Analysis)
+- Results displayed in 26 score cards + 2 collapsible details sections (ZAP Report, WebCheck Analysis)
 - Downloads: PDF (English/Japanese), JSON export
 
 ### Authenticated Scan Flow (`AuthenticatedScanPanel.jsx`)
 - User provides URL + login field definitions (dynamic multi-field form)
 - `POST /api/zap-auth/start` → polls `/api/zap-auth/status/:id` every 3s
-- Same 27 score cards + ZAP Report + WebCheck Analysis
+- Same 26 score cards + ZAP Report + WebCheck Analysis
 - Uses ZAP instance on port 8081
 
 ### Shared Components
@@ -57,7 +56,7 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 ```
 ScanResult {
   userId, target, analysisId, status,
-  vtResult, pagespeedResult, observatoryResult, urlscanResult,
+  pagespeedResult, observatoryResult, urlscanResult,
   zapResult: { status, alerts[], reportFiles[], detailedAlerts... },
   webCheckResult: { status, fullResults|resultsFileId, summary, completedScans... },
   authScanResult: { ... },
@@ -70,7 +69,7 @@ ScanResult {
 - Stale scan watchdog: ZAP 24h timeout, WebCheck 6h timeout → fails entire scan
 
 ## Backend Route Files
-- `virustotalRoutes.js` - Normal scan orchestration (combined-analysis, active-scan polling, historical scan loading, PDF/JSON export)
+- `virustotalRoutes.js` - Normal scan orchestration (combined-analysis, active-scan polling, historical scan loading, PDF/JSON export). Filename is legacy — do NOT rename.
 - `zapAuthRoutes.js` - Authenticated scan orchestration (same pattern, different ZAP instance)
 - `webcheckRoutes.js` - Direct WebCheck API proxy
 - `zapRoutes.js` - Direct ZAP API proxy
@@ -86,14 +85,14 @@ ScanResult {
 
 ## Feature Parity Requirements
 Both Hero.jsx (normal scan) and AuthenticatedScanPanel.jsx (auth scan) MUST have identical feature sets:
-- 27 score cards (VT, PSI, Observatory, ZAP, WebCheck, urlscan, AI)
+- Score cards (PSI, Observatory, ZAP, WebCheck, urlscan, AI)
 - WebCheckDetails component (29 scan sections)
 - ZapReportEnhanced component
 - Screenshot preview
 - AI report with Japanese translation
 - PDF download (English/Japanese language selector)
 - JSON export
-- Observatory grade summary with VirusTotal engine table
+- Observatory grade summary
 
 ## Current Branch: `main`
 Recent work:
@@ -133,7 +132,7 @@ Recent work:
 - Scale adjusted based on contract status
 
 ### Features NOT YET Implemented (Goals)
-- [ ] **TASK 1**: VirusTotal API removal (clean codebase, remove from all 15+ files)
+- [x] **TASK 1**: VirusTotal API removal (completed — VT removed from all files, 6 scanners remain)
 - [ ] **TASK 2**: Multi-tenant account system (Company model, multiple accounts per company)
 - [ ] **TASK 3**: Severity-level gating (Light plan: only show Critical + High vulnerabilities)
 - [ ] **TASK 4**: Plan-based scan limits (scans per target per month, max targets per month)
@@ -146,4 +145,4 @@ Recent work:
 ### Existing Infrastructure (useful for plan features)
 - User model already has `accountType` ('free'/'pro'), `proExpiresAt`, `isPro()`, `getAccountLimits()`
 - Prototype upgrade/downgrade endpoints exist in `backend/routes/profile.js`
-- `virustotalRoutes.js` is the main scan orchestration file (NOT just VT) - handles ALL scan workflows
+- `virustotalRoutes.js` is the main scan orchestration file (filename is legacy) - handles ALL scan workflows

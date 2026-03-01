@@ -1,7 +1,7 @@
 {
   "name": "virustotal-scanner-backend",
   "version": "1.0.0",
-  "description": "Backend API for VirusTotal file and URL scanning",
+  "description": "Backend API for SSDT security scanning",
   "main": "server.js",
   "scripts": {
     "start": "node --max-http-header-size=81920 server.js",
@@ -9,8 +9,6 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
-    "virustotal",
-    "malware",
     "scanner",
     "security"
   ],
@@ -31,7 +29,6 @@
     "google-translate-api-x": "^10.7.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.1",
-    "multer": "^2.0.2",
     "nodemailer": "^7.0.10",
     "pdfkit": "^0.17.2",
     "puppeteer": "^23.0.0",

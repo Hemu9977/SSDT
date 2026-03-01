@@ -81,20 +81,20 @@ const OBSERVATORY_ENDPOINTS = [
 
 ### Before:
 ```
-VirusTotal ✅ → PageSpeed ✅ → Observatory ✅ → Gemini ❌
+PageSpeed ✅ → Observatory ✅ → Gemini ❌
 Result: ENTIRE SCAN FAILS ❌
 ```
 
 ### After:
 ```
-VirusTotal ✅ → PageSpeed ✅ → Observatory ✅ → Gemini ❌ (fallback message)
+PageSpeed ✅ → Observatory ✅ → Gemini ❌ (fallback message)
 Result: SCAN SUCCEEDS ✅ (with all data except AI analysis)
 ```
 
 ## Files Modified
 
 ### Backend:
-1. `backend/routes/virustotalRoutes.js`
+1. `backend/routes/virustotalRoutes.js` (legacy filename - main scan orchestration)
    - Added Gemini error handling with fallback
    - Enhanced Observatory logging
    - Improved Observatory data extraction
@@ -136,12 +136,12 @@ Result: SCAN SUCCEEDS ✅ (with all data except AI analysis)
 
 1. **Normal Scan (All services working):**
    ```
-   Expected: Full report with VT, PSI, Observatory, and AI analysis
+   Expected: Full report with PSI, Observatory, ZAP, WebCheck, urlscan, and AI analysis
    ```
 
 2. **Gemini API Overloaded:**
    ```
-   Expected: Full report with VT, PSI, Observatory
+   Expected: Full report with PSI, Observatory, ZAP, WebCheck, urlscan
    AI section shows: "AI analysis temporarily unavailable..."
    ```
 

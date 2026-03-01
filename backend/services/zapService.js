@@ -186,12 +186,12 @@ function createDualVersionAlerts(alerts) {
 }
 
 // ============================================================================
-// SIMPLIFIED ZAP SCAN (For virustotalRoutes integration - returns simple structure)
+// SIMPLIFIED ZAP SCAN (For scan orchestration routes - returns simple structure)
 // ============================================================================
 
 /**
  * Simplified ZAP scan that returns old structure for backward compatibility
- * This is called from virustotalRoutes.js during combined scan
+ * This is called from the scan orchestration routes during combined scan
  *
  * Returns: { site, riskCounts, alerts, totalAlerts, totalOccurrences, reportFiles }
  */
@@ -425,7 +425,7 @@ async function runZapScanWithUrlTracking(options) {
     // Step 8: Return data for MongoDB (compact version)
     return {
       scanId,
-      site: target, // For backward compatibility with virustotalRoutes
+      site: target, // For backward compatibility with scan orchestration routes
       target,
       alerts: summaryAlerts, // COMPACT VERSION for MongoDB
       riskCounts,

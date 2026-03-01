@@ -8,11 +8,12 @@ A comprehensive web security and performance analysis tool that scans URLs for m
 
 Scan any URL and get a complete analysis in one request:
 
-1. **VirusTotal** - Malware detection across 70+ security engines
-2. **PageSpeed Insights** - Performance, Accessibility, Best Practices, SEO scores
-3. **Mozilla Observatory** - Security configuration and headers analysis
-4. **OWASP ZAP** - Real-time Active Scanning (DAST) for vulnerabilities like SQL Injection, XSS, and more.
-5. **AI Analysis** - Gemini-powered comprehensive security & performance report
+1. **PageSpeed Insights** - Performance, Accessibility, Best Practices, SEO scores
+2. **Mozilla Observatory** - Security configuration and headers analysis
+3. **OWASP ZAP** - Real-time Active Scanning (DAST) for vulnerabilities like SQL Injection, XSS, and more.
+4. **WebCheck** - 29 sub-scans (SSL, DNS, headers, cookies, tech stack, ports, etc.)
+5. **urlscan.io** - Screenshot + page analysis
+6. **AI Analysis** - Gemini-powered comprehensive security & performance report
 
 ### User Authentication
 
@@ -41,10 +42,11 @@ Scan any URL and get a complete analysis in one request:
 - MongoDB (Mongoose)
 - Google Auth Library (OAuth 2.0)
 - **APIs:**
-  - VirusTotal API
   - Google PageSpeed Insights API
   - Mozilla Observatory API v2
   - OWASP ZAP API (Docker Container)
+  - WebCheck API (Docker Container)
+  - urlscan.io API
   - Google Gemini AI
   - Google Translate API
 
@@ -64,7 +66,7 @@ SSDT/
 │   ├── middleware/            # Auth, rate limiting
 │   ├── models/                # MongoDB schemas
 │   ├── routes/                # API endpoints (includes zapRoutes)
-│   ├── services/              # Logic (VT, PSI, ZAP, Gemini)
+│   ├── services/              # Logic (PSI, ZAP, WebCheck, Gemini)
 │   └── server.js              # Express server
 ├── frontend/
 │   ├── src/
@@ -156,10 +158,11 @@ SSDT/
 3. Enter a URL to scan (e.g., https://github.com)
 4. Wait 30-60 seconds for complete analysis
 5. View results:
-   - Security grade from VirusTotal
    - Performance scores (4 metrics)
    - Security configuration grade from Observatory
    - OWASP ZAP vulnerability findings
+   - WebCheck analysis (SSL, DNS, headers, tech stack, etc.)
+   - urlscan.io screenshot and page analysis
    - AI-generated comprehensive analysis
 
 ## API Endpoints
@@ -181,8 +184,8 @@ SSDT/
 
 ### Standard Scanning
 
-- `POST /api/vt/combined-url-scan` - Initiate combined scan (VT + PSI + Observatory)
-- `GET /api/vt/combined-analysis/:id` - Poll for scan results
+- `POST /api/vt/combined-url-scan` - Initiate combined scan (PSI + Observatory + ZAP + WebCheck + urlscan + AI) (legacy `/api/vt` prefix)
+- `GET /api/vt/combined-analysis/:id` - Poll for scan results (legacy `/api/vt` prefix)
 
 ### Translation
 
@@ -200,7 +203,6 @@ MONGO_URI=your_mongodb_connection_string
 JWT_SECRET=your_jwt_secret
 
 # APIs
-VT_API_KEY=your_virustotal_api_key
 PSI_API_KEY=your_pagespeed_api_key
 
 # Gemini API Keys (with fallback support)
@@ -251,7 +253,7 @@ To avoid rate limiting and "model overloaded" errors, you can configure multiple
 
 ## Rate Limiting & Security
 
-- **Combined Rate Limiter:** Respects external API limits (e.g., VirusTotal).
+- **Combined Rate Limiter:** Respects external API limits.
 - **ZAP Throttling:** Active scans are resource-intensive; backend queues ensure stability.
 - **Docker Isolation:** ZAP runs in a restricted container with regex-based API access control.
 - Auth endpoints: 10 requests per 15 minutes
