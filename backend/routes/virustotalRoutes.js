@@ -11,6 +11,7 @@ const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pd
 const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
+const { handleScanComplete } = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -813,6 +814,9 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           scan.refinedReport = aiReport;
           scan.status = 'completed';
 
+          // Trigger notification (email + UI popup)
+          handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
+
           console.log('✅ Gemini AI report generated with all scan data!');
           console.log(`   Included ZAP data: ${zapReport ? 'Yes' : 'No (scan not completed)'}`);
           console.log(`   Included WebCheck data: ${webCheckReport ? `Yes (${Object.keys(webCheckReport).length} scan types)` : 'No (fullResults missing)'}`);
@@ -833,6 +837,9 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           // Update local scan object for response
           scan.refinedReport = fallbackReport;
           scan.status = 'completed';
+
+          // Trigger notification (email + UI popup)
+          handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
         } finally {
           geminiInProgress.delete(id);
         }
@@ -858,6 +865,9 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
         scan.refinedReport = fallbackReport;
         scan.status = 'completed';
         console.log('✅ Scan marked as completed (without full AI report)');
+
+        // Trigger notification (email + UI popup)
+        handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
       }
     } else if (!zapIsDone || !webCheckIsDone) {
       // Still waiting for ZAP or WebCheck to finish

@@ -108,6 +108,21 @@ services:
     networks:
       - app-network
 
+  # Local MongoDB for development
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb-local
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  mongo-data:

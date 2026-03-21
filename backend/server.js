@@ -1,12 +1,14 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const connectDB = require('./db');
 const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimiter');
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
+const { initializeSocket } = require('./services/notificationService');
 
-// 👇 IMPORT ZAP ROUTES
+// IMPORT ZAP ROUTES
 const zapRoutes = require('./routes/zapRoutes');
 const zapAuthRoutes = require('./routes/zapAuthRoutes');
 const webCheckRoutes = require('./routes/webCheckRoutes');
@@ -102,9 +104,15 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+
+// Create HTTP server and attach Socket.IO
+const server = http.createServer(app);
+initializeSocket(server);
+
+server.listen(PORT, () => {
   console.log('\n=================================');
   console.log('🚀 Server started successfully!');
   console.log(`📡 Listening on port ${PORT}`);
+  console.log('🔌 Socket.IO notifications enabled');
   console.log('=================================\n');
 });

@@ -19,6 +19,7 @@ const {
 } = require('../services/zapAuthService');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
+const { handleScanComplete } = require('../services/notificationService');
 
 // Additional scanner services (same as normal scan)
 const { getPageSpeedReport } = require('../services/pagespeedService');
@@ -453,6 +454,8 @@ router.get('/status/:scanId', auth, async (req, res) => {
           scan.refinedReport = aiReport;
           scan.status = 'completed';
           console.log('[ZAP-AUTH] Gemini AI report generated!');
+          // Trigger notification (email + UI popup)
+          handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
         } catch (geminiError) {
           console.error('[ZAP-AUTH] Gemini report failed:', geminiError.message);
           const fallback = `AI analysis temporarily unavailable. Error: ${geminiError.message}`;
@@ -462,6 +465,8 @@ router.get('/status/:scanId', auth, async (req, res) => {
           );
           scan.refinedReport = fallback;
           scan.status = 'completed';
+          // Trigger notification even if AI report failed
+          handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
         } finally {
           geminiInProgress.delete(scanId);
         }
@@ -476,6 +481,8 @@ router.get('/status/:scanId', auth, async (req, res) => {
         );
         scan.refinedReport = fallback;
         scan.status = 'completed';
+        // Trigger notification for fallback completion
+        handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
       }
     }
 

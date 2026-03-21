@@ -9,6 +9,7 @@ const {
 } = require('../services/zapService');
 const gridfsService = require('../services/gridfsService');
 const ZapAlert = require('../models/ZapAlert');
+const { handleScanComplete } = require('../services/notificationService');
 
 /**
  * Enhanced ZAP Routes - Maximum Performance Scanner
@@ -97,6 +98,8 @@ router.post('/scan', auth, scanLimiter, async (req, res) => {
     // Don't wait for completion - return scan ID immediately
     scanPromise.then(result => {
       console.log(`✅ Scan completed for user ${req.user.id}: ${result.scanId}`);
+      // Trigger notification (email + UI popup)
+      handleScanComplete(result.scanId || scanId, req.user.id, 'Public Scan', url);
     }).catch(error => {
       console.error(`❌ Scan failed for user ${req.user.id}:`, error.message);
     });
