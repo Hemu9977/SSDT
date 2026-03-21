@@ -55,89 +55,89 @@ async function refineReport(_unused, psiReport, observatoryReport, url, zapRepor
       await new Promise(resolve => setTimeout(resolve, delay));
     }
 
-  // Try each API key until one succeeds
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
+    // Try each API key until one succeeds
+    for (let i = 0; i < apiKeys.length; i++) {
+      const apiKey = apiKeys[i];
+      const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
 
-    try {
-      console.log(`🔑 Attempting Gemini API with ${keyLabel} key (${i + 1}/${apiKeys.length})...`);
+      try {
+        console.log(`🔑 Attempting Gemini API with ${keyLabel} key (${i + 1}/${apiKeys.length})...`);
 
-      // Initialize Gemini AI with current API key
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+        // Initialize Gemini AI with current API key
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
-      // Extract PageSpeed scores
-      const lighthouseResult = psiReport?.lighthouseResult || {};
-      const categories = lighthouseResult.categories || {};
-      const performanceScore = categories.performance?.score ? Math.round(categories.performance.score * 100) : 'N/A';
-      const accessibilityScore = categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : 'N/A';
-      const bestPracticesScore = categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : 'N/A';
-      const seoScore = categories.seo?.score ? Math.round(categories.seo.score * 100) : 'N/A';
+        // Extract PageSpeed scores
+        const lighthouseResult = psiReport?.lighthouseResult || {};
+        const categories = lighthouseResult.categories || {};
+        const performanceScore = categories.performance?.score ? Math.round(categories.performance.score * 100) : 'N/A';
+        const accessibilityScore = categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : 'N/A';
+        const bestPracticesScore = categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : 'N/A';
+        const seoScore = categories.seo?.score ? Math.round(categories.seo.score * 100) : 'N/A';
 
-      // Extract Observatory data
-      const observatoryGrade = observatoryReport?.grade || 'N/A';
-      const observatoryScore = observatoryReport?.score || 'N/A';
-      const observatoryTestsPassed = observatoryReport?.tests_passed || 0;
-      const observatoryTestsFailed = observatoryReport?.tests_failed || 0;
-      const observatoryTestsTotal = observatoryReport?.tests_quantity || 0;
-      const hasObservatoryData = observatoryReport && !observatoryReport.error;
+        // Extract Observatory data
+        const observatoryGrade = observatoryReport?.grade || 'N/A';
+        const observatoryScore = observatoryReport?.score || 'N/A';
+        const observatoryTestsPassed = observatoryReport?.tests_passed || 0;
+        const observatoryTestsFailed = observatoryReport?.tests_failed || 0;
+        const observatoryTestsTotal = observatoryReport?.tests_quantity || 0;
+        const hasObservatoryData = observatoryReport && !observatoryReport.error;
 
-      // Extract ZAP data
-      const hasZapData = zapReport && !zapReport.error && zapReport.alerts;
-      const zapRiskCounts = zapReport?.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 };
-      const zapAlertCount = zapReport?.alerts?.length || 0;
-      const zapHighRisk = zapReport?.alerts?.filter(a => a.risk === 'High') || [];
-      const zapMediumRisk = zapReport?.alerts?.filter(a => a.risk === 'Medium') || [];
+        // Extract ZAP data
+        const hasZapData = zapReport && !zapReport.error && zapReport.alerts;
+        const zapRiskCounts = zapReport?.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 };
+        const zapAlertCount = zapReport?.alerts?.length || 0;
+        const zapHighRisk = zapReport?.alerts?.filter(a => a.risk === 'High') || [];
+        const zapMediumRisk = zapReport?.alerts?.filter(a => a.risk === 'Medium') || [];
 
-      // Extract urlscan data
-      const hasUrlscanData = urlscanReport && !urlscanReport.error && urlscanReport.verdicts;
-      const urlscanVerdicts = urlscanReport?.verdicts || {};
-      const urlscanPage = urlscanReport?.page || {};
-      const urlscanStats = urlscanReport?.stats || {};
-      const urlscanIsMalicious = urlscanVerdicts?.overall?.malicious || false;
-      const urlscanScore = urlscanVerdicts?.overall?.score || 0;
+        // Extract urlscan data
+        const hasUrlscanData = urlscanReport && !urlscanReport.error && urlscanReport.verdicts;
+        const urlscanVerdicts = urlscanReport?.verdicts || {};
+        const urlscanPage = urlscanReport?.page || {};
+        const urlscanStats = urlscanReport?.stats || {};
+        const urlscanIsMalicious = urlscanVerdicts?.overall?.malicious || false;
+        const urlscanScore = urlscanVerdicts?.overall?.score || 0;
 
-      // Extract WebCheck data
-      const hasWebCheckData = webCheckReport && Object.keys(webCheckReport).length > 0;
-      const webCheckHeaders = webCheckReport?.headers || {};
-      const webCheckTls = webCheckReport?.tls || webCheckReport?.ssl || {};
-      const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
-      const webCheckFirewall = webCheckReport?.firewall || {};
-      const webCheckDns = webCheckReport?.dns || {};
-      const webCheckHsts = webCheckReport?.hsts || {};
-      const webCheckSecurityTxt = webCheckReport?.['security-txt'] || {};
-      const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
-      const webCheckCookies = webCheckReport?.cookies || {};
-      const webCheckCarbon = webCheckReport?.carbon || {};
-      const webCheckQuality = webCheckReport?.quality || {};
+        // Extract WebCheck data
+        const hasWebCheckData = webCheckReport && Object.keys(webCheckReport).length > 0;
+        const webCheckHeaders = webCheckReport?.headers || {};
+        const webCheckTls = webCheckReport?.tls || webCheckReport?.ssl || {};
+        const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
+        const webCheckFirewall = webCheckReport?.firewall || {};
+        const webCheckDns = webCheckReport?.dns || {};
+        const webCheckHsts = webCheckReport?.hsts || {};
+        const webCheckSecurityTxt = webCheckReport?.['security-txt'] || {};
+        const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
+        const webCheckCookies = webCheckReport?.cookies || {};
+        const webCheckCarbon = webCheckReport?.carbon || {};
+        const webCheckQuality = webCheckReport?.quality || {};
 
-      // Build the prompt for Gemini
-      const prompt = `You are a cybersecurity and web performance expert. Analyze the following reports for the URL: ${url}
+        // Build the prompt for Gemini
+        const prompt = `You are a cybersecurity and web performance expert. Analyze the following reports for the URL: ${url}
 
-PageSpeed Insights Performance Report:
+Performance Analysis Report:
 - Performance Score: ${performanceScore}/100
 - Accessibility Score: ${accessibilityScore}/100
 - Best Practices Score: ${bestPracticesScore}/100
 - SEO Score: ${seoScore}/100
 
-${hasObservatoryData ? `Mozilla Observatory Security Configuration Report:
+${hasObservatoryData ? `Security Configuration Analysis:
 - Security Grade: ${observatoryGrade}
 - Security Score: ${observatoryScore}/100
 - Tests Passed: ${observatoryTestsPassed}
 - Tests Failed: ${observatoryTestsFailed}
-- Total Tests: ${observatoryTestsTotal}` : 'Mozilla Observatory: Not available for this scan'}
+- Total Tests: ${observatoryTestsTotal}` : 'Security Configuration Analysis: Not available for this scan'}
 
-${hasZapData ? `OWASP ZAP Vulnerability Scan Report:
+${hasZapData ? `Vulnerability Scan Report:
 - Total Alerts: ${zapAlertCount}
 - High Risk Vulnerabilities: ${zapRiskCounts.High}
 - Medium Risk Vulnerabilities: ${zapRiskCounts.Medium}
 - Low Risk Vulnerabilities: ${zapRiskCounts.Low}
 - Informational: ${zapRiskCounts.Informational}
 ${zapHighRisk.length > 0 ? `- High Risk Issues: ${zapHighRisk.slice(0, 5).map(a => a.alert).join(', ')}` : ''}
-${zapMediumRisk.length > 0 ? `- Medium Risk Issues: ${zapMediumRisk.slice(0, 5).map(a => a.alert).join(', ')}` : ''}` : 'OWASP ZAP: Scan not available or still in progress'}
+${zapMediumRisk.length > 0 ? `- Medium Risk Issues: ${zapMediumRisk.slice(0, 5).map(a => a.alert).join(', ')}` : ''}` : 'Vulnerability Scan: Not available or still in progress'}
 
-${hasUrlscanData ? `urlscan.io Website Analysis Report:
+${hasUrlscanData ? `Threat & Reputation Analysis:
 - Malicious Verdict: ${urlscanIsMalicious ? 'YES - MALICIOUS' : 'No - Clean'}
 - Threat Score: ${urlscanScore}/100
 - Domain: ${urlscanPage.domain || 'N/A'}
@@ -146,9 +146,9 @@ ${hasUrlscanData ? `urlscan.io Website Analysis Report:
 - Server: ${urlscanPage.server || 'N/A'}
 - TLS Issuer: ${urlscanPage.tlsIssuer || 'N/A'}
 - Unique IPs: ${urlscanStats.uniqIPs || 0}
-- Total Requests: ${urlscanStats.requests || 0}` : 'urlscan.io: Scan not available or still in progress'}
+- Total Requests: ${urlscanStats.requests || 0}` : 'Threat & Reputation Analysis: Not available or still in progress'}
 
-${hasWebCheckData ? `WebCheck Comprehensive Scan Report:
+${hasWebCheckData ? `Web Security Configuration Report:
 - Security Headers: ${JSON.stringify(webCheckHeaders?.headers || webCheckHeaders || 'N/A')}
 - TLS/SSL Configuration: ${webCheckTls?.grade || webCheckTls?.valid ? `Grade: ${webCheckTls.grade || 'Valid'}, Protocol: ${webCheckTls.protocol || 'N/A'}, Cipher: ${webCheckTls.cipher || 'N/A'}` : 'N/A'}
 - Technology Stack: ${Array.isArray(webCheckTechStack?.technologies) ? webCheckTechStack.technologies.map(t => t.name || t).join(', ') : 'N/A'}
@@ -159,7 +159,7 @@ ${hasWebCheckData ? `WebCheck Comprehensive Scan Report:
 - Robots.txt: ${webCheckRobotsTxt?.present ? 'Present' : 'Not found'}
 - Cookies: ${Array.isArray(webCheckCookies) ? `${webCheckCookies.length} cookies found` : 'N/A'}
 - Carbon Footprint: ${webCheckCarbon?.co2 ? `${webCheckCarbon.co2}g CO2 per visit` : 'N/A'}
-- Code Quality Score: ${webCheckQuality?.score || 'N/A'}` : 'WebCheck: Scan not available or still in progress'}
+- Code Quality Score: ${webCheckQuality?.score || 'N/A'}` : 'Web Security Configuration: Not available or still in progress'}
 
 Task:
 Generate a comprehensive, professional analysis report that includes:
@@ -167,15 +167,15 @@ Generate a comprehensive, professional analysis report that includes:
 1. Executive Summary (2-3 sentences): Overall assessment of the URL's security and performance.
 
 2. Security Analysis:
-   - Risk level (Low/Medium/High) based on OWASP ZAP and urlscan.io results
-   - Mozilla Observatory security grade and configuration assessment (if available)
-   - OWASP ZAP vulnerability findings and their severity (if available)
-   - urlscan.io website analysis and threat detection (if available)
-   - WebCheck findings: security headers, TLS/SSL grade, WAF detection, HSTS status (if available)
+   - Risk level (Low/Medium/High) based on vulnerability scan and threat analysis results
+   - Security configuration grade and assessment (if available)
+   - Vulnerability findings and their severity (if available)
+   - Threat detection and reputation analysis (if available)
+   - Security headers, TLS/SSL grade, WAF detection, HSTS status (if available)
    - Key security findings and threats detected (if any)
    - Specific concerns or red flags from all scan sources
 
-3. Infrastructure Analysis (from WebCheck if available):
+3. Infrastructure Analysis (if available):
    - Technology stack and frameworks detected
    - DNS configuration assessment
    - Cookie security analysis
@@ -187,12 +187,12 @@ Generate a comprehensive, professional analysis report that includes:
    - Accessibility and SEO considerations
    - Environmental impact (carbon footprint if available)
 
-5. Actionable Recommendations:
-   - Security improvements (if needed) - include malware protection, security headers/configurations, ZAP vulnerability fixes, TLS improvements, and HSTS implementation
+5. Conclusion: Final verdict on whether the URL is safe to use and performs well.
+
+6. Actionable Recommendations:
+   - Security improvements (if needed) - include malware protection, security header configuration, vulnerability remediation, TLS improvements, and HSTS implementation
    - Performance optimizations
    - Best practices to implement
-
-6. Conclusion: Final verdict on whether the URL is safe to use and performs well.
 
 IMPORTANT FORMATTING INSTRUCTIONS:
 - Use simple text formatting with headers (use # for headers) and bullet points (use - for lists)
@@ -200,64 +200,65 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - DO NOT wrap the entire response in markdown code blocks (do not use triple backticks)
 - Keep the report concise, professional, and actionable
 - Focus on practical insights rather than raw data
-- Ensure ALL scores (Performance, Accessibility, Best Practices, SEO, Observatory Grade, ZAP vulnerabilities, and WebCheck findings if available) are mentioned in the analysis`;
+- Do NOT mention the names of any specific third-party tools or services used to collect the data
+- Ensure ALL scores (Performance, Accessibility, Best Practices, SEO, Security Grade, vulnerability counts, and web security configuration findings if available) are mentioned in the analysis`;
 
-      // Generate the refined report
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const refinedReport = response.text();
+        // Generate the refined report
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const refinedReport = response.text();
 
-      console.log(`✅ Successfully generated report using ${keyLabel} key`);
-      return refinedReport;
+        console.log(`✅ Successfully generated report using ${keyLabel} key`);
+        return refinedReport;
 
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed:`, error.message);
+      } catch (error) {
+        lastError = error;
+        console.error(`❌ ${keyLabel} key failed:`, error.message);
 
-      // Check if it's a rate limit or overload error
-      const isRateLimitError = error.message?.includes('overloaded') ||
-        error.message?.includes('503') ||
-        error.message?.includes('quota') ||
-        error.message?.includes('rate limit');
+        // Check if it's a rate limit or overload error
+        const isRateLimitError = error.message?.includes('overloaded') ||
+          error.message?.includes('503') ||
+          error.message?.includes('quota') ||
+          error.message?.includes('rate limit');
 
-      const isAuthError = error.message?.includes('API key') ||
-        error.message?.includes('401') ||
-        error.message?.includes('403');
+        const isAuthError = error.message?.includes('API key') ||
+          error.message?.includes('401') ||
+          error.message?.includes('403');
 
-      if (isAuthError) {
-        console.warn(`⚠️  ${keyLabel} key has authentication issues, skipping to next key...`);
-      } else if (isRateLimitError) {
-        console.warn(`⚠️  ${keyLabel} key is rate limited or overloaded, trying next key...`);
-      } else {
-        console.warn(`⚠️  ${keyLabel} key encountered error, trying next key...`);
+        if (isAuthError) {
+          console.warn(`⚠️  ${keyLabel} key has authentication issues, skipping to next key...`);
+        } else if (isRateLimitError) {
+          console.warn(`⚠️  ${keyLabel} key is rate limited or overloaded, trying next key...`);
+        } else {
+          console.warn(`⚠️  ${keyLabel} key encountered error, trying next key...`);
+        }
+
+        // If this is the last key, throw the error
+        if (i === apiKeys.length - 1) {
+          console.error('❌ All Gemini API keys failed');
+          break;
+        }
+
+        // Wait a bit before trying the next key (500ms)
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
-
-      // If this is the last key, throw the error
-      if (i === apiKeys.length - 1) {
-        console.error('❌ All Gemini API keys failed');
-        break;
-      }
-
-      // Wait a bit before trying the next key (500ms)
-      await new Promise(resolve => setTimeout(resolve, 500));
     }
-  }
 
-  // All keys failed this round - check if it's a network error worth retrying
-  const isNetworkError = lastError?.message?.includes('fetch failed') ||
-    lastError?.message?.includes('ECONNREFUSED') ||
-    lastError?.message?.includes('ETIMEDOUT') ||
-    lastError?.message?.includes('ENOTFOUND') ||
-    lastError?.message?.includes('network');
-  const isAuthError = lastError?.message?.includes('API key') ||
-    lastError?.message?.includes('401') || lastError?.message?.includes('403');
+    // All keys failed this round - check if it's a network error worth retrying
+    const isNetworkError = lastError?.message?.includes('fetch failed') ||
+      lastError?.message?.includes('ECONNREFUSED') ||
+      lastError?.message?.includes('ETIMEDOUT') ||
+      lastError?.message?.includes('ENOTFOUND') ||
+      lastError?.message?.includes('network');
+    const isAuthError = lastError?.message?.includes('API key') ||
+      lastError?.message?.includes('401') || lastError?.message?.includes('403');
 
-  if (isNetworkError && !isAuthError && networkRetry < MAX_NETWORK_RETRIES - 1) {
-    console.warn(`⚠️ All keys failed with network error, will retry...`);
-    continue; // retry the outer loop
-  }
+    if (isNetworkError && !isAuthError && networkRetry < MAX_NETWORK_RETRIES - 1) {
+      console.warn(`⚠️ All keys failed with network error, will retry...`);
+      continue; // retry the outer loop
+    }
 
-  break; // non-network error or last retry, stop
+    break; // non-network error or last retry, stop
   } // end of networkRetry loop
 
   // All API keys and retries failed, throw the last error
@@ -468,7 +469,7 @@ Return a JSON object with this EXACT structure:
   "sections": [
     {
       "id": "pagespeed",
-      "title": { "en": "PageSpeed Insights", "ja": "Japanese translation" },
+      "title": { "en": "Performance & Accessibility Analysis", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Performance", "ja": "Japanese" }, "value": "${performanceScore}/100", "type": "score" },
         { "label": { "en": "Accessibility", "ja": "Japanese" }, "value": "${accessibilityScore}/100", "type": "score" },
@@ -478,7 +479,7 @@ Return a JSON object with this EXACT structure:
     },
     {
       "id": "observatory",
-      "title": { "en": "Mozilla Observatory", "ja": "Japanese translation" },
+      "title": { "en": "Security Configuration Assessment", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Security Grade", "ja": "Japanese" }, "value": "${obs.grade || 'N/A'}", "type": "grade" },
         { "label": { "en": "Score", "ja": "Japanese" }, "value": "${obs.score || 0}/100", "type": "score" },
@@ -488,7 +489,7 @@ Return a JSON object with this EXACT structure:
     },
     {
       "id": "zap",
-      "title": { "en": "OWASP ZAP Vulnerability Scan", "ja": "Japanese translation" },
+      "title": { "en": "Vulnerability Scan Results", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Total Alerts", "ja": "Japanese" }, "value": "${zap.totalAlerts || 0}", "type": "stat" },
         { "label": { "en": "High Risk", "ja": "Japanese" }, "value": "${zap.riskCounts?.High || 0}", "type": "danger" },
@@ -511,7 +512,7 @@ Return a JSON object with this EXACT structure:
     },
     {
       "id": "urlscan",
-      "title": { "en": "urlscan.io Analysis", "ja": "Japanese translation" },
+      "title": { "en": "Threat & Reputation Analysis", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Verdict", "ja": "Japanese" }, "value": { "en": "${urlscan.verdicts?.overall?.malicious ? 'MALICIOUS' : 'Clean'}", "ja": "Japanese" }, "type": "${urlscan.verdicts?.overall?.malicious ? 'danger' : 'success'}" },
         { "label": { "en": "Threat Score", "ja": "Japanese" }, "value": "${urlscan.verdicts?.overall?.score || 0}/100", "type": "score" },
@@ -523,7 +524,7 @@ Return a JSON object with this EXACT structure:
     },
     {
       "id": "webcheck",
-      "title": { "en": "WebCheck Analysis", "ja": "Japanese translation" },
+      "title": { "en": "Web Security Configuration", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "TLS Grade", "ja": "Japanese" }, "value": "${webCheck.tls?.tlsInfo?.grade || webCheck.ssl?.grade || 'N/A'}", "type": "grade" },
         { "label": { "en": "WAF Detected", "ja": "Japanese" }, "value": { "en": "${webCheck.firewall?.hasWaf ? 'Yes' : 'No'}", "ja": "Japanese" }, "type": "${webCheck.firewall?.hasWaf ? 'success' : 'warning'}" },
@@ -769,6 +770,7 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 4. NEVER repeat the same content in multiple sections
 5. NEVER overlap or mix content between sections
 6. Complete one entire section before starting the next
+7. Do NOT include an "Executive Summary" section - it is rendered separately in the PDF
 
 **COMPLETE CONTENT BLOCKS - CRITICAL:**
 7. Every paragraph MUST be a complete thought with full sentences
@@ -778,9 +780,9 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 11. ALL paragraphs must be self-contained and readable on their own
 
 **PROPER STRUCTURE:**
-12. Use "paragraph" type for flowing text (2-5 complete sentences per paragraph)
+12. Use "paragraph" type for flowing text (2-3 complete sentences per paragraph, split longer ones into separate blocks)
 13. Use "bullets" type for lists (3-8 complete items per bullet block)
-14. Use "bold_text" type ONLY for key-value pairs - MUST have BOTH "label" AND "text" fields:
+14. Use "bold_text" type ONLY for key-value metrics - MUST have BOTH "label" AND "text" fields:
     - CORRECT: { "type": "bold_text", "label": "Risk Level:", "text": "HIGH" }
     - WRONG: { "type": "bold_text" } or { "type": "bold_text", "label": "Risk:" }
 15. Each section must have at least one complete content block

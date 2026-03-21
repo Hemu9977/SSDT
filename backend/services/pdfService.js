@@ -200,18 +200,18 @@ function renderReport(doc, scanData, aiAnalysis, vulnerabilities, lang) {
     // Header
     renderHeader(doc, scanData, lang);
 
-    // Executive Summary
+    // Overall Risk Level
     renderSummary(doc, scanData, lang);
 
-    // Scan Data Sections
-    renderScanSections(doc, scanData, lang);
-
-    // AI Analysis
+    // AI Analysis Results
     if (aiAnalysis) {
-        renderAiAnalysis(doc, aiAnalysis, isJapanese);
+        renderAiAnalysis(doc, aiAnalysis, isJapanese, scanData.header?.target);
     }
 
-    // Detailed Vulnerabilities
+    // Details of Each Scan Result
+    renderScanSections(doc, scanData, lang);
+
+    // Vulnerability Details & Remediation
     if (vulnerabilities && vulnerabilities.length > 0) {
         renderDetailedVulnerabilities(doc, vulnerabilities, lang);
     }
@@ -304,25 +304,46 @@ function renderScanSections(doc, scanData, lang) {
             renderItem(doc, item, lang);
         }
 
-        // Render alerts if present (for ZAP section)
+        // Fix 8: Render alerts grouped by risk level
         if (section.alerts && section.alerts.length > 0) {
             doc.moveDown(0.3);
             doc.font('NotoSans-Bold')
                 .fontSize(10)
                 .fillColor(COLORS.text)
-                .text(lang === 'ja' ? '検出された脆弱性:' : 'Top Vulnerabilities:');
+                .text(lang === 'ja' ? '検出された脆弱性:' : 'Detected Vulnerabilities:');
+            doc.moveDown(0.2);
 
-            for (let i = 0; i < section.alerts.length; i++) {
-                const alert = section.alerts[i];
-                const riskColor = getRiskColor(alert.risk);
-                doc.font('NotoSans')
+            // Group alerts by risk level
+            const riskGroups = {};
+            for (const alert of section.alerts) {
+                const risk = alert.risk || 'Unknown';
+                if (!riskGroups[risk]) riskGroups[risk] = [];
+                riskGroups[risk].push(alert);
+            }
+
+            const riskOrder = ['High', 'Medium', 'Low', 'Informational'];
+            for (const risk of riskOrder) {
+                if (!riskGroups[risk] || riskGroups[risk].length === 0) continue;
+                const riskColor = getRiskColor(risk);
+                doc.font('NotoSans-Bold')
                     .fontSize(9)
                     .fillColor(riskColor)
-                    .text(`  ${i + 1}. [${alert.risk}] ${alert.alert}`, { width: 480 });
+                    .text(lang === 'ja'
+                        ? `${risk}リスクの脆弱性 (${riskGroups[risk].length}):`
+                        : `${risk} Risk Vulnerabilities (${riskGroups[risk].length}):`);
+
+                for (const alert of riskGroups[risk]) {
+                    doc.font('NotoSans')
+                        .fontSize(9)
+                        .fillColor(COLORS.text)
+                        .text(`\u2022  ${alert.alert}`, { width: 475, indent: 10 });
+                }
+                doc.moveDown(0.2);
             }
         }
 
-        doc.moveDown(0.5);
+        // Fix 5: More spacing between scan sections
+        doc.moveDown(0.7);
     }
 }
 
@@ -340,11 +361,11 @@ function renderItem(doc, item, lang) {
 
     const typeColor = getTypeColor(item.type);
 
-    // Bullet point
+    // Fix 4: Consistent bullet indentation (no extra leading spaces)
     doc.font('NotoSans')
         .fontSize(10)
         .fillColor(COLORS.textLight)
-        .text('  \u2022 ', { continued: true })
+        .text('\u2022  ', { continued: true })
         .font('NotoSans-Bold')
         .fillColor(COLORS.text)
         .text(`${label}: `, { continued: true })
@@ -356,30 +377,44 @@ function renderItem(doc, item, lang) {
 /**
  * Render AI analysis section
  */
-function renderAiAnalysis(doc, analysis, isJapanese) {
+function renderAiAnalysis(doc, analysis, isJapanese, targetUrl) {
     // Check if we need a new page
     if (doc.y > 500) {
         doc.addPage();
     }
 
+    // Fix 1 & 9: Render as proper H2 heading with target URL below
     const title = analysis.title || (isJapanese ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis');
     addSectionHeader(doc, title);
+
+    if (targetUrl) {
+        doc.font('NotoSans')
+            .fontSize(10)
+            .fillColor(COLORS.text)
+            .text(`${isJapanese ? '対象URL' : 'Target URL'}: ${targetUrl}`);
+        doc.moveDown(0.3);
+    }
 
     if (!analysis.sections) return;
 
     for (const section of analysis.sections) {
+        // Fix 2: Skip duplicate Executive Summary (already rendered by renderSummary)
+        if (section.heading && section.heading.toLowerCase().includes('executive summary')) {
+            continue;
+        }
+
         // Check for page break
         if (doc.y > 680) {
             doc.addPage();
         }
 
-        // Section heading
+        // Fix 9: H3 sub-heading (11pt bold)
         if (section.heading) {
             doc.font('NotoSans-Bold')
                 .fontSize(11)
                 .fillColor(COLORS.primary)
                 .text(section.heading);
-            doc.moveDown(0.2);
+            doc.moveDown(0.3);
         }
 
         // Render content
@@ -389,7 +424,8 @@ function renderAiAnalysis(doc, analysis, isJapanese) {
             }
         }
 
-        doc.moveDown(0.3);
+        // Fix 5: More spacing between subsections
+        doc.moveDown(0.5);
     }
 }
 
@@ -441,24 +477,44 @@ function renderContentBlock(doc, block) {
         case 'paragraph':
             doc.fontSize(10)
                 .fillColor(COLORS.text);
-            renderTextWithBold(doc, block.text, { width: 495, align: 'left', lineGap: 2 });
-            doc.moveDown(0.2);
+            // Fix 3: Better lineGap for readability; Fix 7: Split long paragraphs
+            if (block.text && block.text.length > 350) {
+                const sentences = block.text.match(/[^.!?。！？]+[.!?。！？]+\s*/g) || [block.text];
+                if (sentences.length >= 4) {
+                    const mid = Math.ceil(sentences.length / 2);
+                    const part1 = sentences.slice(0, mid).join('').trim();
+                    const part2 = sentences.slice(mid).join('').trim();
+                    if (part1) {
+                        renderTextWithBold(doc, part1, { width: 495, align: 'left', lineGap: 3 });
+                        doc.moveDown(0.3);
+                    }
+                    if (part2) {
+                        renderTextWithBold(doc, part2, { width: 495, align: 'left', lineGap: 3 });
+                    }
+                } else {
+                    renderTextWithBold(doc, block.text, { width: 495, align: 'left', lineGap: 3 });
+                }
+            } else {
+                renderTextWithBold(doc, block.text, { width: 495, align: 'left', lineGap: 3 });
+            }
+            doc.moveDown(0.3);
             break;
 
         case 'bullets':
             if (block.items && Array.isArray(block.items)) {
                 for (const item of block.items) {
+                    if (doc.y > 700) doc.addPage();
+                    // Fix 4: Consistent bullet indentation
                     doc.fontSize(10)
                         .fillColor(COLORS.text);
-                    // Render bullet with bold support
-                    const bulletText = `  \u2022 ${item}`;
-                    renderTextWithBold(doc, bulletText, { width: 485 });
+                    renderTextWithBold(doc, `\u2022  ${item}`, { width: 480, indent: 10 });
                 }
             }
-            doc.moveDown(0.2);
+            doc.moveDown(0.3);
             break;
 
         case 'bold_text':
+            // Fix 6: Consistent metric formatting as key-value pairs
             doc.font('NotoSans-Bold')
                 .fontSize(10)
                 .fillColor(COLORS.text)
@@ -474,8 +530,8 @@ function renderContentBlock(doc, block) {
             if (block.text) {
                 doc.fontSize(10)
                     .fillColor(COLORS.text);
-                renderTextWithBold(doc, block.text, { width: 495 });
-                doc.moveDown(0.2);
+                renderTextWithBold(doc, block.text, { width: 495, lineGap: 3 });
+                doc.moveDown(0.3);
             }
     }
 }
@@ -605,19 +661,20 @@ function renderDetailedVulnerabilities(doc, vulnerabilities, lang) {
  * Add a section header
  */
 function addSectionHeader(doc, title) {
-    doc.moveDown(0.3);
+    // Fix 5: More spacing before section headers
+    doc.moveDown(0.6);
 
-    // Background box
+    // Fix 9: H2 heading - larger font with taller background box
     const startY = doc.y;
-    doc.rect(50, startY, 495, 22)
+    doc.rect(50, startY, 495, 26)
         .fill(COLORS.background);
 
     doc.font('NotoSans-Bold')
-        .fontSize(12)
+        .fontSize(14)
         .fillColor(COLORS.primary)
         .text(title, 55, startY + 5);
 
-    doc.y = startY + 28;
+    doc.y = startY + 32;
 }
 
 /**
@@ -639,7 +696,9 @@ function addFooters(doc) {
         const pageWidth = doc.page.width;
         const footerY = doc.page.height - 30;
 
-        const footerText = `Page ${i + 1} of ${pageCount} | SSDT Security Scanner | Generated ${new Date().toLocaleDateString()}`;
+        // Fix 10: Better date format (DD Mon YYYY)
+        const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+        const footerText = `Page ${i + 1} of ${pageCount} | SSDT Security Scanner | Generated: ${dateStr}`;
 
         // Set font before measuring text width
         doc.font('NotoSans').fontSize(8);
@@ -940,7 +999,7 @@ async function generateZapPdf(scanResult, lang = 'en') {
             doc.font('NotoSans-Bold')
                 .fontSize(24)
                 .fillColor(COLORS.primary)
-                .text(isJapanese ? 'OWASP ZAP 脆弱性レポート' : 'OWASP ZAP Vulnerability Report', { align: 'center' });
+                .text(isJapanese ? '脆弱性スキャンレポート' : 'Vulnerability Scan Report', { align: 'center' });
 
             doc.moveDown(0.3);
 

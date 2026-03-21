@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { GridFSBucket } = require('mongodb');
+const { GridFSBucket } = mongoose.mongo; // Use mongoose's bundled mongodb to avoid BSON version mismatch
 const stream = require('stream');
 
 class GridFSService {
