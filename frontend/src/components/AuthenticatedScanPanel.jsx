@@ -661,7 +661,7 @@ const AuthenticatedScanPanel = () => {
                 placeholder="https://example.com"
                 className="url-input"
               />
-              <span className="help-text">The main URL you want to scan for vulnerabilities</span>
+              <span className="help-text">The main URL you want to analyze for vulnerabilities</span>
             </div>
 
             <div className="form-group">
@@ -674,7 +674,7 @@ const AuthenticatedScanPanel = () => {
                 placeholder="https://example.com/login"
                 className="url-input"
               />
-              <span className="help-text">The URL of the login page (can be the same as target URL)</span>
+              <span className="help-text">The URL of the login page (can be the same as your target)</span>
             </div>
 
             <div className="step-actions">
@@ -684,7 +684,7 @@ const AuthenticatedScanPanel = () => {
                 disabled={!targetUrl || !loginUrl || detecting}
               >
                 {detecting && <span className="spinner" />}
-                <span>{detecting ? 'Detecting Fields...' : 'Detect Login Fields'}</span>
+                <span>{detecting ? 'Analyzing...' : 'Detect Login Interface'}</span>
               </button>
             </div>
 
@@ -1176,7 +1176,7 @@ const AuthenticatedScanPanel = () => {
                       ) : webCheckReport?.quality && !webCheckReport.quality.error ? (
                         (() => {
                           const perfScore = Math.round((webCheckReport.quality.lighthouseResult?.categories?.performance?.score || 0) * 100);
-                          return (<><span className={`score-card__value score-card__value--${perfScore >= 90 ? 'safe' : perfScore >= 50 ? 'medium' : 'high'}`}>{perfScore}</span><p className="score-card__label">Lighthouse Score</p></>);
+                          return (<><span className={`score-card__value score-card__value--${perfScore >= 90 ? 'safe' : perfScore >= 50 ? 'medium' : 'high'}`}>{perfScore}</span><p className="score-card__label">Optimization Score</p></>);
                         })()
                       ) : (
                         <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
@@ -1234,7 +1234,7 @@ const AuthenticatedScanPanel = () => {
 
                     {/* Block Lists (WebCheck) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">Block Lists</h4>
+                      <h4 className="score-card__title">Security Blacklist</h4>
                       {webCheckLoading ? (
                         <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
                       ) : webCheckReport?.['block-lists'] && !webCheckReport['block-lists'].error ? (
@@ -1271,7 +1271,7 @@ const AuthenticatedScanPanel = () => {
                       ) : webCheckReport?.archives?.skipped ? (
                         <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Not Archived</div>
                       ) : webCheckReport?.archives?.totalScans ? (
-                        <><span className="score-card__value score-card__value--safe">{webCheckReport.archives.totalScans}</span><p className="score-card__label">Wayback Snapshots</p></>
+                        <><span className="score-card__value score-card__value--safe">{webCheckReport.archives.totalScans}</span><p className="score-card__label">Historical Snapshots</p></>
                       ) : webCheckReport?.archives?.error ? (
                         <div className="score-card__label" style={{ color: '#ffb900', marginTop: '10px' }}>Timeout</div>
                       ) : (

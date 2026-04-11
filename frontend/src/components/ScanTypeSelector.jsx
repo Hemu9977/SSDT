@@ -46,29 +46,29 @@ const ScanTypeSelector = () => {
             </div>
             <h2 className="card-title">Public Website Scan</h2>
             <p className="card-description">
-              Comprehensive security analysis for publicly accessible websites. Includes OWASP ZAP scanning,
-              performance analysis, SEO checks, and vulnerability detection.
+              Comprehensive security analysis for publicly accessible websites. Includes deep vulnerability scanning,
+              performance optimization checks, and security metadata analysis.
             </p>
             <ul className="card-features">
               <li>
                 <span className="feature-icon">✓</span>
-                <span>OWASP ZAP Security Scan</span>
+                <span>Comprehensive Vulnerability Scan</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Performance Analysis (PSI)</span>
+                <span>Site Performance Analysis</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>HTTP Observatory</span>
+                <span>Security Header Analysis</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>WebCheck Analysis</span>
+                <span>Website Health Check</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>No Authentication Required</span>
+                <span>No Login Required</span>
               </li>
             </ul>
             <div className="card-actions">
@@ -133,8 +133,8 @@ const ScanTypeSelector = () => {
             </div>
             <h2 className="card-title">Authenticated Website Scan</h2>
             <p className="card-description">
-              Deep security analysis for login-protected areas. Automatically detects login forms,
-              tests credentials, and scans authenticated pages for vulnerabilities.
+              Deep security analysis for login-protected areas. Automatically detects login interfaces,
+              validates credentials, and performs in-depth scans on authenticated areas.
             </p>
             <ul className="card-features">
               <li>
@@ -147,7 +147,7 @@ const ScanTypeSelector = () => {
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Authenticated OWASP ZAP Scan</span>
+                <span>In-Depth Authenticated Scan</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>

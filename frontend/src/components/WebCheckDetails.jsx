@@ -73,7 +73,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
   return (
     <details style={{ marginBottom: '2rem', overflow: 'hidden' }}>
       <summary style={{ cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem', padding: '1rem', background: bg, borderRadius: '8px', border: '1px solid #00d084' }}>
-        View WebCheck Analysis ({completedCount} scans complete)
+        View Site Health Analysis ({completedCount} components analyzed)
       </summary>
       <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem', fontSize: '0.9rem', overflow: 'hidden' }}>
 
@@ -280,7 +280,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
         {/* 9. TLS Security */}
         {webCheckReport.tls && !webCheckReport.tls.error && (
           <div style={cardStyle}>
-            <h5 style={h5Style}>TLS Security (Observatory)</h5>
+            <h5 style={h5Style}>TLS Security Analysis</h5>
             <p><b>Grade:</b> <span style={{ color: getObservatoryGradeColor(webCheckReport.tls.tlsInfo?.grade), fontWeight: 'bold', fontSize: '1.2rem' }}>{webCheckReport.tls.tlsInfo?.grade || 'N/A'}</span></p>
             <p><b>Score:</b> {webCheckReport.tls.tlsInfo?.score || 0}/100</p>
             <p><b>Host:</b> {webCheckReport.tls.tlsInfo?.host || 'N/A'}</p>
@@ -670,7 +670,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
               const isFound = data.isFound !== false && rankNum && rankNum > 0;
 
               if (!isFound) {
-                return <p style={{ opacity: 0.7 }}>Not found in the Umbrella top 1M domains list.</p>;
+                return <p style={{ opacity: 0.7 }}>Not found in the global top 1M domains list.</p>;
               }
 
               // Logarithmic position: rank 1 = 100%, rank 1M = 0%
@@ -682,7 +682,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
                 <div className="wc-rank-big">
                   <div className="wc-rank-number">
                     #{rankNum.toLocaleString()}
-                    <span className="wc-rank-label">Umbrella Rank</span>
+                    <span className="wc-rank-label">Traffic Rank</span>
                   </div>
                   <div style={{ flex: 1, minWidth: 180, maxWidth: 350 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', opacity: 0.6, marginBottom: '0.35rem' }}>

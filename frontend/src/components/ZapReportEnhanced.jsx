@@ -122,7 +122,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
     return (
         <div className="zap-report-enhanced">
             <div className="report-header">
-                <h3>⚡ OWASP ZAP Vulnerability Report</h3>
+                <h3>⚡ Vulnerability Analysis Results</h3>
                 <div className="report-stats">
                     <span className="stat">
                         <strong>{zapData.totalAlerts}</strong> Alert Types

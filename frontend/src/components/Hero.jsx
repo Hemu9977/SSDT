@@ -517,14 +517,14 @@ const Hero = ({ historicalScan }) => {
           const zapPending = analysisData.zapPending;
           const hasAi = analysisData.hasRefinedReport;
 
-          if (!hasPsi || !hasObs) statusMessage = '📊 Fetching PageSpeed & Observatory...';
+          if (!hasPsi || !hasObs) statusMessage = '📊 Fetching performance & security metadata...';
           else if (zapPending && analysisData.zapData) {
             const zapPhase = analysisData.zapData.phase || 'scanning';
             const zapProgress = analysisData.zapData.progress || 0;
-            statusMessage = `⚡ ZAP Security Scan: ${zapPhase} (${zapProgress}%)...`;
+            statusMessage = `⚡ Vulnerability Analysis: ${zapPhase} (${zapProgress}%)...`;
           }
-          else if (!hasZap && !zapPending) statusMessage = '⚡ Starting ZAP security scan...';
-          else if (!hasAi) statusMessage = '🤖 Generating AI report (with all scan data)...';
+          else if (!hasZap && !zapPending) statusMessage = '⚡ Starting comprehensive vulnerability scan...';
+          else if (!hasAi) statusMessage = '🤖 Generating AI-powered security insights...';
           else statusMessage = '✅ Finalizing results...';
 
           setLoadingStage(statusMessage);
@@ -629,7 +629,7 @@ const Hero = ({ historicalScan }) => {
     try {
       console.log('🔍 Submitting URL for scan:', url);
       setLoadingProgress(10);
-      setLoadingStage('Submitting URL to security scanners...');
+      setLoadingStage('Analyzing target environment...');
 
       const res = await fetch(`${API_BASE}/api/vt/combined-url-scan`, {
         method: 'POST',
@@ -665,7 +665,7 @@ const Hero = ({ historicalScan }) => {
       }));
 
       setLoadingProgress(30);
-      setLoadingStage('Running security scans...');
+      setLoadingStage('Performing comprehensive site analysis...');
 
       // Check if stop was clicked during the initial API call
       if (stopPollingRef.current) {
@@ -729,9 +729,9 @@ const Hero = ({ historicalScan }) => {
         zapPendingMessage = `${phase}: ${progress}%`;
       } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
         // ZAP scan complete
-        if (backendZapData.riskCounts.High > 0) { zapRiskLabel = "High Risk"; zapRiskColor = "#e81123"; }
-        else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = "Medium Risk"; zapRiskColor = "#ff8c00"; }
-        else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = "Low Risk"; zapRiskColor = "#ffb900"; }
+        if (backendZapData.riskCounts.High > 0) { zapRiskLabel = "Vulnerable (High)"; zapRiskColor = "#e81123"; }
+        else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = "Vulnerable (Medium)"; zapRiskColor = "#ff8c00"; }
+        else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = "Vulnerable (Low)"; zapRiskColor = "#ffb900"; }
       } else if (backendZapData.status === 'failed') {
         zapRiskLabel = "Failed";
         zapRiskColor = "#e81123";
@@ -1014,7 +1014,7 @@ const Hero = ({ historicalScan }) => {
                     <span className={`score-card__value score-card__value--${perfScore >= 90 ? 'safe' : perfScore >= 50 ? 'medium' : 'high'}`}>
                       {perfScore}
                     </span>
-                    <p className="score-card__label">Lighthouse Score</p>
+                    <p className="score-card__label">Optimization Score</p>
                   </>
                 );
               })()
@@ -1082,7 +1082,7 @@ const Hero = ({ historicalScan }) => {
           {/* 🔍 WebCheck: Block Lists */}
           {/* 🔍 WebCheck: Block Lists */}
           <div className="score-card">
-            <h4 className="score-card__title">🚫 Block Lists</h4>
+            <h4 className="score-card__title">🚫 Security Blacklist</h4>
             {webCheckLoading ? (
               <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
             ) : webCheckReport?.['block-lists'] && !webCheckReport['block-lists'].error ? (
@@ -1134,7 +1134,7 @@ const Hero = ({ historicalScan }) => {
                 <span className="score-card__value score-card__value--safe">
                   {webCheckReport.archives.totalScans}
                 </span>
-                <p className="score-card__label">Wayback Snapshots</p>
+                <p className="score-card__label">Historical Snapshots</p>
               </>
             ) : webCheckReport?.archives?.error ? (
               <div className="score-card__label" style={{ color: '#ffb900', marginTop: '10px' }}>Timeout</div>

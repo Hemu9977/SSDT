@@ -40,9 +40,9 @@ const ScanForm = () => {
         // Show URL count during spider phases
         if (zapPhase === 'spidering' || zapPhase === 'ajax_spider') {
           const urlsFound = data.zapData.urlsFound || 0;
-          setScanStage(`${zapPhase === 'ajax_spider' ? 'AJAX Spider' : 'Spider'}: ${urlsFound} URLs found (${zapProgress}%)`);
+          setScanStage(`${zapPhase === 'ajax_spider' ? 'Deep Web Crawling' : 'Web Crawling'}: ${urlsFound} URLs found (${zapProgress}%)`);
         } else {
-          setScanStage(`ZAP Security Scan: ${zapPhase} (${zapProgress}%)`);
+          setScanStage(`Vulnerability Analysis: ${zapPhase} (${zapProgress}%)`);
         }
 
         setScanProgress(zapProgress);
