@@ -219,6 +219,12 @@ const startAsyncWebCheckScan = async (url, analysisId, userId) => {
     try {
         const existingScan = await ScanResult.findOne({ analysisId, userId });
 
+        // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
+        if (existingScan && ['stopped', 'completed', 'failed'].includes(existingScan.status)) {
+            console.log(`🛑 [WebCheck] Scan ${analysisId} is in terminal state (${existingScan.status}), refusing to start.`);
+            return existingScan.webCheckResult || { status: existingScan.status };
+        }
+
         if (existingScan?.webCheckResult) {
             const status = existingScan.webCheckResult.status;
 
@@ -347,9 +353,13 @@ const runWebCheckInBackground = async (url, analysisId, userId) => {
     }
 
     for (const batch of batches) {
-        // Check if scan was cancelled
-        if (!activeWebCheckScans.has(analysisId)) {
-            console.log(`[WebCheck] ⏹️ Scan was cancelled for ${analysisId}`);
+        // Check if scan was cancelled (in memory or in database)
+        const currentScan = await ScanResult.findOne({ analysisId, userId });
+        const isStoppedInDb = currentScan && ['stopped', 'failed'].includes(currentScan.status);
+
+        if (!activeWebCheckScans.has(analysisId) || isStoppedInDb) {
+            console.log(`[WebCheck] ⏹️ Scan was cancelled or stopped for ${analysisId}`);
+            activeWebCheckScans.delete(analysisId); // Cleanup memory Map if it was stopped in DB
             return;
         }
 

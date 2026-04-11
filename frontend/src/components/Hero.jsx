@@ -32,6 +32,7 @@ const Hero = ({ historicalScan }) => {
   const [loadingStage, setLoadingStage] = useState('');
   const [error, setError] = useState(null);
   const [isHistorical, setIsHistorical] = useState(false);
+  const [pendingSchedule, setPendingSchedule] = useState(null);
 
   // 🔄 Active scan tracking for stop/resume functionality
   const [activeScanId, setActiveScanId] = useState(null);
@@ -79,6 +80,7 @@ const Hero = ({ historicalScan }) => {
         target: historicalScan.target,
         status: historicalScan.status,
         analysisId: historicalScan.analysisId,
+        triggerSource: historicalScan.triggerSource,
         createdAt: historicalScan.createdAt,
 
         // PSI data - extract scores from raw pagespeedResult structure
@@ -139,9 +141,36 @@ const Hero = ({ historicalScan }) => {
 
       setReport(transformedReport);
       setIsHistorical(true);
-      setLoading(false);
+      
+      // If scan is still in progress, resume polling
+      if (!['completed', 'failed', 'stopped'].includes(historicalScan.status)) {
+        console.log(`🔄 Historical scan ${historicalScan.analysisId} is still ${historicalScan.status} - resuming polling`);
+        setLoading(true);
+        setLoadingStage('Resuming scan...');
+        stopPollingRef.current = false;
+        
+        const token = localStorage.getItem('token');
+        pollAnalysis(historicalScan.analysisId, token);
+      } else {
+        setLoading(false);
+      }
     }
   }, [historicalScan]);
+
+  // Check for pending schedule on mount
+  useEffect(() => {
+    const pendingJson = sessionStorage.getItem('pendingScheduleConfig');
+    if (pendingJson) {
+      try {
+        const parsed = JSON.parse(pendingJson);
+        if (parsed.scanType === 'public') {
+          setPendingSchedule(parsed);
+        }
+      } catch (err) {
+        console.error('Failed to parse pending schedule config', err);
+      }
+    }
+  }, []);
 
   // Translate entire report when language changes
   useEffect(() => {
@@ -261,8 +290,16 @@ const Hero = ({ historicalScan }) => {
     const translateReport = async () => {
       const refinedReport = report?.refinedReport;
 
+      // 🌐 Force English if lang=en is in URL (Scheduled Scan requirement)
+      const urlParams = new URLSearchParams(window.location.search);
+      const forceEn = urlParams.get('lang') === 'en';
+
       // Don't translate if no report or already translated
       if (!refinedReport) return;
+      if (forceEn) {
+        console.log('🌐 Language forced to English via URL parameter');
+        return;
+      }
       if (currentLang !== 'ja') return; // Just don't translate, but keep the cached version
       if (translatedReport) return; // Already have translation cached
 
@@ -518,9 +555,57 @@ const Hero = ({ historicalScan }) => {
   // 🔍 WebCheck scans now run entirely in backend - no frontend API calls needed
   // Results come via the combined-analysis polling endpoint along with ZAP and other scans
 
+  // Results come via the combined-analysis polling endpoint along with ZAP and other scans
+  
+  const submitSchedule = async (url, config) => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+
+    setLoading(true);
+    setLoadingStage('Saving schedule...');
+    setError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/schedules`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-auth-token': token
+        },
+        body: JSON.stringify({
+          scanType: config.scanType,
+          targetUrl: url,
+          scheduleType: config.scheduleType || (config.recurring ? 'recurring' : 'one-time'),
+          scheduledAt: config.scheduledAt,
+          recurring: config.recurring,
+          timezone: config.timezone || 'Asia/Kolkata'
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create schedule');
+
+      sessionStorage.removeItem('pendingScheduleConfig');
+      setPendingSchedule(null);
+      alert('Schedule created successfully!');
+      navigate('/schedules');
+    } catch (err) {
+      setError(err.message);
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     const url = e.target.elements.url.value;
+    
+    if (pendingSchedule) {
+      return submitSchedule(url, pendingSchedule);
+    }
+
     const token = localStorage.getItem('token');
 
     if (!token) {
@@ -705,7 +790,11 @@ const Hero = ({ historicalScan }) => {
               </div>
             ) : (
               <ReactMarkdown>
-                {currentLang === 'ja' && translatedReport ? translatedReport : refinedReport}
+                {(() => {
+                  const urlParams = new URLSearchParams(window.location.search);
+                  const forceEn = urlParams.get('lang') === 'en';
+                  return (currentLang === 'ja' && translatedReport && !forceEn) ? translatedReport : refinedReport;
+                })()}
               </ReactMarkdown>
             )
           ) : (
@@ -1642,14 +1731,26 @@ const Hero = ({ historicalScan }) => {
           <>
             <h1 className="hero-title">We give you <span className="highlight">X-Ray Vision</span> for your Website</h1>
             <p className="hero-subtitle">In just 20 seconds, you can see what <span className="highlight">attackers already know</span></p>
+            
+            {pendingSchedule && (
+              <div className="scheduling-mode-banner" style={{ background: 'rgba(0, 176, 198, 0.1)', border: '1px solid var(--accent)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', textAlign: 'center', color: 'var(--accent)' }}>
+                <strong>Scheduling Mode Active</strong><br/>
+                Setting up a public scan for {pendingSchedule.date} at {pendingSchedule.time}
+              </div>
+            )}
+            
             <form className="analyze-form" onSubmit={handleSubmit}>
               <label htmlFor="url-input">Enter a URL to start</label>
               <div className="input-wrapper">
                 <input id="url-input" name="url" type="text" placeholder="E.g. https://google.com" defaultValue={scanUrl || "https://google.com"} required disabled={loading} />
                 {!loading ? (
-                  <button type="submit" className="analyze-button">
-                    <span className="button-text">Analyze URL</span>
-                  </button>
+                  <div className="action-buttons" style={{ flexDirection: 'row' }}>
+                    <button type="submit" className="analyze-button">
+                      <span className="button-text">
+                        {pendingSchedule ? "Save Scheduled Scan" : "Analyze URL"}
+                      </span>
+                    </button>
+                  </div>
                 ) : (
                   <button type="button" onClick={handleStopScan} className="stop-button">
                     <span className="button-text">Stop Scan</span>

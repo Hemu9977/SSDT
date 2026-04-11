@@ -62,7 +62,7 @@ export const NotificationProvider = ({ children }) => {
   // Connect to Socket.IO when user is logged in
   useEffect(() => {
     const token = localStorage.getItem('token');
-    if (!token) {
+    if (!token || !user) {
       // No token - disconnect if connected
       if (socketRef.current) {
         socketRef.current.disconnect();
@@ -70,6 +70,34 @@ export const NotificationProvider = ({ children }) => {
       }
       return;
     }
+
+    // --- FETCH UNREAD NOTIFICATIONS ON MOUNT ---
+    const fetchUnread = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/notifications/unread`, {
+          headers: { 'x-auth-token': token }
+        });
+        const data = await response.json();
+        if (data.unread && Array.isArray(data.unread)) {
+          data.unread.forEach(scan => {
+            // Add as persistent notifications
+            addNotification({
+              type: 'scan_completed',
+              scanId: scan.analysisId,
+              scanType: scan.scanType || (scan.triggerSource === 'scheduled' ? 'Scheduled Scan' : 'Security Scan'),
+              targetUrl: scan.target,
+              triggerSource: scan.triggerSource,
+              isScheduled: scan.triggerSource === 'scheduled',
+              isPersistent: true // Mark as persistent from unread fetch
+            });
+          });
+        }
+      } catch (err) {
+        console.error('❌ Failed to fetch unread notifications:', err);
+      }
+    };
+
+    fetchUnread();
 
     // Create Socket.IO connection with auth token
     const socket = io(API_BASE, {
@@ -100,7 +128,8 @@ export const NotificationProvider = ({ children }) => {
         scanId: data.scanId,
         scanType: data.scanType,
         targetUrl: data.targetUrl,
-        completedAt: data.completedAt
+        triggerSource: data.triggerSource,
+        isScheduled: data.isScheduled
       });
     });
 
@@ -110,7 +139,22 @@ export const NotificationProvider = ({ children }) => {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [addNotification, user]);
+  }, [user, addNotification]);
+
+  // Mark notification as read on backend
+  const markAsRead = useCallback(async (analysisId) => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+
+    try {
+      await fetch(`${API_BASE}/api/notifications/mark-read/${analysisId}`, {
+        method: 'POST',
+        headers: { 'x-auth-token': token }
+      });
+    } catch (err) {
+      console.error('❌ Failed to mark notification as read:', err);
+    }
+  }, []);
 
   // Re-connect when token changes (login/logout)
   useEffect(() => {
@@ -131,7 +175,8 @@ export const NotificationProvider = ({ children }) => {
   const value = {
     notifications,
     addNotification,
-    removeNotification
+    removeNotification,
+    markAsRead
   };
 
   return (

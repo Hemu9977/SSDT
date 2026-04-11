@@ -71,17 +71,43 @@ const ScanTypeSelector = () => {
                 <span>No Authentication Required</span>
               </li>
             </ul>
-            <div className="card-button">
-              <span>Start Public Scan</span>
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                strokeWidth={2}
-                stroke="currentColor"
+            <div className="card-actions">
+              <div 
+                className="card-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate('/schedules?type=public');
+                }}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-              </svg>
+                <span>Schedule Scan</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+              </div>
+              <div 
+                className="card-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleScanTypeSelection('normal');
+                }}
+              >
+                <span>Start Public Scan</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                </svg>
+              </div>
             </div>
           </div>
 
@@ -132,17 +158,43 @@ const ScanTypeSelector = () => {
                 <span>Server-Side Credential Handling</span>
               </li>
             </ul>
-            <div className="card-button">
-              <span>Start Authenticated Scan</span>
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                strokeWidth={2}
-                stroke="currentColor"
+            <div className="card-actions">
+              <div 
+                className="card-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate('/schedules?type=authenticated');
+                }}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-              </svg>
+                <span>Schedule Scan</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+              </div>
+              <div 
+                className="card-button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleScanTypeSelection('auth');
+                }}
+              >
+                <span>Start Authenticated Scan</span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                </svg>
+              </div>
             </div>
           </div>
         </div>

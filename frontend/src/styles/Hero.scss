@@ -108,15 +108,39 @@
         }
       }
 
-      // Analyze button (green/cyan)
-      .analyze-button {
-        background: var(--accent);
-        color: var(--background);
+      .action-buttons {
+        display: flex;
+        gap: 0.5rem;
+        
+        button {
+          padding: 0.75rem 1.5rem;
+        }
 
-        &:hover {
-          background: var(--accent-light);
-          transform: translateY(-2px);
-          box-shadow: 0 4px 12px rgba(0, 176, 198, 0.4);
+        // Analyze button (green/cyan)
+        .analyze-button {
+          background: var(--accent);
+          color: var(--background);
+          flex: 2;
+
+          &:hover {
+            background: var(--accent-light);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 176, 198, 0.4);
+          }
+        }
+
+        // Schedule button
+        .schedule-button {
+          background: rgba(0, 176, 198, 0.1);
+          color: var(--accent);
+          border: 1px solid var(--accent);
+          flex: 1;
+
+          &:hover {
+            background: rgba(0, 176, 198, 0.2);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 176, 198, 0.2);
+          }
         }
       }
 
@@ -161,6 +185,11 @@ body.dark {
       flex-direction: column;
 
       button {
+        width: 100%;
+      }
+      
+      .action-buttons {
+        flex-direction: column;
         width: 100%;
       }
     }

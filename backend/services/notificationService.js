@@ -10,7 +10,7 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { sendScanCompletionEmail } = require('./emailService');
+const { sendScanCompletionEmail, sendScanTriggeredEmail, sendScanFailedEmail, sendScheduleConfirmationEmail } = require('./emailService');
 
 let io = null;
 
@@ -86,13 +86,25 @@ function emitScanCompleted(userId, payload) {
 async function handleScanComplete(scanId, userId, scanType, targetUrl) {
   const completedAt = new Date().toISOString();
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
-  const dashboardLink = `${clientUrl}/scan/${scanId}`;
+  let dashboardLink = `${clientUrl}/scan/${scanId}`;
+
+  // 0. Fetch scan result to check triggerSource
+  const ScanResult = require('../models/ScanResult');
+  const scan = await ScanResult.findOne({ analysisId: scanId });
+  const isScheduled = scan && scan.triggerSource === 'scheduled';
+
+  // If scheduled, append ?lang=en to force English report as requested
+  if (isScheduled) {
+    dashboardLink += '?lang=en';
+  }
 
   const payload = {
     scanId,
     scanType,
     targetUrl,
-    completedAt
+    completedAt,
+    triggerSource: scan ? scan.triggerSource : 'manual',
+    isScheduled
   };
 
   // 1. Emit Socket.IO event (instant, non-blocking)
@@ -109,7 +121,7 @@ async function handleScanComplete(scanId, userId, scanType, targetUrl) {
         completedAt,
         dashboardLink
       });
-      console.log(`📧 Scan completion email sent to ${user.email}`);
+      console.log(`📧 Scan completion email sent to ${user.email} (Link: ${dashboardLink})`);
     } else {
       console.warn(`⚠️ Could not find user ${userId} for email notification`);
     }
@@ -120,15 +132,99 @@ async function handleScanComplete(scanId, userId, scanType, targetUrl) {
 }
 
 /**
+ * Handle a scheduled scan getting triggered
+ * Sends an email notification to let the user know the scan has started.
+ */
+async function handleScheduledScanTriggered(userId, scanType, targetUrl, scheduledFor, startedAt) {
+  try {
+    const user = await User.findById(userId).select('name email');
+    if (user && user.email) {
+      await sendScanTriggeredEmail(user.email, user.name || 'User', {
+        scanType,
+        targetUrl,
+        scheduledFor,
+        startedAt
+      });
+      console.log(`📧 Scan triggered email sent to ${user.email}`);
+    }
+  } catch (err) {
+    console.error('❌ Failed to send scan triggered email:', err.message);
+  }
+}
+
+/**
+ * Handle a scheduled scan failure
+ * Sends an email notification describing the failure.
+ */
+async function handleScanFailed(scanId, userId, scanType, targetUrl, failureReason) {
+  try {
+    const user = await User.findById(userId).select('name email');
+    if (user && user.email) {
+      await sendScanFailedEmail(user.email, user.name || 'User', {
+        scanType,
+        targetUrl,
+        scanId,
+        failureReason
+      });
+      console.log(`📧 Scan failed email sent to ${user.email}`);
+    }
+  } catch (err) {
+    console.error('❌ Failed to send scan failure email:', err.message);
+  }
+}
+
+/**
+ * Emit a scan_started event to a specific user's room.
+ */
+function emitScanStarted(userId, payload) {
+  if (!io) return;
+  io.to(`user_${userId}`).emit('scan_started', payload);
+  console.log(`📢 Emitted scan_started to user ${userId}:`, payload.scanId);
+}
+
+/**
  * Get the Socket.IO instance (for external use if needed).
  */
 function getIO() {
   return io;
 }
 
+/**
+ * Handle a scan being successfully scheduled
+ */
+async function handleScheduleCreated(userId, targetUrl, scheduleType, displayTime) {
+  try {
+    const user = await User.findById(userId).select('name email');
+    if (user && user.email) {
+      await sendScheduleConfirmationEmail(user.email, user.name || 'User', {
+        scanType: 'Security Scan',
+        targetUrl,
+        scheduleType,
+        displayTime
+      });
+    }
+    
+    // Also emit a socket event if needed for instant UI feedback
+    if (io) {
+      io.to(`user_${userId}`).emit('schedule_created', {
+        targetUrl,
+        scheduleType,
+        displayTime,
+        timestamp: new Date()
+      });
+    }
+  } catch (err) {
+    console.error('❌ Failed to handle schedule created notification:', err.message);
+  }
+}
+
 module.exports = {
   initializeSocket,
   emitScanCompleted,
+  emitScanStarted,
   handleScanComplete,
+  handleScheduledScanTriggered,
+  handleScanFailed,
+  handleScheduleCreated,
   getIO
 };

@@ -336,21 +336,24 @@ const Profile = () => {
                 {recentScans.map((scan) => (
                   <div
                     key={scan._id}
-                    className={`scan-item ${scan.status === 'completed' ? 'clickable' : ''}`}
-                    onClick={() => scan.status === 'completed' && navigate(`/scan/${scan.analysisId}`)}
+                    className="scan-item clickable"
+                    onClick={() => navigate(`/scan/${scan.analysisId}`)}
                     style={{
-                      cursor: scan.status === 'completed' ? 'pointer' : 'default',
+                      cursor: 'pointer',
                       transition: 'all 0.2s ease'
                     }}
-                    title={scan.status === 'completed' ? 'Click to view scan details' : `Scan ${scan.status}`}
+                    title={`Click to view scan results (Status: ${scan.status})`}
                   >
                     <div className="scan-target">{scan.target}</div>
                     <div className="scan-details">
-                      <span className={`scan-status ${scan.status}`}>{scan.status}</span>
-                      <span className="scan-date">{formatDate(scan.createdAt)}</span>
-                      {scan.status === 'completed' && (
-                        <span className="view-scan-icon" style={{ marginLeft: '0.5rem', opacity: 0.7 }}>→</span>
+                      {scan.triggerSource === 'scheduled' && (
+                        <span className="scan-tag scheduled">Scheduled Scan</span>
                       )}
+                      <span className={`scan-status ${scan.status}`}>
+                        {scan.status.charAt(0).toUpperCase() + scan.status.slice(1)}
+                      </span>
+                      <span className="scan-date">{formatDate(scan.createdAt)}</span>
+                      <span className="view-scan-icon" style={{ marginLeft: '0.5rem', opacity: 0.7 }}>→</span>
                     </div>
                   </div>
                 ))}

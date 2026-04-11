@@ -7,11 +7,13 @@ const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimit
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
 const { initializeSocket } = require('./services/notificationService');
+const { startScheduler } = require('./services/schedulerService'); // Scheduled scan runner
 
 // IMPORT ZAP ROUTES
 const zapRoutes = require('./routes/zapRoutes');
 const zapAuthRoutes = require('./routes/zapAuthRoutes');
 const webCheckRoutes = require('./routes/webCheckRoutes');
+const scheduleRoutes = require('./routes/scheduleRoutes');
 
 // Validate required environment variables
 const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
@@ -44,6 +46,14 @@ connectDB().then(() => {
     console.log('✅ Cleanup job scheduler started');
   } catch (error) {
     console.error('⚠️  Cleanup job initialization failed:', error.message);
+  }
+
+  // Start scheduled scan runner (checks every 15 seconds for due scans)
+  try {
+    startScheduler();
+    console.log('✅ Scheduled scan runner started');
+  } catch (error) {
+    console.error('⚠️  Scheduled scan runner initialization failed:', error.message);
   }
 });
 
@@ -86,6 +96,12 @@ app.use('/api/translate', apiLimiter, require('./routes/translateRoutes'));
 
 // 👇 REGISTER URLSCAN ROUTES
 app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
+
+// 👇 REGISTER SCHEDULE ROUTES (Scheduled scan CRUD + execution)
+app.use('/api/schedules', apiLimiter, scheduleRoutes);
+
+// 👇 REGISTER NOTIFICATION ROUTES (Persistent unread alerts)
+app.use('/api/notifications', apiLimiter, require('./routes/notificationRoutes'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });

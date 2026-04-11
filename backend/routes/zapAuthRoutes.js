@@ -186,7 +186,7 @@ router.post('/test-login', auth, async (req, res) => {
  */
 router.post('/scan', auth, async (req, res) => {
   try {
-    const { targetUrl, loginUrl, tempSessionId } = req.body;
+    const { targetUrl, loginUrl, tempSessionId, triggerSource, lang } = req.body;
 
     if (!targetUrl || !tempSessionId) {
       return res.status(400).json({ error: 'targetUrl and tempSessionId are required' });
@@ -226,7 +226,18 @@ router.post('/scan', auth, async (req, res) => {
     // Generate scan ID
     const scanId = `zap-auth-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-    console.log(`[ZAP-AUTH] Starting authenticated scan: ${scanId} for ${targetUrl}`);
+    console.log(`[ZAP-AUTH] Starting authenticated scan: ${scanId} for ${targetUrl} (Source: ${triggerSource || 'manual'})`);
+
+    // Create a skeleton scan record immediately to store the triggerSource
+    const skeletonScan = new ScanResult({
+      target: targetUrl,
+      analysisId: scanId,
+      status: 'pending',
+      userId: req.user.id,
+      triggerSource: triggerSource || 'manual',
+      languagePreference: lang || 'en'
+    });
+    await skeletonScan.save();
 
     // Start async auth ZAP scan
     const result = await startAsyncAuthScan(
@@ -264,6 +275,26 @@ router.get('/status/:scanId', auth, async (req, res) => {
     let scan = await ScanResult.findOne({ analysisId: scanId, userId: req.user.id });
     if (!scan) {
       return res.status(404).json({ error: 'Scan not found or access denied' });
+    }
+
+    // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
+    if (['stopped', 'completed', 'failed'].includes(scan.status)) {
+      console.log(`🛑 Auth Scan ${scanId} is in terminal state (${scan.status}), returning early.`);
+      return res.json({
+        success: true,
+        status: scan.status,
+        analysisId: scanId,
+        target: scan.target,
+        // Minimal data for summary view
+        hasPsiResult: !!scan.pagespeedResult,
+        hasObservatoryResult: !!scan.observatoryResult,
+        zapPending: false,
+        webCheckPending: false,
+        hasRefinedReport: !!scan.refinedReport,
+        refinedReport: scan.refinedReport || null,
+        createdAt: scan.createdAt,
+        updatedAt: scan.updatedAt
+      });
     }
 
     // ── STEP A: Trigger fast scans (only once) ──

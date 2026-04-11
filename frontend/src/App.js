@@ -13,6 +13,7 @@ import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import Profile from './pages/Profile';
 import ScanViewer from './pages/ScanViewer';
+import ScheduledScans from './pages/ScheduledScans';
 // Translation imports
 import { TranslationProvider } from './contexts/TranslationContext';
 import { UserProvider, useUser } from './contexts/UserContext';
@@ -50,6 +51,7 @@ function AppContent() {
             <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/scan/:analysisId" element={<ScanViewer />} />
+            <Route path="/schedules" element={<ScheduledScans />} />
           </Routes>
         </BrowserRouter>
       </TranslationProvider>

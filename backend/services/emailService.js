@@ -162,7 +162,7 @@ const sendScanCompletionEmail = async (email, userName, scanDetails) => {
           <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">You can now log in to SSDT to view the full vulnerability report and security analysis.</p>
           
           <div style="text-align: center; margin: 25px 0;">
-            <a href="${dashboardLink}" style="background-color: #00E0FF; color: #000000; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View Results</a>
+            <a href="${dashboardLink}" style="background-color: #00E0FF; color: #000000; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View Report</a>
           </div>
         </div>
 
@@ -184,9 +184,111 @@ const sendScanCompletionEmail = async (email, userName, scanDetails) => {
   }
 };
 
+// Send scan triggered notification email
+const sendScanTriggeredEmail = async (email, userName, scanDetails) => {
+  const { scanType, targetUrl, scheduledFor } = scanDetails;
+
+  const mailOptions = {
+    to: email,
+    subject: `SSDT: Scheduled ${scanType} Triggered`,
+    html: `
+      <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0f18; padding: 30px; border-radius: 8px; border: 1px solid #2a3b5f;">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h1 style="color: #00E0FF; margin: 0; font-size: 36px;">SSDT</h1>
+          <p style="color: #999; font-size: 14px;">Security Scanner Detection Tool</p>
+        </div>
+        <div style="padding: 20px; background-color: #101827; border-radius: 5px;">
+          <h2 style="color: #ffffff; text-align: left; margin-top: 0;">🚀 Scheduled Scan Started</h2>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Hello ${userName},</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Your automated ${scanType} for <b style="color: #00E0FF;">${targetUrl}</b> has just started executing.</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">You will receive another email once the scan is complete and the report is ready.</p>
+        </div>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Scan triggered email sent to ${email}`);
+  } catch (error) {
+    console.error('Error sending scan triggered email:', error);
+  }
+};
+
+// Send scan failure notification email
+const sendScanFailedEmail = async (email, userName, scanDetails) => {
+  const { scanType, targetUrl, failureReason } = scanDetails;
+
+  const mailOptions = {
+    to: email,
+    subject: `SSDT: Scheduled ${scanType} Failed`,
+    html: `
+      <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0f18; padding: 30px; border-radius: 8px; border: 1px solid #2a3b5f;">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h1 style="color: #00E0FF; margin: 0; font-size: 36px;">SSDT</h1>
+          <p style="color: #999; font-size: 14px;">Security Scanner Detection Tool</p>
+        </div>
+        <div style="padding: 20px; background-color: #101827; border-radius: 5px; border-left: 4px solid #ef4444;">
+          <h2 style="color: #ef4444; text-align: left; margin-top: 0;">❌ Scan Failed</h2>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Hello ${userName},</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Unfortunately, your automated ${scanType} for <b style="color: #00E0FF;">${targetUrl}</b> failed to complete.</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;"><strong>Reason:</strong> ${failureReason || 'An unexpected error occurred.'}</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Please check your dashboard to review your configurations or run the scan manually.</p>
+        </div>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Scan failed email sent to ${email}`);
+  } catch (error) {
+    console.error('Error sending scan failed email:', error);
+  }
+};
+
+// Send schedule confirmation notification email
+const sendScheduleConfirmationEmail = async (email, userName, scheduleDetails) => {
+  const { scanType, targetUrl, scheduleType, displayTime } = scheduleDetails;
+
+  const mailOptions = {
+    to: email,
+    subject: `SSDT: Scan Scheduled Successfully`,
+    html: `
+      <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0f18; padding: 30px; border-radius: 8px; border: 1px solid #2a3b5f;">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <h1 style="color: #00E0FF; margin: 0; font-size: 36px;">SSDT</h1>
+          <p style="color: #999; font-size: 14px;">Security Scanner Detection Tool</p>
+        </div>
+        <div style="padding: 20px; background-color: #101827; border-radius: 5px; border-left: 4px solid #10b981;">
+          <h2 style="color: #10b981; text-align: left; margin-top: 0;">📅 Scan Scheduled</h2>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">Hello ${userName},</p>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">You have successfully scheduled a <b>${scanType}</b> for <b style="color: #00E0FF;">${targetUrl}</b>.</p>
+          <div style="background-color: #000000; border: 1px solid #2a3b5f; border-radius: 5px; padding: 15px; margin: 15px 0;">
+            <p style="margin: 0; color: #999; font-size: 14px;">Schedule Details:</p>
+            <p style="margin: 5px 0 0 0; color: #f0f0f0;"><b>Type:</b> ${scheduleType}</p>
+            <p style="margin: 5px 0 0 0; color: #f0f0f0;"><b>Execution:</b> ${displayTime}</p>
+          </div>
+          <p style="font-size: 16px; line-height: 1.5; color: #f0f0f0;">We will notify you again once the scan starts and when the results are ready.</p>
+        </div>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Schedule confirmation email sent to ${email}`);
+  } catch (error) {
+    console.error('Error sending schedule confirmation email:', error);
+  }
+};
+
 module.exports = {
   generateOTP,
   sendOTPEmail,
   sendResetPasswordEmail,
   sendScanCompletionEmail,
+  sendScanTriggeredEmail,
+  sendScanFailedEmail,
+  sendScheduleConfirmationEmail
 };

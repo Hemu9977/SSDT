@@ -1,0 +1,487 @@
+// ScheduledScans Page Styles - SSDT Theme
+
+.schedules-page {
+  padding: 2rem;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  z-index: 2;
+  position: relative;
+}
+
+// Loading
+.schedules-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+  gap: 16px;
+  color: var(--foreground-darker);
+
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(0, 176, 198, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+// Header
+.schedules-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+  flex-wrap: wrap;
+  gap: 16px;
+
+  &__left {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  h1 {
+    font-size: 3rem;
+    font-weight: 800;
+    margin: 0;
+    line-height: 1.2;
+    color: var(--foreground);
+    font-family: 'Orbitron', var(--font-sans);
+
+    .schedules-icon {
+      color: var(--accent);
+      margin-right: 12px;
+    }
+  }
+}
+
+.schedules-subtitle {
+  font-size: 1.1rem;
+  color: var(--foreground-darker);
+  margin: 0;
+  opacity: 0.8;
+}
+
+.new-schedule-btn {
+  font-family: 'Orbitron', var(--font-sans);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--accent);
+  background: transparent;
+  border: 2px solid var(--accent);
+  padding: 0.75rem 2rem;
+  border-radius: 10px;
+  text-transform: uppercase;
+  cursor: pointer;
+  letter-spacing: 1.5px;
+  transition: all 0.3s ease;
+  box-shadow: 0 0 15px rgba(0, 176, 198, 0.2);
+
+  &:hover {
+    color: #000;
+    background: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 25px rgba(0, 176, 198, 0.5);
+    
+    body.light & {
+      color: #fff;
+    }
+  }
+
+  body.light & {
+    color: #0081a7;
+    border-color: #0081a7;
+    background: rgba(0, 129, 167, 0.05);
+    
+    &:hover {
+      background: #0081a7;
+      color: #fff;
+    }
+  }
+}
+
+// Plan usage bar
+.plan-usage-bar {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  background: var(--card-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  box-shadow: var(--card-shadow);
+
+  .usage-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 150px;
+  }
+
+  .usage-label {
+    font-weight: 700;
+    color: var(--label-color);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-family: 'Orbitron', var(--font-sans);
+  }
+
+  .usage-value {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 1.2rem;
+  }
+
+  .usage-progress {
+    flex: 1;
+    height: 10px;
+    background: var(--background-light);
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+
+    .usage-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent-dark), var(--accent));
+      border-radius: 5px;
+      transition: width 0.5s ease-out;
+    }
+  }
+}
+
+// List & Cards
+.schedules-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.schedule-card {
+  background: var(--card-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+
+  &:hover {
+    transform: translateY(-8px);
+    border-color: var(--accent);
+    box-shadow: 0 20px 40px rgba(0, 255, 255, 0.1);
+    
+    &::after {
+      opacity: 1;
+    }
+  }
+
+  // Subtle corner glow
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 100px;
+    height: 100px;
+    background: radial-gradient(circle at top right, rgba(0, 255, 255, 0.1), transparent 70%);
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+  }
+
+  &__main {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  &__info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__url {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    word-break: break-all;
+    line-height: 1.4;
+    letter-spacing: -0.5px;
+  }
+
+  &__meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    font-family: 'Orbitron', var(--font-sans);
+    letter-spacing: 1px;
+    border: 1px solid rgba(0, 255, 255, 0.2);
+    background: rgba(0, 255, 255, 0.05);
+    color: var(--accent);
+
+    &--public {
+      border-color: var(--accent);
+      background: rgba(0, 255, 255, 0.1);
+    }
+
+    &--authenticated {
+      border-color: #bd93f9;
+      background: rgba(189, 147, 249, 0.1);
+      color: #bd93f9;
+    }
+
+    &--type {
+      border-color: rgba(255, 255, 255, 0.2);
+      color: var(--foreground-darker);
+    }
+  }
+
+  &__timing {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+
+    body.light & {
+      background: rgba(0, 0, 0, 0.03);
+    }
+  }
+
+  .timing-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+  }
+
+  .timing-label {
+    color: var(--label-color);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+  }
+
+  .timing-value {
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  &__failure {
+    margin-top: 12px;
+    padding: 10px;
+    background: rgba(255, 77, 106, 0.1);
+    border: 1px solid rgba(255, 77, 106, 0.3);
+    border-radius: 8px;
+    color: #ff4d6a;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 10px;
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .action-btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-family: 'Orbitron', var(--font-sans);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border: 2px solid transparent;
+
+    &--run {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+      
+      &:hover {
+        background: var(--accent-light);
+        box-shadow: 0 0 15px rgba(0, 255, 255, 0.4);
+        transform: translateY(-2px);
+      }
+    }
+
+    &--edit {
+      background: transparent;
+      border-color: rgba(255, 255, 255, 0.1);
+      color: var(--foreground);
+      
+      &:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+    }
+
+    &--delete {
+      background: transparent;
+      border-color: rgba(255, 77, 106, 0.2);
+      color: #ff4d6a;
+      
+      &:hover {
+        background: rgba(255, 77, 106, 0.05);
+        border-color: #ff4d6a;
+      }
+    }
+  }
+
+  // Delete confirmation overlay
+  .delete-confirm {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.9);
+    backdrop-filter: blur(8px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    z-index: 10;
+    padding: 20px;
+    text-align: center;
+    border-radius: 16px;
+
+    span {
+      font-weight: 700;
+      font-family: 'Orbitron', var(--font-sans);
+      color: #fff;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      font-weight: 800;
+      cursor: pointer;
+      font-family: 'Orbitron', var(--font-sans);
+      text-transform: uppercase;
+      font-size: 0.75rem;
+    }
+
+    .confirm-yes {
+      background: #ff4d6a;
+      color: #fff;
+      border: none;
+      &:hover { background: #ff3355; }
+    }
+
+    .confirm-no {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: #fff;
+      &:hover { background: rgba(255, 255, 255, 0.1); }
+    }
+  }
+}
+
+// Empty state
+.schedules-empty {
+  text-align: center;
+  padding: 5rem 2rem;
+  background: var(--card-bg);
+  border: 2px dashed var(--input-border);
+  border-radius: 16px;
+  color: var(--foreground-darker);
+  grid-column: 1 / -1;
+
+  .empty-icon {
+    font-size: 5rem;
+    margin-bottom: 2rem;
+    opacity: 0.3;
+    color: var(--accent);
+  }
+
+  h2 {
+    font-size: 2rem;
+    color: var(--foreground);
+    margin-bottom: 1rem;
+    font-family: 'Orbitron', var(--font-sans);
+  }
+
+  p {
+    margin-bottom: 2rem;
+    max-width: 500px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+// Responsive
+@media (max-width: 768px) {
+  .schedules-header {
+    h1 { font-size: 2.2rem; }
+  }
+  .schedules-grid {
+    grid-template-columns: 1fr;
+  }
+  .plan-usage-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1.5rem;
+  }
+}
+
+/* Light Theme Overrides */
+body.light {
+  .schedules-subtitle { color: #4b5563; }
+  
+  .schedule-card {
+    &__target { color: #005f73; }
+    &__detail {
+      color: #4b5563;
+      strong { color: #0081a7; }
+    }
+  }
+  
+  .action-btn--edit {
+    border-color: #0081a7;
+    color: #0081a7;
+  }
+}

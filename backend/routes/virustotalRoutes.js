@@ -98,15 +98,6 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       });
     }
 
-    // Check if scan is completed
-    if (scan.status !== 'completed') {
-      return res.status(400).json({
-        error: 'Scan not completed',
-        message: `Scan is currently ${scan.status}. Only completed scans can be loaded.`,
-        status: scan.status
-      });
-    }
-
     // Build response object similar to combined-analysis response
     const response = {
       success: true,
@@ -114,6 +105,7 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       analysisId: scan.analysisId,
       target: scan.target,
       status: scan.status,
+      triggerSource: scan.triggerSource,
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt
     };
@@ -134,12 +126,14 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
     }
 
     // Add ZAP results with GridFS data if available
-    if (scan.zapResult) {
-      response.zapData = { ...scan.zapResult };
+    // Fallback to authScanResult if zapResult is missing (for authenticated scans)
+    const zapResult = scan.zapResult || scan.authScanResult;
+    if (zapResult) {
+      response.zapData = { ...zapResult };
 
       // Fetch detailed alerts from GridFS if available
-      if (scan.zapResult.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
-        const detailedAlertsFile = scan.zapResult.reportFiles.find(
+      if (zapResult.reportFiles && Array.isArray(zapResult.reportFiles)) {
+        const detailedAlertsFile = zapResult.reportFiles.find(
           f => f.filename && f.filename.includes('detailed_alerts')
         );
         if (detailedAlertsFile && detailedAlertsFile.fileId) {
@@ -398,7 +392,7 @@ router.get('/active-scan', auth, async (req, res) => {
 // 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
 router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, triggerSource, lang } = req.body;
 
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'URL is required' });
@@ -410,7 +404,7 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
       return res.status(400).json({ error: validation.error });
     }
 
-    console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url}`);
+    console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url} (Source: ${triggerSource || 'manual'})`);
 
     // Generate unique analysis ID
     const analysisId = crypto.randomUUID();
@@ -421,16 +415,19 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
       target: url,
       analysisId: analysisId,
       status: 'combining',
-      userId: req.user.id
+      userId: req.user.id,
+      triggerSource: triggerSource || 'manual',
+      languagePreference: lang || 'en'
     });
     await scan.save();
-    console.log('📝 Scan record created');
+    console.log(`📝 Scan record created (Source: ${scan.triggerSource})`);
 
     res.json({
       success: true,
       message: 'URL submitted for combined analysis',
       analysisId: analysisId,
-      url: url
+      url: url,
+      triggerSource: scan.triggerSource
     });
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
@@ -462,6 +459,37 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     if (!scan) {
       return res.status(404).json({
         error: 'Analysis not found in database'
+      });
+    }
+
+    // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
+    if (['stopped', 'completed', 'failed'].includes(scan.status)) {
+      console.log(`🛑 Scan ${id} is in terminal state (${scan.status}), returning early.`);
+      // Prepare response data (extracted from the existing logic at line 1014)
+      const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error ? {
+        performance: scan.pagespeedResult.lighthouseResult?.categories?.performance?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.performance.score * 100) : null,
+        accessibility: scan.pagespeedResult.lighthouseResult?.categories?.accessibility?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.accessibility.score * 100) : null,
+        bestPractices: scan.pagespeedResult.lighthouseResult?.categories?.['best-practices']?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories['best-practices'].score * 100) : null,
+        seo: scan.pagespeedResult.lighthouseResult?.categories?.seo?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.seo.score * 100) : null
+      } : null;
+
+      return res.json({
+        success: true,
+        status: scan.status,
+        analysisId: id,
+        target: scan.target,
+        hasPsiResult: !!scan.pagespeedResult,
+        hasObservatoryResult: !!scan.observatoryResult,
+        hasZapResult: !!scan.zapResult && (scan.zapResult.status === 'completed' || scan.zapResult.status === 'completed_partial'),
+        zapPending: false,
+        hasUrlscanResult: !!scan.urlscanResult && !scan.urlscanResult.error,
+        hasWebCheckResult: !!scan.webCheckResult && (scan.webCheckResult.status === 'completed' || scan.webCheckResult.status === 'completed_partial' || scan.webCheckResult.status === 'completed_with_errors'),
+        webCheckPending: false,
+        hasRefinedReport: !!scan.refinedReport,
+        psiScores,
+        refinedReport: scan.refinedReport || null,
+        createdAt: scan.createdAt,
+        updatedAt: scan.updatedAt
       });
     }
 
@@ -1275,7 +1303,8 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
 
     // Set headers for PDF download (include language in filename)
     const langSuffix = lang.toUpperCase();
-    const filename = `security_report_${langSuffix}_${scan.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+    const safeTarget = String(scan.target || '').replace(/[^a-z0-9]/gi, '_').slice(0, 80);
+    const filename = `security_report_${langSuffix}_${scan.analysisId}_${safeTarget}_${Date.now()}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', pdfBuffer.length);

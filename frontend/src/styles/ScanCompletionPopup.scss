@@ -5,16 +5,14 @@
 
 .scan-notification-container {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  top: 24px;
+  right: 24px;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 16px;
   z-index: 10000;
   pointer-events: none;
-  padding: 20px;
 }
 
 .scan-notification-popup {
@@ -145,6 +143,33 @@
   &:active {
     transform: translateY(0);
   }
+}
+
+.notification-btn-secondary {
+  background: transparent;
+  color: var(--text-secondary, #4b5563);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.1));
+  margin-right: 12px;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  [data-theme='dark'] &,
+  .dark &,
+  .pro-theme & {
+    color: #9ca3af;
+    border-color: rgba(255, 255, 255, 0.1);
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: #f0f0f0;
+    }
+  }
+}
+
+.notification-title.scheduled {
+  color: #a855f7;
 }
 
 /* Responsive */

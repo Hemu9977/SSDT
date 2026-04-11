@@ -60,6 +60,19 @@ const scanResultSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  triggerSource: {
+    type: String,
+    enum: ['manual', 'scheduled'],
+    default: 'manual'
+  },
+  notified: {
+    type: Boolean,
+    default: false
+  },
+  languagePreference: {
+    type: String,
+    default: 'en'
+  },
   createdAt: {
     type: Date,
     default: Date.now,

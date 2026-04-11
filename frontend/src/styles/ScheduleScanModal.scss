@@ -1,0 +1,727 @@
+// ScheduleScanModal Styles - SSDT Theme
+// Matches existing form patterns in Hero.scss
+
+:root {
+  --modal-bg: rgba(0, 0, 0, 0.75);
+  --input-bg: rgba(0, 0, 0, 0.4);
+  --input-border: rgba(0, 255, 255, 0.3);
+  --input-color: #0ff;
+  --label-color: #9adeff;
+  --picker-item-bg: rgba(0, 255, 255, 0.05);
+}
+
+body.light {
+  --modal-bg: rgba(255, 255, 255, 0.85);
+  --input-bg: rgba(255, 255, 255, 0.9);
+  --input-border: rgba(0, 95, 115, 0.3);
+  --input-color: #005f73;
+  --label-color: #0081a7;
+  --picker-item-bg: rgba(0, 129, 167, 0.05);
+}
+
+.schedule-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--modal-bg);
+  backdrop-filter: blur(12px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.schedule-modal {
+  background: var(--background);
+  border: 2px solid var(--accent);
+  border-radius: var(--card-border-radius);
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--card-shadow);
+  color: var(--foreground);
+  transition: all 0.3s ease;
+  z-index: 1000;
+
+  &__header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+    background: rgba(0, 0, 0, 0.2);
+
+    h2 {
+      font-family: 'Orbitron', var(--font-sans);
+      font-size: 1.35rem;
+      margin: 0;
+      font-weight: 800;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      text-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+    }
+  }
+
+  &__close {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    font-size: 28px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.3s ease;
+
+    &:hover {
+      color: var(--foreground);
+      background: rgba(0, 255, 255, 0.1);
+      box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+      transform: rotate(90deg);
+    }
+  }
+
+  &__form {
+    padding: 24px;
+    overflow-y: auto;
+    max-height: 80vh;
+    flex: 1;
+
+    // Custom scrollbar for internal form
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(0, 176, 198, 0.3);
+      border-radius: 3px;
+    }
+  }
+
+  &__actions {
+    flex-shrink: 0;
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+    padding: 20px 24px;
+    background: rgba(0, 0, 0, 0.2);
+    border-top: 1px solid rgba(0, 176, 198, 0.1);
+  }
+}
+
+// Form elements
+.form-group {
+  margin-bottom: 1.5rem;
+
+  label {
+    display: block;
+    color: var(--label-color);
+    font-family: 'Orbitron', var(--font-sans);
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  input[type="url"],
+  input[type="text"],
+  input[type="password"],
+  input[type="date"] {
+    width: 100%;
+    padding: 0.85rem 1.15rem;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 10px;
+    color: var(--input-color);
+    font-size: 1rem;
+    font-family: var(--font-mono);
+    transition: all 0.3s ease;
+    outline: none;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+
+    &:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 15px rgba(0, 176, 198, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    &::placeholder {
+      color: rgba(0, 176, 198, 0.3);
+    }
+    
+    &:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+  }
+
+  &.half {
+    flex: 1;
+    min-width: 250px;
+  }
+}
+
+// Scrolling Time Picker Styles
+.scrolling-time-picker {
+  .picker-container {
+    display: flex;
+    gap: 10px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 12px;
+    padding: 12px;
+    align-items: stretch;
+    height: 180px; 
+  }
+
+  .picker-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 50px;
+  }
+
+  .column-label {
+    font-size: 0.65rem;
+    font-weight: 800;
+    color: var(--accent);
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+    opacity: 0.8;
+  }
+
+  .scroll-area {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-right: 2px;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: rgba(0, 176, 198, 0.2);
+      border-radius: 2px;
+    }
+  }
+
+  .picker-item {
+    padding: 8px 4px;
+    background: var(--picker-item-bg);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--input-color);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: center;
+
+    &:hover {
+      background: rgba(0, 176, 198, 0.15);
+      border-color: var(--accent);
+    }
+
+    &.active {
+      background: var(--accent);
+      color: #000;
+      box-shadow: 0 0 10px rgba(0, 176, 198, 0.4);
+    }
+  }
+
+  .picker-separator {
+    display: flex;
+    align-items: center;
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: var(--accent);
+    padding-top: 20px;
+  }
+
+  .period-toggle {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    justify-content: center;
+    height: 100%;
+
+    .picker-item {
+      padding: 12px 4px;
+    }
+  }
+
+  .picker-selected-value {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    text-align: right;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+}
+
+.form-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+.form-group.half {
+  flex: 1;
+  min-width: 250px;
+}
+
+// Mode selector
+.mode-selector {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mode-btn {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 1.25rem 0.75rem;
+  background: var(--picker-item-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+
+  &:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent);
+    box-shadow: 0 8px 15px rgba(0, 176, 198, 0.15);
+  }
+
+  &.active {
+    background: rgba(0, 255, 255, 0.12);
+    border-color: var(--accent);
+    box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+    
+    body.light & {
+      background: rgba(0, 129, 167, 0.15);
+    }
+
+    .mode-label {
+      color: var(--accent);
+    }
+  }
+
+  .mode-label {
+    color: var(--input-color);
+    font-size: 0.9rem;
+    font-weight: 800;
+    font-family: 'Orbitron', var(--font-sans);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .mode-desc {
+    color: var(--label-color);
+    font-size: 0.7rem;
+    text-align: center;
+    opacity: 0.7;
+    font-weight: 500;
+  }
+}
+
+.btn-submit, .btn-cancel {
+  padding: 14px 28px;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 800;
+  font-family: 'Orbitron', var(--font-sans);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+.btn-cancel {
+  background: transparent;
+  border: 1px solid rgba(0, 176, 198, 0.3);
+  color: var(--label-color);
+
+  &:hover {
+    background: rgba(0, 176, 198, 0.1);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.btn-submit {
+  background: linear-gradient(135deg, var(--accent) 0%, #0081a7 100%);
+  color: #000;
+  border: none;
+  box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+
+  &:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px rgba(0, 255, 255, 0.4);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(1);
+  }
+}
+
+// Frequency selector
+.frequency-selector {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.freq-btn {
+  flex: 1;
+  min-width: 100px;
+  padding: 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--picker-item-bg);
+  color: var(--input-color);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-family: 'Orbitron', var(--font-sans);
+  text-transform: uppercase;
+  font-weight: 700;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: var(--accent);
+    background: rgba(0, 176, 198, 0.1);
+  }
+
+  &.active {
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
+    box-shadow: 0 0 10px rgba(0, 176, 198, 0.3);
+  }
+}
+
+.day-picker {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr); // 10 columns for a clean grid
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.day-btn {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--picker-item-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  color: var(--input-color);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: var(--accent);
+    background: rgba(0, 176, 198, 0.15);
+    transform: scale(1.05);
+  }
+
+  &.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    box-shadow: 0 0 12px rgba(0, 176, 198, 0.5);
+  }
+}
+
+// Recurring config
+.recurring-config {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 176, 198, 0.15);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+// Custom Calendar Styles
+.custom-calendar-wrapper {
+  position: relative;
+  width: 100%;
+  transition: margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  &.picker-open {
+    margin-bottom: 360px; // Reserve space to prevent clipping and overlap
+
+    @media (max-width: 640px) {
+      margin-bottom: 380px;
+    }
+  }
+
+  .calendar-input-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.85rem 1.15rem;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 10px;
+    color: var(--input-color);
+    font-size: 1rem;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    transition: all 0.3s ease;
+    user-select: none;
+
+    &:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 10px rgba(0, 176, 198, 0.2);
+    }
+
+    .calendar-icon {
+      font-size: 1.1rem;
+      color: var(--accent);
+    }
+  }
+
+  .calendar-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    width: 100%;
+    min-width: 280px;
+    max-width: 320px;
+    background: rgba(10, 15, 20, 0.98);
+    border: 2px solid var(--accent);
+    border-radius: 16px;
+    padding: 1.25rem;
+    z-index: 100; // Ensure it's above everything including time picker
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 255, 255, 0.15);
+    backdrop-filter: blur(12px);
+    
+    body.light & {
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+    }
+
+    .calendar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.25rem;
+
+      .month-year {
+        font-family: 'Orbitron', var(--font-sans);
+        font-weight: 800;
+        font-size: 0.85rem;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      button {
+        background: rgba(0, 176, 198, 0.1);
+        border: 1px solid var(--input-border);
+        color: var(--accent);
+        border-radius: 8px;
+        width: 30px;
+        height: 30px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+
+        &:hover {
+          background: var(--accent);
+          color: #000;
+          transform: scale(1.1);
+        }
+      }
+    }
+
+    .calendar-weekdays {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+      margin-bottom: 8px;
+
+      div {
+        text-align: center;
+        font-size: 0.6rem;
+        font-weight: 800;
+        color: var(--label-color);
+        text-transform: uppercase;
+        opacity: 0.7;
+      }
+    }
+
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+    }
+
+    .calendar-day {
+      aspect-ratio: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid transparent;
+      background: var(--picker-item-bg);
+      border-radius: 6px;
+      color: var(--input-color);
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: all 0.2s;
+
+      &:hover:not(.empty) {
+        border-color: var(--accent);
+        background: rgba(0, 176, 198, 0.15);
+      }
+
+      &.selected {
+        background: var(--accent) !important;
+        color: #000 !important;
+        font-weight: 800;
+        box-shadow: 0 0 15px rgba(0, 176, 198, 0.5);
+      }
+
+      &.today {
+        border-color: var(--accent);
+        background: rgba(0, 255, 255, 0.05);
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      &.empty {
+        background: transparent;
+        cursor: default;
+      }
+    }
+
+    .calendar-today-btn {
+      width: 100%;
+      margin-top: 1rem;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 8px;
+      font-size: 0.7rem;
+      font-weight: 800;
+      font-family: 'Orbitron', var(--font-sans);
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 1px;
+
+      &:hover {
+        background: var(--accent);
+        color: #000;
+      }
+    }
+  }
+}
+
+// Global button modifications
+.btn-submit {
+  background: linear-gradient(135deg, var(--accent) 0%, #0081a7 100%);
+  color: #000;
+  border: none;
+  padding: 12px 32px;
+  border-radius: 12px;
+  font-family: 'Orbitron', var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  cursor: pointer;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+  position: relative;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: 0.5s;
+  }
+
+  &:hover:not(:disabled) {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 10px 30px rgba(0, 255, 255, 0.5);
+    
+    &::before {
+      left: 100%;
+    }
+  }
+
+  &:active {
+    transform: translateY(-1px) scale(0.98);
+  }
+
+  body.light & {
+    color: #fff;
+    box-shadow: 0 5px 15px rgba(0, 176, 198, 0.3);
+  }
+  
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(1);
+  }
+}
+
+.schedule-modal__close {
+  &:hover {
+    color: var(--accent);
+    transform: rotate(90deg);
+  }
+}
+
+// Responsive
+@media (max-width: 640px) {
+  .schedule-modal {
+    max-width: 100%;
+  }
+  .form-row {
+    flex-direction: column;
+  }
+  .day-picker {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}

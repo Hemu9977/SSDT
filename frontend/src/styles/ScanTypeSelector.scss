@@ -197,6 +197,12 @@
       }
     }
 
+    .card-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
     .card-button {
       display: flex;
       align-items: center;

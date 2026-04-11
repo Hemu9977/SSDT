@@ -20,7 +20,7 @@ router.get('/', auth, async (req, res) => {
     const recentScans = await ScanResult.find({ userId: req.user.id })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select('analysisId target status createdAt');
+      .select('analysisId target status createdAt triggerSource');
 
     // Calculate scans this month
     const startOfMonth = new Date();

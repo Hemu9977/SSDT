@@ -12,12 +12,22 @@ import { useNotifications } from '../contexts/NotificationContext';
 import '../styles/ScanCompletionPopup.scss';
 
 const ScanCompletionPopup = () => {
-  const { notifications, removeNotification } = useNotifications();
+  const { notifications, removeNotification, markAsRead } = useNotifications();
   const navigate = useNavigate();
 
   const handleViewReport = (notification) => {
     removeNotification(notification.id);
-    navigate(`/scan/${notification.scanId}`);
+    if (notification.isScheduled) {
+      markAsRead(notification.scanId);
+    }
+    navigate(`/scan/${notification.scanId}${notification.isScheduled ? '?lang=en' : ''}`);
+  };
+
+  const handleDismiss = (notification) => {
+    removeNotification(notification.id);
+    if (notification.isScheduled) {
+      markAsRead(notification.scanId);
+    }
   };
 
   return (
@@ -27,9 +37,9 @@ const ScanCompletionPopup = () => {
           <motion.div
             key={notification.id}
             className="scan-notification-popup"
-            initial={{ opacity: 0, scale: 0.85, y: 30 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9, y: 30 }}
+            initial={{ opacity: 0, scale: 0.9, x: 100 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.9, x: 100 }}
             transition={{ 
               type: 'spring', 
               stiffness: 300, 
@@ -67,6 +77,12 @@ const ScanCompletionPopup = () => {
             </div>
 
             <div className="notification-actions">
+              <button
+                className="notification-btn notification-btn-secondary"
+                onClick={() => handleDismiss(notification)}
+              >
+                Dismiss
+              </button>
               <button
                 className="notification-btn notification-btn-primary"
                 onClick={() => handleViewReport(notification)}

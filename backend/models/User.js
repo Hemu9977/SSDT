@@ -53,6 +53,17 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  monthlyScansUsed: {
+    type: Number,
+    default: 0
+  },
+  lastResetDate: {
+    type: Date,
+    default: Date.now
+  },
+  targetsUsed: [{
+    type: String
+  }],
   // Pro features (for future implementation)
   proExpiresAt: {
     type: Date,
@@ -80,18 +91,36 @@ UserSchema.methods.isPro = function() {
   return this.accountType === 'pro' && (!this.proExpiresAt || this.proExpiresAt > new Date());
 };
 
+// Method to check and reset monthly scans if a new month has started
+UserSchema.methods.checkAndResetMonthlyScans = function() {
+  const now = new Date();
+  const lastReset = new Date(this.lastResetDate);
+  
+  if (now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()) {
+    this.monthlyScansUsed = 0;
+    this.lastResetDate = now;
+    // Don't save here, caller should save if needed or it will be saved with other updates
+    return true;
+  }
+  return false;
+};
+
 // Method to get account limits
 UserSchema.methods.getAccountLimits = function() {
   if (this.isPro()) {
     return {
-      scansPerDay: -1, // Unlimited for pro (implement later)
-      maxFileSize: 100 * 1024 * 1024, // 100MB for pro
+      scansPerMonth: 500,
+      scansPerDay: -1,
+      maxSchedules: 50,
+      maxFileSize: 100 * 1024 * 1024,
       priorityQueue: true
     };
   } else {
     return {
-      scansPerDay: 20, // 20 scans per day for free
-      maxFileSize: 32 * 1024 * 1024, // 32MB for free
+      scansPerMonth: 20,
+      scansPerDay: 5,
+      maxSchedules: 2,
+      maxFileSize: 32 * 1024 * 1024,
       priorityQueue: false
     };
   }

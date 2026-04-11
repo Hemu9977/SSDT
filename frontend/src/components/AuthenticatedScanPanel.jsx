@@ -34,6 +34,7 @@ const AuthenticatedScanPanel = () => {
 
   // Wizard state
   const [step, setStep] = useState(1);
+  const [pendingSchedule, setPendingSchedule] = useState(null);
 
   // Step 1: URL configuration
   const [targetUrl, setTargetUrl] = useState('');
@@ -142,6 +143,21 @@ const AuthenticatedScanPanel = () => {
     }
     return () => setHasReport(false);
   }, [report?.refinedReport, setHasReport]);
+
+  // Check for pending schedule on mount
+  useEffect(() => {
+    const pendingJson = sessionStorage.getItem('pendingScheduleConfig');
+    if (pendingJson) {
+      try {
+        const parsed = JSON.parse(pendingJson);
+        if (parsed.scanType === 'authenticated') {
+          setPendingSchedule(parsed);
+        }
+      } catch (err) {
+        console.error('Failed to parse pending schedule config', err);
+      }
+    }
+  }, []);
 
   // Auto-translate AI report when language changes to Japanese (same as Hero.jsx)
   useEffect(() => {
@@ -346,7 +362,59 @@ const AuthenticatedScanPanel = () => {
   };
 
   // ========== Step 3: Start Scan ==========
+  const submitSchedule = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+
+    setScanning(true);
+    setError(null);
+
+    const authConfigObj = {
+      loginUrl,
+      credentials: selectedFields.map(field => ({
+        selector: field.selector,
+        value: credentials[field.selector],
+        inputType: field.inputType
+      })),
+      submitButton: selectedSubmitButton
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/schedules`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          scanType: 'authenticated',
+          targetUrl: targetUrl,
+          scheduleType: pendingSchedule.scheduleType || (pendingSchedule.recurring ? 'recurring' : 'one-time'),
+          scheduledAt: pendingSchedule.scheduledAt,
+          recurring: pendingSchedule.recurring,
+          timezone: pendingSchedule.timezone || 'Asia/Kolkata',
+          authConfig: authConfigObj
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create schedule');
+
+      sessionStorage.removeItem('pendingScheduleConfig');
+      setPendingSchedule(null);
+      alert('Authenticated Schedule created successfully!');
+      navigate('/schedules');
+    } catch (err) {
+      setError(err.message);
+      setScanning(false);
+    }
+  };
+
   const handleStartScan = async () => {
+    if (pendingSchedule) {
+      return submitSchedule();
+    }
+
     const token = localStorage.getItem('token');
     if (!token) {
       navigate('/login');
@@ -565,6 +633,13 @@ const AuthenticatedScanPanel = () => {
             <button className="dismiss-btn" onClick={() => setError(null)}>
               Dismiss
             </button>
+          </div>
+        )}
+
+        {pendingSchedule && (
+          <div className="scheduling-mode-banner" style={{ background: 'rgba(0, 176, 198, 0.1)', border: '1px solid var(--accent)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', textAlign: 'center', color: 'var(--accent)' }}>
+            <strong>Scheduling Mode Active</strong><br/>
+            Setting up an authenticated scan for {pendingSchedule.date} at {pendingSchedule.time}
           </div>
         )}
 
@@ -807,7 +882,7 @@ const AuthenticatedScanPanel = () => {
                 disabled={scanning}
               >
                 {scanning && <span className="spinner" />}
-                <span>Start Authenticated Scan</span>
+                <span>{pendingSchedule ? "Save Scheduled Scan" : "Start Authenticated Scan"}</span>
               </button>
             </div>
           </div>

@@ -1306,6 +1306,16 @@ async function startAsyncZapScan(targetUrl, scanId, userId) {
     // This prevents duplicate scans even if backend restarts
     const existingScan = await ScanResult.findOne({ analysisId: scanId, userId });
 
+    // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
+    if (existingScan && ['stopped', 'completed', 'failed'].includes(existingScan.status)) {
+      console.log(`🛑 [ZAP] Scan ${scanId} is in terminal state (${existingScan.status}), refusing to start.`);
+      return {
+        status: existingScan.status,
+        message: `Scan is already in a terminal state: ${existingScan.status}`,
+        zapResult: existingScan.zapResult
+      };
+    }
+
     if (existingScan?.zapResult) {
       const status = existingScan.zapResult.status;
 
@@ -1390,10 +1400,17 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
   try {
     // Update helper function with retry logic for long-running scans
     const updateProgress = async (phase, progress, additionalData = {}, maxRetries = 3) => {
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           // First, get the current zapResult to merge with new data
           const currentScan = await ScanResult.findOne({ analysisId: scanId });
+
+          // --- TERMINAL STATE CHECK: If scan was stopped/failed, EXIT BACKGROUND PROCESS ---
+          if (currentScan && ['stopped', 'failed'].includes(currentScan.status)) {
+            console.log(`🛑 [BACKGROUND] Scan ${scanId} detected as ${currentScan.status}. Terminating background worker.`);
+            throw new Error('STOPPED_BY_USER'); 
+          }
+
           const currentZapResult = currentScan?.zapResult || {};
 
           // Merge current data with updates
