@@ -98,6 +98,15 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       });
     }
 
+    // Check if scan is completed
+    if (scan.status !== 'completed') {
+      return res.status(400).json({
+        error: 'Scan not completed',
+        message: `Scan is currently ${scan.status}. Only completed scans can be loaded.`,
+        status: scan.status
+      });
+    }
+
     // Build response object similar to combined-analysis response
     const response = {
       success: true,
@@ -105,7 +114,6 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       analysisId: scan.analysisId,
       target: scan.target,
       status: scan.status,
-      triggerSource: scan.triggerSource,
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt
     };
@@ -126,14 +134,12 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
     }
 
     // Add ZAP results with GridFS data if available
-    // Fallback to authScanResult if zapResult is missing (for authenticated scans)
-    const zapResult = scan.zapResult || scan.authScanResult;
-    if (zapResult) {
-      response.zapData = { ...zapResult };
+    if (scan.zapResult) {
+      response.zapData = { ...scan.zapResult };
 
       // Fetch detailed alerts from GridFS if available
-      if (zapResult.reportFiles && Array.isArray(zapResult.reportFiles)) {
-        const detailedAlertsFile = zapResult.reportFiles.find(
+      if (scan.zapResult.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
+        const detailedAlertsFile = scan.zapResult.reportFiles.find(
           f => f.filename && f.filename.includes('detailed_alerts')
         );
         if (detailedAlertsFile && detailedAlertsFile.fileId) {
@@ -195,6 +201,10 @@ router.get('/active-scan', auth, async (req, res) => {
     let activeScan = await ScanResult.findOne({
       userId: req.user.id,
       status: { $in: ['queued', 'pending', 'combining'] },
+      // If a stop was requested, don't ever resume it as an "active" scan.
+      // This protects against partial updates where overall status wasn't flipped to 'stopped'.
+      'zapResult.status': { $nin: ['stopped', 'cancelled'] },
+      'webCheckResult.status': { $nin: ['stopped', 'cancelled'] },
       createdAt: { $gte: twentyFourHoursAgo }
     }).sort({ createdAt: -1 });
 
@@ -392,7 +402,7 @@ router.get('/active-scan', auth, async (req, res) => {
 // 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
 router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
   try {
-    const { url, triggerSource, lang } = req.body;
+    const { url } = req.body;
 
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'URL is required' });
@@ -404,7 +414,7 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
       return res.status(400).json({ error: validation.error });
     }
 
-    console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url} (Source: ${triggerSource || 'manual'})`);
+    console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url}`);
 
     // Generate unique analysis ID
     const analysisId = crypto.randomUUID();
@@ -415,19 +425,16 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
       target: url,
       analysisId: analysisId,
       status: 'combining',
-      userId: req.user.id,
-      triggerSource: triggerSource || 'manual',
-      languagePreference: lang || 'en'
+      userId: req.user.id
     });
     await scan.save();
-    console.log(`📝 Scan record created (Source: ${scan.triggerSource})`);
+    console.log('📝 Scan record created');
 
     res.json({
       success: true,
       message: 'URL submitted for combined analysis',
       analysisId: analysisId,
-      url: url,
-      triggerSource: scan.triggerSource
+      url: url
     });
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
@@ -462,31 +469,37 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       });
     }
 
-    // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
-    if (['stopped', 'completed', 'failed'].includes(scan.status)) {
-      console.log(`🛑 Scan ${id} is in terminal state (${scan.status}), returning early.`);
-      // Prepare response data (extracted from the existing logic at line 1014)
-      const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error ? {
-        performance: scan.pagespeedResult.lighthouseResult?.categories?.performance?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.performance.score * 100) : null,
-        accessibility: scan.pagespeedResult.lighthouseResult?.categories?.accessibility?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.accessibility.score * 100) : null,
-        bestPractices: scan.pagespeedResult.lighthouseResult?.categories?.['best-practices']?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories['best-practices'].score * 100) : null,
-        seo: scan.pagespeedResult.lighthouseResult?.categories?.seo?.score ? Math.round(scan.pagespeedResult.lighthouseResult.categories.seo.score * 100) : null
-      } : null;
-
+    // If the scan was explicitly stopped/cancelled, never restart work on polling.
+    // This route is called repeatedly by the frontend and must be idempotent.
+    if (['stopped', 'cancelled'].includes(scan.status)) {
       return res.json({
-        success: true,
         status: scan.status,
+        message: 'Scan was stopped by user',
         analysisId: id,
         target: scan.target,
-        hasPsiResult: !!scan.pagespeedResult,
-        hasObservatoryResult: !!scan.observatoryResult,
-        hasZapResult: !!scan.zapResult && (scan.zapResult.status === 'completed' || scan.zapResult.status === 'completed_partial'),
-        zapPending: false,
-        hasUrlscanResult: !!scan.urlscanResult && !scan.urlscanResult.error,
-        hasWebCheckResult: !!scan.webCheckResult && (scan.webCheckResult.status === 'completed' || scan.webCheckResult.status === 'completed_partial' || scan.webCheckResult.status === 'completed_with_errors'),
-        webCheckPending: false,
-        hasRefinedReport: !!scan.refinedReport,
-        psiScores,
+        pagespeedResult: scan.pagespeedResult || null,
+        observatoryResult: scan.observatoryResult || null,
+        urlscanResult: scan.urlscanResult || null,
+        zapResult: scan.zapResult || null,
+        webCheckResult: scan.webCheckResult || null,
+        refinedReport: scan.refinedReport || null,
+        createdAt: scan.createdAt,
+        updatedAt: scan.updatedAt
+      });
+    }
+
+    // Secondary guard: if background components were stopped, do not restart them.
+    if (['stopped', 'cancelled'].includes(scan.zapResult?.status) || ['stopped', 'cancelled'].includes(scan.webCheckResult?.status)) {
+      return res.json({
+        status: 'stopped',
+        message: 'Scan was stopped by user',
+        analysisId: id,
+        target: scan.target,
+        pagespeedResult: scan.pagespeedResult || null,
+        observatoryResult: scan.observatoryResult || null,
+        urlscanResult: scan.urlscanResult || null,
+        zapResult: scan.zapResult || null,
+        webCheckResult: scan.webCheckResult || null,
         refinedReport: scan.refinedReport || null,
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt
@@ -512,9 +525,32 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       console.log('🔄 Running PageSpeed, Observatory, ZAP, WebCheck, urlscan and Gemini analysis...');
 
       try {
-        // Update status to combining
-        scan.status = 'combining';
-        await scan.save();
+        // Update status to combining (durable cancellation: do not overwrite stopped scans)
+        const statusUpdate = await ScanResult.updateOne(
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
+          { $set: { status: 'combining', updatedAt: new Date() } }
+        );
+
+        if (statusUpdate.modifiedCount === 0) {
+          // Likely stopped in parallel by user; re-fetch and return without restarting work
+          const latest = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
+          if (latest && ['stopped', 'cancelled'].includes(latest.status)) {
+            return res.json({
+              status: latest.status,
+              message: 'Scan was stopped by user',
+              analysisId: id,
+              target: latest.target,
+              pagespeedResult: latest.pagespeedResult || null,
+              observatoryResult: latest.observatoryResult || null,
+              urlscanResult: latest.urlscanResult || null,
+              zapResult: latest.zapResult || null,
+              webCheckResult: latest.webCheckResult || null,
+              refinedReport: latest.refinedReport || null,
+              createdAt: latest.createdAt,
+              updatedAt: latest.updatedAt
+            });
+          }
+        }
 
         // CRITICAL CHANGE: Run fast scans in parallel, ZAP and WebCheck run asynchronously
         // Both ZAP and WebCheck will update database independently when complete
@@ -641,8 +677,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
         // Save results so far (PSI, Observatory, urlscan complete, ZAP and WebCheck pending)
         // CRITICAL: Use $set to update only specific fields, NOT the entire document
         // This prevents overwriting zapResult/webCheckResult that background scans may have updated
-        await ScanResult.updateOne(
-          { analysisId: id },
+        const fastUpdate = await ScanResult.updateOne(
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
           {
             $set: {
               status: 'combining',
@@ -657,6 +693,26 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
             }
           }
         );
+
+        if (fastUpdate.modifiedCount === 0) {
+          const latest = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
+          if (latest && ['stopped', 'cancelled'].includes(latest.status)) {
+            return res.json({
+              status: latest.status,
+              message: 'Scan was stopped by user',
+              analysisId: id,
+              target: latest.target,
+              pagespeedResult: latest.pagespeedResult || null,
+              observatoryResult: latest.observatoryResult || null,
+              urlscanResult: latest.urlscanResult || null,
+              zapResult: latest.zapResult || null,
+              webCheckResult: latest.webCheckResult || null,
+              refinedReport: latest.refinedReport || null,
+              createdAt: latest.createdAt,
+              updatedAt: latest.updatedAt
+            });
+          }
+        }
         console.log('✅ Fast scans complete (PSI, Observatory, urlscan). ZAP and WebCheck running in background.');
 
         // CRITICAL: Re-fetch the scan from DB to get the latest zapResult/webCheckResult
@@ -672,7 +728,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
         console.error('❌ Error in combining step:', combineError);
         // Use atomic update for error case to avoid overwriting background scan progress
         await ScanResult.updateOne(
-          { analysisId: id },
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
           {
             $set: {
               status: 'failed',
@@ -702,7 +758,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       if (zapAge > ZAP_STALE_TIMEOUT_MS) {
         console.error(`❌ ZAP scan timed out (running for ${Math.round(zapAge / 60000)}min). Failing entire scan.`);
         await ScanResult.updateOne(
-          { analysisId: id },
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
           { $set: { 'zapResult.status': 'failed', 'zapResult.error': 'Scan timed out (exceeded 24 hour limit)', 'zapResult.phase': 'failed', status: 'failed', updatedAt: new Date() } }
         );
         scan.zapResult.status = 'failed';
@@ -715,7 +771,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       if (wcAge > WEBCHECK_STALE_TIMEOUT_MS) {
         console.error(`❌ WebCheck scan timed out (running for ${Math.round(wcAge / 60000)}min). Failing entire scan.`);
         await ScanResult.updateOne(
-          { analysisId: id },
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
           { $set: { 'webCheckResult.status': 'failed', 'webCheckResult.error': 'Scan timed out (exceeded 6 hour limit)', status: 'failed', updatedAt: new Date() } }
         );
         scan.webCheckResult.status = 'failed';
@@ -746,7 +802,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       if (hasWebCheckFailed) failedParts.push(`WebCheck: ${scan.webCheckResult?.error || 'unknown error'}`);
       console.error(`❌ Background scan(s) failed: ${failedParts.join(', ')}. Failing entire scan.`);
       await ScanResult.updateOne(
-        { analysisId: id },
+        { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
         { $set: { status: 'failed', updatedAt: new Date() } }
       );
       scan.status = 'failed';
@@ -829,7 +885,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
 
           // Use atomic update for final completion to avoid race conditions
           await ScanResult.updateOne(
-            { analysisId: id },
+            { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
             {
               $set: {
                 refinedReport: aiReport,
@@ -853,7 +909,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           // Store fallback message using atomic update
           const fallbackReport = `AI analysis temporarily unavailable due to high demand. Please try again later.\n\nError: ${geminiError.message}`;
           await ScanResult.updateOne(
-            { analysisId: id },
+            { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
             {
               $set: {
                 refinedReport: fallbackReport,
@@ -881,7 +937,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
 
         const fallbackReport = 'AI analysis could not be generated - some scan data was unavailable. Please view individual scan results below.';
         await ScanResult.updateOne(
-          { analysisId: id },
+          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
           {
             $set: {
               refinedReport: fallbackReport,
@@ -1303,8 +1359,7 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
 
     // Set headers for PDF download (include language in filename)
     const langSuffix = lang.toUpperCase();
-    const safeTarget = String(scan.target || '').replace(/[^a-z0-9]/gi, '_').slice(0, 80);
-    const filename = `security_report_${langSuffix}_${scan.analysisId}_${safeTarget}_${Date.now()}.pdf`;
+    const filename = `security_report_${langSuffix}_${scan.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', pdfBuffer.length);
@@ -1315,6 +1370,18 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
 
   } catch (err) {
     console.error('❌ PDF generation error:', err);
+    if (err?.code === 'GEMINI_KEY_EXHAUSTED') {
+      return res.status(429).json({
+        errorCode: 'GEMINI_KEY_EXHAUSTED',
+        error: 'Gemini key is exhausted'
+      });
+    }
+    if (['EN_CONTENT_NOT_ENGLISH', 'EN_TEMPLATE_NOT_ENGLISH'].includes(err?.code)) {
+      return res.status(400).json({
+        errorCode: err.code,
+        error: err.message
+      });
+    }
     res.status(500).json({
       error: 'Failed to generate PDF report',
       details: err.message

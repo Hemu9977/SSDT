@@ -818,6 +818,18 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
   } catch (error) {
     console.error('[ZAP-AUTH] PDF generation error:', error);
     if (!res.headersSent) {
+      if (error?.code === 'GEMINI_KEY_EXHAUSTED') {
+        return res.status(429).json({
+          errorCode: 'GEMINI_KEY_EXHAUSTED',
+          error: 'Gemini key is exhausted'
+        });
+      }
+      if (['EN_CONTENT_NOT_ENGLISH', 'EN_TEMPLATE_NOT_ENGLISH'].includes(error?.code)) {
+        return res.status(400).json({
+          errorCode: error.code,
+          error: error.message
+        });
+      }
       res.status(500).json({
         error: 'Failed to generate PDF report',
         details: error.message

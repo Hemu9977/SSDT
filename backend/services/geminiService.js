@@ -366,9 +366,12 @@ function stripMarkdownBasic(text) {
 /**
  * Format scan data into structured bilingual JSON for PDF
  * @param {Object} scanResult - The complete scan result
+ * @param {Object} [options]
+ * @param {Array<Object>} [options.scanHistoryRows] - Scan history rows (pre-formatted dates/user display); each item:
+ *   { dateEn, dateJa, executedByEn, executedByJa, status }
  * @returns {Promise<Object>} - Structured bilingual data
  */
-async function formatScanDataForPdf(scanResult) {
+async function formatScanDataForPdf(scanResult, options = {}) {
   const apiKeys = getApiKeys();
 
   if (apiKeys.length === 0) {
@@ -392,6 +395,8 @@ async function formatScanDataForPdf(scanResult) {
   const zap = scanResult.zapResult || {};
   const urlscan = scanResult.urlscanResult || {};
   const webCheck = scanResult.webCheckResult?.fullResults || {};
+
+  const scanHistoryRows = Array.isArray(options.scanHistoryRows) ? options.scanHistoryRows : [];
 
   const scanDataText = `
 Target URL: ${scanResult.target}
@@ -452,6 +457,9 @@ WEBCHECK ANALYSIS:
 SCAN DATA:
 ${scanDataText}
 
+    SCAN HISTORY INPUT (JSON array):
+    ${JSON.stringify(scanHistoryRows, null, 2)}
+
 Return a JSON object with this EXACT structure:
 {
   "header": {
@@ -460,6 +468,17 @@ Return a JSON object with this EXACT structure:
     "scanId": "${scanResult.analysisId}",
     "date": "${new Date().toLocaleDateString()}",
     "status": { "en": "${scanResult.status}", "ja": "Japanese translation" }
+  },
+  "scanHistory": {
+    "title": { "en": "Scan History", "ja": "Japanese translation" },
+    "headers": {
+      "en": ["Date", "Executed by", "Status"],
+      "ja": ["日付", "実行ユーザー", "ステータス"]
+    },
+    "rows": {
+      "en": [["DD/MM/YYYY", "user@example.com", "Completed"]],
+      "ja": [["YYYY/MM/DD", "user@example.com", "診断終了"]]
+    }
   },
   "summary": {
     "title": { "en": "Executive Summary", "ja": "Japanese translation" },
@@ -539,7 +558,14 @@ IMPORTANT RULES:
 1. Return ONLY valid JSON, no markdown or extra text
 2. Translate ALL "ja" fields to proper Japanese
 3. Keep technical terms (like URLs, IPs, scores) unchanged
-4. Ensure professional translations suitable for a business report`;
+4. Ensure professional translations suitable for a business report
+5. The "scanHistory" section MUST be generated from SCAN HISTORY INPUT:
+  - Use the SAME number of rows and SAME row order as input
+  - For English rows, use input.dateEn and input.executedByEn EXACTLY (do not change date formats)
+  - For Japanese rows, use input.dateJa and input.executedByJa EXACTLY (do not change date formats)
+  - Convert the input "status" into a user-friendly label in each language (e.g., completed -> Completed/診断終了, pending/queued/combining -> Scanning/スキャン中, failed -> Failed/失敗, cancelled/stopped -> Cancelled/停止)
+  - Do NOT invent rows that are not in the input
+`;
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
@@ -585,6 +611,95 @@ IMPORTANT RULES:
   }
 
   throw new Error(`Scan data formatting failed: ${lastError?.message}`);
+}
+
+/**
+ * Format scan history into structured bilingual JSON for PDF.
+ * Used when scanData formatting fails to include scanHistory.
+ * @param {Array<Object>} scanHistoryRows - Each item: { dateEn, dateJa, executedByEn, executedByJa, status }
+ * @returns {Promise<Object>} - { title, headers, rows } bilingual
+ */
+async function formatScanHistoryForPdf(scanHistoryRows) {
+  const apiKeys = getApiKeys();
+
+  if (apiKeys.length === 0) {
+    throw new Error('No Gemini API keys configured');
+  }
+
+  const rows = Array.isArray(scanHistoryRows) ? scanHistoryRows : [];
+
+  let lastError = null;
+
+  for (let i = 0; i < apiKeys.length; i++) {
+    const apiKey = apiKeys[i];
+    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
+
+    try {
+      console.log(`📋 Formatting scan history for PDF using ${keyLabel} key...`);
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+
+      const prompt = `Generate the Scan History table content for a professional bilingual PDF report (English and Japanese).
+
+INPUT (JSON array):
+${JSON.stringify(rows, null, 2)}
+
+Return ONLY valid JSON with this EXACT structure:
+{
+  "title": { "en": "Scan History", "ja": "Japanese translation" },
+  "headers": {
+    "en": ["Date", "Executed by", "Status"],
+    "ja": ["日付", "実行ユーザー", "ステータス"]
+  },
+  "rows": {
+    "en": [["DD/MM/YYYY", "user@example.com", "Completed"]],
+    "ja": [["YYYY/MM/DD", "user@example.com", "診断終了"]]
+  }
+}
+
+CRITICAL RULES:
+1. Use the SAME number of rows and SAME order as the input array.
+2. For English rows, use input.dateEn and input.executedByEn EXACTLY (do not change date formats).
+3. For Japanese rows, use input.dateJa and input.executedByJa EXACTLY (do not change date formats).
+4. Convert input.status into a user-friendly label in each language:
+   - completed -> Completed / 診断終了
+   - pending/queued/combining -> Scanning / スキャン中
+   - failed -> Failed / 失敗
+   - cancelled/stopped -> Cancelled / 停止
+5. Do NOT add any text outside of the JSON.`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      let jsonText = response.text().trim();
+
+      jsonText = jsonText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+      const parsed = JSON.parse(jsonText);
+
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Invalid scanHistory response - not an object');
+      }
+      if (!parsed.title || !parsed.headers || !parsed.rows) {
+        throw new Error('Invalid scanHistory response - missing title/headers/rows');
+      }
+
+      console.log(`✅ Successfully formatted scan history using ${keyLabel} key`);
+      return parsed;
+
+    } catch (error) {
+      lastError = error;
+      console.error(`❌ ${keyLabel} key failed for scan history formatting:`, error.message);
+      if (i === apiKeys.length - 1) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+
+  throw new Error(`Scan history formatting failed: ${lastError?.message}`);
 }
 
 /**
@@ -1056,6 +1171,7 @@ module.exports = {
   translateText,
   formatReportForPdf,
   formatScanDataForPdf,
+  formatScanHistoryForPdf,
   formatAiAnalysisForPdf,
   translateAiAnalysisToJapanese,  // Keep for backwards compatibility
   translateToJapanese  // NEW: Combined translation function

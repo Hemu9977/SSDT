@@ -1536,6 +1536,14 @@ const Hero = ({ historicalScan }) => {
 
                           if (!response.ok) {
                             const errorData = await response.json().catch(() => ({}));
+                            if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                              alert('Gemini key is exhausted');
+                              throw new Error('Gemini key is exhausted');
+                            }
+                            if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
+                              alert('English PDF must contain English only');
+                              throw new Error(errorData.error || 'English-only validation failed');
+                            }
                             throw new Error(errorData.error || 'PDF download failed');
                           }
 
@@ -1608,6 +1616,14 @@ const Hero = ({ historicalScan }) => {
 
                           if (!response.ok) {
                             const errorData = await response.json().catch(() => ({}));
+                            if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                              alert('Gemini key is exhausted');
+                              throw new Error('Gemini key is exhausted');
+                            }
+                            if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
+                              alert('English PDF must contain English only');
+                              throw new Error(errorData.error || 'English-only validation failed');
+                            }
                             throw new Error(errorData.error || 'PDF download failed');
                           }
 

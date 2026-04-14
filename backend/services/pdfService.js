@@ -1,1228 +1,1401 @@
-const PDFDocument = require('pdfkit');
-const path = require('path');
-const {
-    formatScanDataForPdf,
-    formatAiAnalysisForPdf,
-    translateToJapanese
-} = require('./geminiService');
-const gridfsService = require('./gridfsService');
-
-// Font paths
-const FONTS = {
-    regular: path.join(__dirname, '../fonts/NotoSansJP-Regular.ttf'),
-    bold: path.join(__dirname, '../fonts/NotoSansJP-Bold.ttf')
-};
-
-// Colors
-const COLORS = {
-    primary: '#6366f1',
-    success: '#22c55e',
-    warning: '#f59e0b',
-    danger: '#ef4444',
-    info: '#3b82f6',
-    text: '#1f2937',
-    textLight: '#6b7280',
-    border: '#e5e7eb',
-    background: '#f9fafb'
-};
-
-// Rate limit delay (35 seconds to be safe with 2 RPM)
-const RATE_LIMIT_DELAY = 35000;
+'use strict';
 
 /**
- * Generate a comprehensive bilingual PDF report from scan results
- * @param {Object} scanResult - The complete scan result from MongoDB
- * @returns {Promise<Buffer>} - PDF as a buffer
+ * pdfService.js
+ * Generates bilingual (English + Japanese) security scan PDF reports.
+ * Depends on: geminiService.js, gridfsService.js, ScanResult model.
+ *
+ * Usage:
+ *   const { generatePdfReport, generateSingleLanguagePdf, generateZapPdf } = require('./pdfService');
+ *   const pdfBuffer = await generatePdfReport(scanResult);          // bilingual
+ *   const pdfBuffer = await generateSingleLanguagePdf(scanResult, 'en');
+ *   const pdfBuffer = await generateZapPdf(scanResult, 'ja');
+ */
+
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+
+let puppeteer;
+try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
+
+const ScanResult = require('../models/ScanResult');
+const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateToJapanese } = require('./geminiService');
+const gridfsService = require('./gridfsService');
+const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
+
+// ─── Config ────────────────────────────────────────────────────────────────────
+// Spec requirement: PDFKit-only (no Puppeteer/HTML renderer)
+const PDF_RENDERER = 'pdfkit';
+const RATE_LIMIT_DELAY = 35_000; // 35 s — keeps Gemini under 2 RPM
+
+const FONTS = {
+  regular: path.join(__dirname, '../fonts/NotoSansJP-Regular.ttf'),
+  bold:    path.join(__dirname, '../fonts/NotoSansJP-Bold.ttf')
+};
+
+const COLORS = {
+  primary:    '#21525F',
+  accent:     '#F08A1F',
+  success:    '#22c55e',
+  warning:    '#f59e0b',
+  danger:     '#ef4444',
+  info:       '#3b82f6',
+  text:       '#1f2937',
+  textLight:  '#6b7280',
+  border:     '#BFBFBF',
+  background: '#ffffff'
+};
+
+const ASSETS_DIR = path.join(__dirname, '../assets');
+const TEMPLATE_IMAGES = {
+  coverBg:   path.join(ASSETS_DIR, 'image1.jpeg'),
+  frameBg:   path.join(ASSETS_DIR, 'image3.jpeg'),
+  logo:      path.join(ASSETS_DIR, 'image2.jpeg'),
+  logoLarge: path.join(ASSETS_DIR, 'image3.jpeg'),
+};
+
+const TEMPLATE_PAGE   = { width: 595.28, height: 841.89 };
+const TEMPLATE_MARGIN = { top: 60, bottom: 60, left: 55, right: 55 };
+
+// ─── Small utilities ────────────────────────────────────────────────────────────
+
+function escapeHtml(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function containsJapanese(text) {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(String(text || ''));
+}
+
+function decodeHtmlEntities(input) {
+  const s = String(input || '');
+  if (!s.includes('&')) return s;
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const cp = parseInt(hex, 16);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : _;
+    })
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const cp = parseInt(dec, 10);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : _;
+    });
+}
+
+function decodeLiteralBackslashEscapes(input) {
+  let s = String(input || '');
+  if (!s.includes('\\')) return s;
+  s = s
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\r/g, '\r');
+  s = s.replace(/\\u\{([0-9a-fA-F]+)\}/g, (m, hex) => {
+    const cp = parseInt(hex, 16);
+    return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+  });
+  s = s.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+    const cp = parseInt(hex, 16);
+    return Number.isFinite(cp) ? String.fromCharCode(cp) : m;
+  });
+  return s;
+}
+
+function sanitizeTextForPdf(input, lang) {
+  let s = String(input ?? '');
+  if (!s) return s;
+
+  // Decode common encodings that sometimes leak from LLM output.
+  s = decodeHtmlEntities(s);
+
+  // For Japanese PDFs, also decode literal backslash escapes and normalize.
+  if (lang === 'ja') {
+    s = decodeLiteralBackslashEscapes(s);
+    try { s = s.normalize('NFKC'); } catch {}
+  }
+
+  // Drop control chars (except tab/newline) and invisible bidi/ZW chars.
+  s = s
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, '');
+
+  // Normalize newlines/whitespace.
+  s = s.replace(/\r\n/g, '\n');
+  s = s.replace(/[ \t]+\n/g, '\n');
+  s = s.replace(/\n{4,}/g, '\n\n\n');
+  return s.trim();
+}
+
+function isGeminiKeyExhaustedError(err) {
+  if (!err) return false;
+  if (err.code === 'GEMINI_KEY_EXHAUSTED') return true;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    msg.includes('no gemini api keys configured') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('quota') ||
+    msg.includes('too many requests') ||
+    msg.includes('429')
+  );
+}
+
+function throwGeminiKeyExhausted(err) {
+  const e = new Error('Gemini key is exhausted');
+  e.code = 'GEMINI_KEY_EXHAUSTED';
+  e.details = err?.message;
+  throw e;
+}
+
+function getRiskColor(risk) {
+  if (!risk) return COLORS.textLight;
+  const r = String(risk).toLowerCase();
+  if (r.includes('high')   || r.includes('高')) return COLORS.danger;
+  if (r.includes('medium') || r.includes('中')) return COLORS.warning;
+  if (r.includes('low')    || r.includes('低')) return COLORS.info;
+  return COLORS.success;
+}
+
+function getTypeColor(type) {
+  return { danger: COLORS.danger, warning: COLORS.warning,
+           success: COLORS.success, info: COLORS.info }[type] || COLORS.text;
+}
+
+function getRiskLabel(risk, lang) {
+  if (lang !== 'ja') return risk || 'Unknown';
+  const r = String(risk || '').toLowerCase();
+  if (r.includes('high'))          return '高';
+  if (r.includes('medium'))        return '中';
+  if (r.includes('low'))           return '低';
+  if (r.includes('informational')) return '情報';
+  return '不明';
+}
+
+function stripBoldMarkers(text) { return String(text || '').replace(/\*\*/g, ''); }
+
+function isBoldBalanced(text) {
+  const m = String(text || '').match(/\*\*/g);
+  return !m || m.length % 2 === 0;
+}
+
+// ─── Disclaimer / history helpers ───────────────────────────────────────────────
+
+function getDisclaimerContent(lang) {
+  if (lang === 'ja') return {
+    title: '免責事項',
+    body: [
+      '本レポートは自動スキャン結果に基づいて作成されており、検出内容が不完全である場合や、環境・設定差により実際の状態と異なる場合があります。',
+      '本レポートの内容について、完全性・正確性・最新性を保証するものではありません。重要な意思決定(運用判断、法的判断、投資判断等)を行う際には、本レポートのみに依拠せず、追加の検証や専門家による確認を実施してください。',
+      '本レポートの利用に起因して発生したいかなる損害(直接・間接を問わず)についても、提供者は責任を負いません。'
+    ].join('\n\n')
+  };
+  return {
+    title: 'Disclaimer',
+    body: [
+      'This report is generated based on automated scan results. Detected findings may be incomplete or may differ from the actual state due to environmental or configuration differences.',
+      'We do not guarantee the completeness, accuracy, or timeliness of the content of this report. When making important decisions (operational, legal, investment, etc.), please do not rely solely on this report and conduct additional verification or consultation with experts.',
+      'The provider shall not be liable for any damages (direct or indirect) arising from the use of this report.'
+    ].join('\n\n')
+  };
+}
+
+function formatHistoryDate(date, lang) {
+  const d = date instanceof Date ? date : (date ? new Date(date) : null);
+  if (!d || isNaN(d.getTime())) return '';
+  const [y, mo, dd, h, mi] = [
+    d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'), String(d.getHours()).padStart(2, '0'),
+    String(d.getMinutes()).padStart(2, '0')
+  ];
+  // Spec: JA => YYYY/MM/DD, EN => DD/MM/YYYY
+  return lang === 'ja' ? `${y}/${mo}/${dd}` : `${dd}/${mo}/${y}`;
+}
+
+function looksLikeUrl(text) {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  if (/^https?:\/\//i.test(s)) return true;
+  if (/^www\./i.test(s)) return true;
+  // e.g. example.com/path
+  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(s)) return true;
+  return false;
+}
+
+function projectLangValue(val, lang) {
+  if (val && typeof val === 'object' && !Array.isArray(val)) {
+    if (Object.prototype.hasOwnProperty.call(val, lang)) return val[lang];
+    if (Object.prototype.hasOwnProperty.call(val, 'en') || Object.prototype.hasOwnProperty.call(val, 'ja')) {
+      return val[lang] ?? val.en ?? val.ja;
+    }
+  }
+  return val;
+}
+
+function collectStringsForEnglishValidation(value, lang, keyHint = '') {
+  const out = [];
+  const walk = (v, k) => {
+    if (v == null) return;
+    const projected = projectLangValue(v, lang);
+    if (typeof projected === 'string') {
+      // Allow URLs/targets/references to contain non-ASCII.
+      if (k && ['target', 'url', 'urls', 'reference'].includes(k)) return;
+      if (looksLikeUrl(projected)) return;
+      out.push(projected);
+      return;
+    }
+    if (typeof projected === 'number' || typeof projected === 'boolean') return;
+    if (Array.isArray(projected)) {
+      projected.forEach(item => walk(item, k));
+      return;
+    }
+    if (typeof projected === 'object') {
+      for (const kk of Object.keys(projected)) {
+        walk(projected[kk], kk);
+      }
+    }
+  };
+  walk(value, keyHint);
+  return out;
+}
+
+function assertEnglishOnlyPdfContent({ scanData, aiAnalysis, vulnerabilities, diagnosisTable }) {
+  const pieces = [];
+  pieces.push(...collectStringsForEnglishValidation(scanData, 'en'));
+  pieces.push(...collectStringsForEnglishValidation(aiAnalysis, 'en'));
+  pieces.push(...collectStringsForEnglishValidation(vulnerabilities, 'en'));
+  pieces.push(...collectStringsForEnglishValidation(diagnosisTable, 'en'));
+
+  for (const s of pieces) {
+    if (containsJapanese(s)) {
+      const err = new Error('English PDF contains non-English (Japanese) characters');
+      err.code = 'EN_CONTENT_NOT_ENGLISH';
+      err.sample = s.slice(0, 120);
+      throw err;
+    }
+  }
+}
+
+function executorDisplay(user, lang) {
+  const name  = user?.name  ? String(user.name)  : '';
+  const email = user?.email ? String(user.email) : '';
+  // English PDFs must remain English-only: never emit Japanese characters.
+  if (lang !== 'ja') {
+    if (email) return email;
+    if (name && !containsJapanese(name)) return name;
+    return 'Unknown';
+  }
+  if (name) return name;
+  if (email) return email;
+  if (name)  return name;
+  return lang === 'ja' ? '（不明）' : 'Unknown';
+}
+
+function getStatusLabel(status, lang) {
+  if (lang !== 'ja') return status || 'unknown';
+  const s = status || '';
+  if (s === 'completed')                            return '診断終了';
+  if (s === 'combining' || s === 'pending' || s === 'queued') return 'スキャン中';
+  if (s === 'failed')                               return '失敗';
+  if (s === 'stopped' || s === 'cancelled')         return '停止';
+  return s || '不明';
+}
+
+async function fetchScanHistoryRows(scanResult, limit = 8) {
+  const fallback = [{
+    dateEn: formatHistoryDate(scanResult?.createdAt, 'en') || '',
+    dateJa: formatHistoryDate(scanResult?.createdAt, 'ja') || '',
+    executedByEn: executorDisplay(scanResult?.userId, 'en'),
+    executedByJa: executorDisplay(scanResult?.userId, 'ja'),
+    status: scanResult?.status || 'unknown'
+  }];
+
+  if (!scanResult?.userId) return fallback;
+
+  try {
+    const records = await ScanResult.find({ userId: scanResult.userId })
+      .sort({ createdAt: -1 }).limit(limit)
+      .select('analysisId target createdAt userId status')
+      .populate('userId', 'name email').lean();
+
+    const rows = (records || []).map(r => ({
+      dateEn: formatHistoryDate(r.createdAt, 'en'),
+      dateJa: formatHistoryDate(r.createdAt, 'ja'),
+      executedByEn: executorDisplay(r.userId, 'en'),
+      executedByJa: executorDisplay(r.userId, 'ja'),
+      status: r.status || 'unknown'
+    }));
+
+    return rows.length ? rows : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function ensureGeminiScanHistory(scanData, scanHistoryRows) {
+  const hasRows = !!(scanData?.scanHistory?.rows?.en?.length || scanData?.scanHistory?.rows?.ja?.length);
+  if (hasRows) return scanData.scanHistory;
+  try {
+    const formatted = await formatScanHistoryForPdf(scanHistoryRows);
+    if (scanData && typeof scanData === 'object') {
+      scanData.scanHistory = formatted;
+    }
+    return formatted;
+  } catch (e) {
+    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+    throw e;
+  }
+}
+
+async function getDiagnosisHistoryTable(scanResult, lang, limit = 8) {
+  // ── 3-column design matching the report template ──
+  const headers = lang === 'ja'
+    ? ['日付', '実行ユーザー', 'ステータス']
+    : ['Date', 'Executed by', 'Status'];
+  const title = lang === 'ja' ? '診断履歴' : 'Scan History';
+
+  const fallback = [[
+    formatHistoryDate(scanResult?.createdAt, lang) || '',
+    executorDisplay(scanResult?.userId, lang),
+    getStatusLabel(scanResult?.status, lang)
+  ]];
+
+  if (!scanResult?.userId) return { title, headers, rows: fallback };
+
+  try {
+    const records = await ScanResult.find({ userId: scanResult.userId })
+      .sort({ createdAt: -1 }).limit(limit)
+      .select('analysisId target createdAt userId status')
+      .populate('userId', 'name email').lean();
+
+    const rows = (records || []).map(r => [
+      formatHistoryDate(r.createdAt, lang),
+      executorDisplay(r.userId, lang),
+      getStatusLabel(r.status, lang)
+    ]);
+
+    return { title, headers, rows: rows.length ? rows : fallback };
+  } catch { return { title, headers, rows: fallback }; }
+}
+
+// ─── Fallbacks when Gemini is unavailable ───────────────────────────────────────
+
+function buildFallbackScanDataForPdf(scanResult) {
+  const safe = (v, fb = 0) => { const n = Number(v); return isFinite(n) ? n : fb; };
+  const cats  = scanResult?.pagespeedResult?.lighthouseResult?.categories || {};
+  const perf  = safe(Math.round((cats.performance?.score   || 0) * 100));
+  const a11y  = safe(Math.round((cats.accessibility?.score || 0) * 100));
+  const bp    = safe(Math.round((cats['best-practices']?.score || 0) * 100));
+  const seo   = safe(Math.round((cats.seo?.score            || 0) * 100));
+
+  const obs   = scanResult?.observatoryResult  || {};
+  const zap   = scanResult?.zapResult          || {};
+  const urlsc = scanResult?.urlscanResult      || {};
+  const wc    = scanResult?.webCheckResult?.fullResults || {};
+
+  const hiCnt = safe(zap?.riskCounts?.High, 0);
+  const mdCnt = safe(zap?.riskCounts?.Medium, 0);
+  const isMal = !!urlsc?.verdicts?.overall?.malicious;
+  const riskEn = (hiCnt > 0 || isMal) ? 'High' : mdCnt > 0 ? 'Medium' : 'Low';
+  const riskJa = riskEn === 'High' ? '高' : riskEn === 'Medium' ? '中' : '低';
+
+  const alerts = Array.isArray(zap?.alerts) ? zap.alerts : [];
+
+  return {
+    header: {
+      title:  { en: 'Security Scan Report', ja: 'セキュリティスキャンレポート' },
+      target: scanResult?.target || '',
+      scanId: scanResult?.analysisId || '',
+      date:   new Date().toLocaleDateString(),
+      status: { en: scanResult?.status || 'unknown', ja: scanResult?.status === 'completed' ? '完了' : (scanResult?.status || '不明') }
+    },
+    summary: {
+      title:      { en: 'Executive Summary', ja: 'エグゼクティブサマリー' },
+      riskLevel:  { en: riskEn, ja: riskJa },
+      riskLabel:  { en: 'Overall Risk Level', ja: '全体的なリスクレベル' }
+    },
+    sections: [
+      {
+        id: 'pagespeed',
+        title: { en: 'Performance & Accessibility Analysis', ja: 'パフォーマンス・アクセシビリティ分析' },
+        items: [
+          { label: { en: 'Performance',    ja: 'パフォーマンス'     }, value: `${perf}/100`,  type: 'score' },
+          { label: { en: 'Accessibility',  ja: 'アクセシビリティ'    }, value: `${a11y}/100`,  type: 'score' },
+          { label: { en: 'Best Practices', ja: 'ベストプラクティス'  }, value: `${bp}/100`,    type: 'score' },
+          { label: { en: 'SEO',            ja: 'SEO'               }, value: `${seo}/100`,   type: 'score' }
+        ]
+      },
+      {
+        id: 'observatory',
+        title: { en: 'Security Configuration Assessment', ja: 'セキュリティ設定評価' },
+        items: [
+          { label: { en: 'Security Grade',  ja: 'セキュリティ評価'  }, value: obs.grade || 'N/A',              type: 'grade'   },
+          { label: { en: 'Score',           ja: 'スコア'            }, value: `${safe(obs.score, 0)}/100`,      type: 'score'   },
+          { label: { en: 'Tests Passed',    ja: '合格テスト数'      }, value: safe(obs.tests_passed, 0),        type: 'success' },
+          { label: { en: 'Tests Failed',    ja: '不合格テスト数'    }, value: safe(obs.tests_failed, 0),        type: 'danger'  }
+        ]
+      },
+      {
+        id: 'zap',
+        title: { en: 'Vulnerability Scan Results', ja: '脆弱性スキャン結果' },
+        items: [
+          { label: { en: 'Total Alerts',   ja: '総アラート数' }, value: safe(zap.totalAlerts, alerts.length),         type: 'stat'    },
+          { label: { en: 'High Risk',      ja: '高リスク'     }, value: safe(zap?.riskCounts?.High, 0),               type: 'danger'  },
+          { label: { en: 'Medium Risk',    ja: '中リスク'     }, value: safe(zap?.riskCounts?.Medium, 0),             type: 'warning' },
+          { label: { en: 'Low Risk',       ja: '低リスク'     }, value: safe(zap?.riskCounts?.Low, 0),               type: 'info'    },
+          { label: { en: 'Informational',  ja: '情報'         }, value: safe(zap?.riskCounts?.Informational, 0),      type: 'stat'    }
+        ],
+        alerts: alerts.slice(0, 7).map(a => ({ risk: a.risk, alert: a.alert })),
+        detailedAlerts: alerts.map(a => ({
+          name: a.alert, risk: a.risk, confidence: a.confidence,
+          description: a.description || 'No description available',
+          solution:    a.solution    || 'No solution provided',
+          reference:   a.reference   || '',
+          cweid: a.cweid, wascid: a.wascid,
+          totalOccurrences: a.totalOccurrences || 0
+        }))
+      },
+      {
+        id: 'urlscan',
+        title: { en: 'Threat & Reputation Analysis', ja: '脅威・レピュテーション分析' },
+        items: [
+          { label: { en: 'Verdict',      ja: '判定'        }, value: { en: isMal ? 'MALICIOUS' : 'Clean', ja: isMal ? '悪性' : 'クリーン' }, type: isMal ? 'danger' : 'success' },
+          { label: { en: 'Threat Score', ja: '脅威スコア'  }, value: `${safe(urlsc?.verdicts?.overall?.score, 0)}/100`, type: 'score' },
+          { label: { en: 'Domain',       ja: 'ドメイン'    }, value: urlsc?.page?.domain  || 'N/A', type: 'stat' },
+          { label: { en: 'Server IP',    ja: 'サーバーIP'  }, value: urlsc?.page?.ip      || 'N/A', type: 'stat' },
+          { label: { en: 'Country',      ja: '国'          }, value: urlsc?.page?.country || 'N/A', type: 'stat' },
+          { label: { en: 'Server',       ja: 'サーバー'    }, value: urlsc?.page?.server  || 'N/A', type: 'stat' }
+        ]
+      },
+      {
+        id: 'webcheck',
+        title: { en: 'Web Security Configuration', ja: 'Webセキュリティ設定' },
+        items: [
+          { label: { en: 'TLS Grade',    ja: 'TLS評価'      }, value: wc?.tls?.tlsInfo?.grade || wc?.ssl?.grade || 'N/A', type: 'grade' },
+          { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: { en: wc?.firewall?.hasWaf ? 'Yes' : 'No', ja: wc?.firewall?.hasWaf ? 'はい' : 'いいえ' }, type: wc?.firewall?.hasWaf ? 'success' : 'warning' },
+          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: { en: wc?.hsts?.enabled ? 'Yes' : 'No',    ja: wc?.hsts?.enabled ? '有効' : '無効'     }, type: wc?.hsts?.enabled ? 'success' : 'warning' },
+          { label: { en: 'Technologies', ja: 'テクノロジー' }, value: Array.isArray(wc?.['tech-stack']?.technologies) ? wc['tech-stack'].technologies.slice(0, 5).map(t => t.name || t).join(', ') : 'N/A', type: 'stat' }
+        ]
+      }
+    ]
+  };
+}
+
+function buildJapaneseAiAnalysisFromScanData(scanData, vulnerabilitiesEn = []) {
+  const risk   = scanData?.summary?.riskLevel?.ja || '不明';
+  const target = scanData?.header?.target || '';
+  const rc = { high: 0, medium: 0, low: 0, info: 0 };
+  for (const v of vulnerabilitiesEn) {
+    const r = String(v?.risk || '').toLowerCase();
+    if (r.includes('high'))   rc.high++;
+    else if (r.includes('medium')) rc.medium++;
+    else if (r.includes('low'))    rc.low++;
+    else rc.info++;
+  }
+  const findings = [];
+  if (rc.high   > 0) findings.push(`高リスクの脆弱性が${rc.high}件検出されています。`);
+  if (rc.medium > 0) findings.push(`中リスクの脆弱性が${rc.medium}件検出されています。`);
+  if (!findings.length) findings.push('重大な脆弱性は検出されませんでした。');
+
+  return {
+    title: 'AIによるセキュリティ分析',
+    sections: [
+      { heading: '総評', content: [
+          { type: 'paragraph', text: `対象: ${target}` },
+          { type: 'paragraph', text: `総合リスク評価: ${risk}` },
+          { type: 'bullets', items: findings }
+      ]},
+      { heading: '推奨対応', content: [{ type: 'bullets', items: [
+          '高リスク項目は最優先で修正し、再スキャンで効果を確認してください。',
+          '入力検証、認証・セッション管理、セキュリティヘッダーの設定状況を重点的に見直してください。',
+          '運用上の露出（公開範囲、管理画面、API）を踏まえて、WAF/レート制限/監視も併用してください。'
+      ]}]}
+    ]
+  };
+}
+
+/**
+ * Build the static strings/overrides applied on top of the template content.
+ * Now accepts scanData so the final page can show scan-specific metadata.
+ */
+function buildTemplateStaticOverrides(base, { lang, scanData }) {
+  // Spec requirement: template static strings come verbatim from the DOCX and
+  // must not be overridden in code; EN/JA share the same extracted content.
+  return { ...(base || {}), lang };
+}
+
+// ─── GridFS helper ──────────────────────────────────────────────────────────────
+
+async function fetchFullAlertsFromGridFS(scanResult, zapSection) {
+  if (!zapSection || !scanResult.zapResult?.reportFiles?.length) return;
+  const file = scanResult.zapResult.reportFiles.find(f => f.filename?.includes('detailed_alerts'));
+  if (!file?.fileId) return;
+  try {
+    const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
+    const buf    = await gridfsService.downloadFile(file.fileId, bucket);
+    const full   = JSON.parse(buf.toString('utf-8'));
+    zapSection.detailedAlerts = full.map(a => ({
+      name: a.alert, risk: a.risk, confidence: a.confidence,
+      description: a.description || 'No description available',
+      solution:    a.solution    || 'No solution provided',
+      reference:   a.reference   || '',
+      cweid: a.cweid, wascid: a.wascid,
+      totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0
+    }));
+    console.log(`✅ Loaded ${zapSection.detailedAlerts.length} full alerts from GridFS`);
+  } catch (e) {
+    console.warn(`⚠️ GridFS fetch failed: ${e.message}`);
+  }
+}
+
+// ─── HTML renderer (Puppeteer) ──────────────────────────────────────────────────
+
+async function renderHtmlToPdfBuffer(html) {
+  if (!puppeteer) throw new Error('Puppeteer not available');
+  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.pdf({ format: 'A4', printBackground: true,
+      margin: { top: '14mm', bottom: '14mm', left: '14mm', right: '14mm' } });
+  } finally { await browser.close(); }
+}
+
+function sharedCss() {
+  const fontUrl = pathToFileURL(FONTS.regular).toString();
+  return `
+    @font-face { font-family: NotoSansJP; src: url('${fontUrl}'); }
+    * { box-sizing: border-box; }
+    body { font-family: NotoSansJP, Arial, sans-serif; color: ${COLORS.text}; }
+    h1 { color: ${COLORS.primary}; font-size: 22px; margin: 0 0 6px; }
+    h2 { color: ${COLORS.primary}; font-size: 16px; margin: 18px 0 8px; }
+    h3 { color: ${COLORS.primary}; font-size: 12px; margin: 12px 0 6px; }
+    h4 { color: ${COLORS.accent};  font-size: 10px; margin: 10px 0 4px; }
+    p, li, td, th { font-size: 10px; line-height: 1.45; }
+    p  { margin: 0 0 6px; overflow-wrap: anywhere; word-break: break-word; }
+    ul { margin: 0 0 6px 18px; padding: 0; }
+    .page-break { page-break-before: always; }
+    .meta { display: flex; flex-wrap: wrap; gap: 14px; color: ${COLORS.textLight}; font-size: 9px; margin-bottom: 6px; }
+    .kv  { margin: 2px 0; }
+    .k   { color: ${COLORS.textLight}; }
+    .ok  { color: ${COLORS.success}; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid ${COLORS.border}; padding: 6px; vertical-align: top; overflow-wrap: anywhere; }
+    th { background: #f3f4f6; text-align: left; }
+    .vuln { border-top: 1px solid ${COLORS.border}; padding-top: 8px; margin-top: 8px; }
+  `;
+}
+
+function buildSingleLanguageReportHtml({ scanData, aiAnalysis, vulnerabilities, lang, disclaimer, diagnosis }) {
+  const L = lang;
+  const hdr  = scanData?.header || {};
+  const summ = scanData?.summary || {};
+  const title     = typeof hdr.title      === 'object' ? hdr.title[L]      : (hdr.title || 'Security Scan Report');
+  const riskLabel = typeof summ.riskLabel === 'object' ? summ.riskLabel[L] : (summ.riskLabel || 'Overall Risk');
+  const riskLevel = typeof summ.riskLevel === 'object' ? summ.riskLevel[L] : (summ.riskLevel || 'N/A');
+  const aiTitle   = escapeHtml(aiAnalysis?.title || (L === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis'));
+
+  const renderBlocks = blocks => (Array.isArray(blocks) ? blocks : []).map(b => {
+    if (!b) return '';
+    if (b.type === 'paragraph')  return `<p>${escapeHtml(b.text || '')}</p>`;
+    if (b.type === 'bullets')    return `<ul>${(b.items || []).map(it => `<li>${escapeHtml(it)}</li>`).join('')}</ul>`;
+    if (b.type === 'bold_text')  return `<p><strong>${escapeHtml(b.label || '')}</strong> ${escapeHtml(b.text || '')}</p>`;
+    return b.text ? `<p>${escapeHtml(b.text)}</p>` : '';
+  }).join('');
+
+  const aiSections = (aiAnalysis?.sections || []).map(s => {
+    const hd = s?.heading ? `<h3>${escapeHtml(s.heading)}</h3>` : '';
+    return `${hd}${renderBlocks(s?.content)}`;
+  }).join('');
+
+  const scanSections = (scanData?.sections || []).map(s => {
+    const st = typeof s.title === 'object' ? s.title[L] : s.title || '';
+    const items = (s.items || []).map(it => {
+      const lbl = typeof it.label === 'object' ? it.label[L] : it.label || '';
+      let val = it.value;
+      if (typeof val === 'object' && val) val = val[L] || val.en || '';
+      return `<div class="kv"><span class="k">${escapeHtml(lbl)}:</span> <span>${escapeHtml(String(val ?? ''))}</span></div>`;
+    }).join('');
+    return `<section><h3>${escapeHtml(st)}</h3>${items}</section>`;
+  }).join('');
+
+  const vulnHtml = (() => {
+    const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
+    if (!list.length) return `<p class="ok">${L === 'ja' ? '脆弱性は検出されませんでした。' : 'No vulnerabilities detected.'}</p>`;
+    return list.map((v, i) => `
+      <div class="vuln">
+        <h3>${i + 1}. ${escapeHtml(v?.name || v?.alert || '')}</h3>
+        <div class="meta">
+          <span>${escapeHtml(L === 'ja' ? 'リスク' : 'Risk')}: ${escapeHtml(String(v?.risk || ''))}</span>
+          <span>${escapeHtml(L === 'ja' ? '信頼度' : 'Confidence')}: ${escapeHtml(String(v?.confidence || ''))}</span>
+        </div>
+        ${v?.description ? `<h4>${escapeHtml(L === 'ja' ? '説明' : 'Description')}</h4><p>${escapeHtml(v.description)}</p>` : ''}
+        ${v?.solution    ? `<h4>${escapeHtml(L === 'ja' ? '推奨される修正方法' : 'Recommended Solution')}</h4><p>${escapeHtml(v.solution)}</p>` : ''}
+        ${v?.reference   ? `<h4>${escapeHtml(L === 'ja' ? '参考情報' : 'References')}</h4><p>${escapeHtml(v.reference)}</p>` : ''}
+      </div>`).join('');
+  })();
+
+  const histHtml = `<table>
+    <thead><tr>${(diagnosis?.headers || []).map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
+    <tbody>${(diagnosis?.rows || []).map(r => `<tr>${(r || []).map(c => `<td>${escapeHtml(String(c ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table>`;
+
+  return `<!doctype html><html lang="${L === 'ja' ? 'ja' : 'en'}"><head><meta charset="utf-8"/>
+  <style>${sharedCss()}</style></head><body>
+  <h1>${escapeHtml(title)}</h1>
+  <div class="meta">
+    <span>${escapeHtml(L === 'ja' ? 'スキャンURL' : 'Scan URL')}: ${escapeHtml(hdr.target || '')}</span>
+    <span>${escapeHtml(L === 'ja' ? '生成日' : 'Generated')}: ${escapeHtml(hdr.date || '')}</span>
+    <span>${escapeHtml(L === 'ja' ? 'スキャンID' : 'Scan ID')}: ${escapeHtml(hdr.scanId || '')}</span>
+  </div>
+  <h2>${escapeHtml(L === 'ja' ? 'エグゼクティブサマリー' : 'Executive Summary')}</h2>
+  <p><strong>${escapeHtml(riskLabel)}:</strong> ${escapeHtml(String(riskLevel))}</p>
+  <h2>${aiTitle}</h2>${aiSections}
+  <h2>${escapeHtml(L === 'ja' ? 'スキャン結果' : 'Scan Results')}</h2>${scanSections}
+  <h2>${escapeHtml(L === 'ja' ? '脆弱性の詳細と修正方法' : 'Vulnerability Details & Remediation')}</h2>${vulnHtml}
+  <div class="page-break"></div>
+  <h2>${escapeHtml(disclaimer?.title || (L === 'ja' ? '免責事項' : 'Disclaimer'))}</h2>
+  ${String(disclaimer?.body || '').split('\n').map(l => `<p>${escapeHtml(l)}</p>`).join('')}
+  <div class="page-break"></div>
+  <h2>${escapeHtml(diagnosis?.title || (L === 'ja' ? '診断履歴' : 'Scan History'))}</h2>${histHtml}
+  </body></html>`;
+}
+
+function buildBilingualReportHtml({ enHtml, jaHtml }) {
+  const extract = html => { const m = String(html || '').match(/<body[^>]*>([\s\S]*?)<\/body>/i); return m ? m[1] : html; };
+  const fontUrl = pathToFileURL(FONTS.regular).toString();
+  return `<!doctype html><html><head><meta charset="utf-8"/>
+  <style>@font-face{font-family:NotoSansJP;src:url('${fontUrl}')} ${sharedCss()}</style></head>
+  <body>${extract(enHtml)}<div class="page-break"></div>${extract(jaHtml)}</body></html>`;
+}
+
+// ─── PDFKit text helpers ────────────────────────────────────────────────────────
+
+function renderTextWithBold(doc, text, options = {}) {
+  const parts = [];
+  let last = 0;
+  const re = /\*\*([^*]+)\*\*/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ text: text.slice(last, m.index), bold: false });
+    parts.push({ text: m[1], bold: true });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), bold: false });
+  if (!parts.length) { doc.text(text, options); return; }
+  parts.forEach((p, i) => {
+    doc.font(p.bold ? 'NotoSans-Bold' : 'NotoSans')
+       .text(p.text, { ...options, continued: i < parts.length - 1 });
+  });
+}
+
+// ─── Template context ───────────────────────────────────────────────────────────
+
+function getTemplateImage(ts, name, fallback) {
+  const buf = ts?.images?.[name]?.buffer;
+  if (buf && Buffer.isBuffer(buf)) return buf;
+  if (fallback && fs.existsSync(fallback)) return fallback;
+  return null;
+}
+
+function getPageBackground(ts, pageIndex) {
+  const list = ts?.pageBackgrounds;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const exact = list.find(p => p.index === pageIndex);
+  if (exact?.buffer) return exact.buffer;
+  const last = list[list.length - 1];
+  return last?.buffer || null;
+}
+
+function drawFullPageImage(doc, image) {
+  if (!image) return;
+  if (Buffer.isBuffer(image) || (typeof image === 'string' && fs.existsSync(image)))
+    doc.image(image, 0, 0, { width: doc.page.width, height: doc.page.height });
+}
+
+function createCtx(doc, templateStatic) {
+  const ctx = {
+    doc, templateStatic,
+    margin:       TEMPLATE_MARGIN,
+    contentX:     TEMPLATE_MARGIN.left,
+    contentWidth: doc.page.width - TEMPLATE_MARGIN.left - TEMPLATE_MARGIN.right,
+    topY:         TEMPLATE_MARGIN.top,
+    bottomY:      doc.page.height - TEMPLATE_MARGIN.bottom,
+    bgIndex:      2,
+    initFramedPage() {
+      const bg = getPageBackground(templateStatic, this.bgIndex);
+      if (bg) drawFullPageImage(doc, bg);
+      else {
+        const frame = getTemplateImage(templateStatic, 'image4.jpeg', TEMPLATE_IMAGES.frameBg);
+        drawFullPageImage(doc, frame);
+      }
+      doc.x = this.contentX; doc.y = this.topY;
+    },
+    addFramedPage() { doc.addPage(); this.bgIndex += 1; this.initFramedPage(); }
+  };
+  return ctx;
+}
+
+function ensureSpace(ctx, h) {
+  if (ctx.doc.y + h > ctx.bottomY) ctx.addFramedPage();
+}
+
+function findFittingSubstring(doc, text, opts, maxH) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  const fits = s => doc.heightOfString(stripBoldMarkers(s), opts) <= maxH;
+  if (fits(raw)) return raw;
+  let lo = 0, hi = raw.length;
+  while (lo + 1 < hi) { const mid = (lo + hi) >> 1; fits(raw.slice(0, mid)) ? lo = mid : hi = mid; }
+  let cut = Math.max(1, lo);
+  while (cut > 1 && !/\s/.test(raw[cut - 1])) cut--;
+  if (cut <= 1) cut = Math.max(1, lo);
+  while (cut > 1 && !isBoldBalanced(raw.slice(0, cut))) {
+    let b = cut - 1; while (b > 1 && !/\s/.test(raw[b - 1])) b--; if (b <= 1) break; cut = b;
+  }
+  return raw.slice(0, cut);
+}
+
+function writeFlowText(ctx, text, { width, align = 'left', lineGap = 3, fontSize = 10, color = COLORS.text } = {}) {
+  const doc = ctx.doc;
+  width = width || ctx.contentWidth;
+  const lang = ctx?.templateStatic?.lang || 'en';
+  let rem = sanitizeTextForPdf(text, lang);
+  if (!rem) return;
+  doc.font('NotoSans').fontSize(fontSize).fillColor(color);
+  while (rem.length) {
+    const avail = ctx.bottomY - doc.y;
+    if (avail < fontSize + 6) { ctx.addFramedPage(); continue; }
+    const chunk = findFittingSubstring(doc, rem, { width, lineGap }, avail);
+    renderTextWithBold(doc, chunk, { width, align, lineGap });
+    rem = rem.slice(chunk.length).replace(/^[ \t]+/, '');
+    if (rem.length) ctx.addFramedPage();
+  }
+}
+
+// ─── Cover page ─────────────────────────────────────────────────────────────────
+
+function renderCoverPage(doc, scanData, lang, ts) {
+  const W  = doc.page.width, H = doc.page.height;
+  const ML = TEMPLATE_MARGIN.left, MR = TEMPLATE_MARGIN.right;
+  const cw = W - ML - MR;
+
+  // 1. Full-bleed cover background (page-1.png preferred)
+  drawFullPageImage(doc, getPageBackground(ts, 1) || getTemplateImage(ts, 'image1.png', TEMPLATE_IMAGES.coverBg));
+
+  // 2. Large AEVUS logo centred near the top
+  const logoLg = ts?.logoOverride?.buffer || getTemplateImage(ts, 'image3.png', TEMPLATE_IMAGES.logoLarge);
+  if (logoLg) {
+    const lw = 300;
+    doc.image(logoLg, (W - lw) / 2, 90, { width: lw });
+  }
+
+  // 3. Report title
+  const title = typeof scanData.header?.title === 'object'
+    ? scanData.header.title[lang]
+    : (scanData.header?.title || 'Security Scan Report');
+
+  const titleS = sanitizeTextForPdf(title, lang);
+  const targetS = sanitizeTextForPdf(scanData.header?.target || '', lang);
+  const dateRaw = scanData.header?.date || '';
+  // Try to parse and reformat dates to spec; if parsing fails, keep sanitized raw.
+  const parsed = dateRaw ? new Date(dateRaw) : null;
+  const dateS = parsed && !isNaN(parsed.getTime())
+    ? formatHistoryDate(parsed, lang)
+    : sanitizeTextForPdf(dateRaw, lang);
+  const scanIdS = sanitizeTextForPdf(scanData.header?.scanId || '', lang);
+
+  doc.font('NotoSans-Bold').fontSize(28).fillColor(COLORS.primary)
+      .text(titleS, ML, 255, { width: cw, align: 'center' });
+
+  // 4. Scan URL
+  doc.font('NotoSans').fontSize(12).fillColor(COLORS.text)
+      .text(`${lang === 'ja' ? 'スキャンURL' : 'Scan URL'}: ${targetS}`, ML, 318, { width: cw, align: 'center' });
+
+  // 5. Date & Scan ID
+  doc.fontSize(10).fillColor(COLORS.textLight)
+      .text(`${lang === 'ja' ? '生成日' : 'Generated'}: ${dateS}`, ML, 348, { width: cw, align: 'center' })
+      .text(`${lang === 'ja' ? 'スキャンID' : 'Scan ID'}: ${scanIdS}`, ML, 363, { width: cw, align: 'center' });
+
+  // 6. Bottom rule
+  doc.moveTo(ML, H - 80).lineTo(W - MR, H - 80).lineWidth(0.5).stroke(COLORS.border);
+}
+
+// ─── Section helpers ────────────────────────────────────────────────────────────
+
+function addTemplateSectionHeader(ctx, title) {
+  ensureSpace(ctx, 44);
+  const lang = ctx?.templateStatic?.lang || 'en';
+  ctx.doc.font('NotoSans-Bold').fontSize(14).fillColor(COLORS.primary)
+    .text(sanitizeTextForPdf(title, lang));
+  ctx.doc.moveDown(0.3);
+}
+
+function renderExecutiveSummarySection(ctx, scanData, lang) {
+  const summ = scanData.summary || {};
+  const title     = typeof summ.title     === 'object' ? summ.title[lang]     : (summ.title || 'Executive Summary');
+  const riskLabel = typeof summ.riskLabel === 'object' ? summ.riskLabel[lang] : (summ.riskLabel || 'Overall Risk Level');
+  const riskLevel = typeof summ.riskLevel === 'object' ? summ.riskLevel[lang] : (summ.riskLevel || 'N/A');
+  addTemplateSectionHeader(ctx, title);
+    const riskLabelS = sanitizeTextForPdf(riskLabel, lang);
+    const riskLevelS = sanitizeTextForPdf(riskLevel, lang);
+    ctx.doc.font('NotoSans').fontSize(11).fillColor(COLORS.text)
+      .text(`${riskLabelS}: `, { continued: true })
+      .font('NotoSans-Bold').fillColor(getRiskColor(riskLevelS)).text(riskLevelS);
+  ctx.doc.moveDown(0.6);
+}
+
+function renderTemplateContentBlock(ctx, block) {
+  const doc = ctx.doc;
+  if (!block) return;
+  switch (block.type) {
+    case 'paragraph':
+      writeFlowText(ctx, block.text || '', { lineGap: 3, fontSize: 10, color: COLORS.text });
+      doc.moveDown(0.3); break;
+    case 'bullets':
+      (block.items || []).forEach(item => {
+        ensureSpace(ctx, 18);
+        writeFlowText(ctx, `•  ${item}`, { lineGap: 2, fontSize: 10, color: COLORS.text });
+      });
+      doc.moveDown(0.2); break;
+    case 'bold_text':
+      ensureSpace(ctx, 16);
+      doc.font('NotoSans-Bold').fontSize(10).fillColor(COLORS.text)
+         .text(`${block.label} `, { continued: true })
+         .font('NotoSans').fillColor(getTypeColor(String(block.text || '').toLowerCase() === 'high' ? 'danger' : 'stat'))
+         .text(block.text || '');
+      doc.moveDown(0.2); break;
+    default:
+      if (block.text) { writeFlowText(ctx, block.text, { lineGap: 3, fontSize: 10, color: COLORS.text }); doc.moveDown(0.3); }
+  }
+}
+
+function renderAiAnalysisSection(ctx, aiAnalysis, lang) {
+  if (!aiAnalysis) return;
+  addTemplateSectionHeader(ctx, sanitizeTextForPdf(aiAnalysis.title || (lang === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis'), lang));
+  (aiAnalysis.sections || []).forEach(section => {
+    ensureSpace(ctx, 70);
+    if (section.heading) {
+      ctx.doc.font('NotoSans-Bold').fontSize(12).fillColor(COLORS.primary)
+        .text(sanitizeTextForPdf(section.heading, lang));
+      ctx.doc.moveDown(0.2);
+    }
+    (section.content || []).forEach(block => renderTemplateContentBlock(ctx, block));
+    ctx.doc.moveDown(0.3);
+  });
+}
+
+function renderScanResultsSection(ctx, scanData, lang) {
+  const doc = ctx.doc;
+  addTemplateSectionHeader(ctx, lang === 'ja' ? 'スキャン結果' : 'Scan Results');
+  doc.font('NotoSans').fontSize(10).fillColor(COLORS.textLight)
+     .text(lang === 'ja' ? 'スキャン結果の詳細' : 'Scan Results Details');
+  doc.moveDown(0.4);
+
+  (scanData.sections || []).forEach(section => {
+    ensureSpace(ctx, 60);
+    const title = typeof section.title === 'object' ? section.title[lang] : section.title;
+    doc.font('NotoSans-Bold').fontSize(11).fillColor(COLORS.primary).text(title || '');
+    doc.moveDown(0.2);
+    (section.items || []).forEach(item => {
+      ensureSpace(ctx, 16);
+      const lbl = typeof item.label === 'object' ? item.label[lang] : item.label;
+      let val = item.value;
+      if (typeof val === 'object' && val) val = val[lang] || val.en || '';
+      const lblS = sanitizeTextForPdf(lbl, lang);
+      const valS = sanitizeTextForPdf(String(val), lang);
+      doc.font('NotoSans').fontSize(10).fillColor(COLORS.textLight)
+         .text(`${lblS}: `, { continued: true }).fillColor(COLORS.text).text(valS);
+    });
+    doc.moveDown(0.4);
+  });
+}
+
+function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
+  const doc = ctx.doc;
+  addTemplateSectionHeader(ctx, lang === 'ja' ? '脆弱性の詳細と修正方法' : 'Vulnerability Details & Remediation');
+
+  if (!vulnerabilities?.length) {
+    doc.font('NotoSans').fontSize(11).fillColor(COLORS.success)
+       .text(lang === 'ja' ? '脆弱性は検出されませんでした' : 'No vulnerabilities detected');
+    doc.moveDown(0.5); return;
+  }
+
+  vulnerabilities.forEach((v, idx) => {
+    ensureSpace(ctx, 80);
+     const vName = sanitizeTextForPdf(v.name || v.alert || '', lang);
+     doc.font('NotoSans-Bold').fontSize(11).fillColor(COLORS.text)
+       .text(`${idx + 1}. ${vName}`);
+    doc.font('NotoSans').fontSize(9).fillColor(COLORS.textLight)
+       .text(`${lang === 'ja' ? 'リスク' : 'Risk'}: `, { continued: true })
+       .fillColor(getRiskColor(v.risk)).font('NotoSans-Bold')
+       .text(lang === 'ja' ? getRiskLabel(v.risk, 'ja') : (v.risk || 'Unknown'), { continued: true })
+       .fillColor(COLORS.textLight).font('NotoSans')
+       .text(`  |  ${lang === 'ja' ? '信頼度' : 'Confidence'}: `, { continued: true })
+       .fillColor(COLORS.text).text(v.confidence || 'Unknown');
+    doc.moveDown(0.2);
+
+    if (v.description) {
+      ensureSpace(ctx, 30);
+      doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.primary)
+         .text(lang === 'ja' ? '説明:' : 'Description:');
+      writeFlowText(ctx, v.description, { lineGap: 2, fontSize: 9, color: COLORS.text });
+      doc.moveDown(0.2);
+    }
+    if (v.solution) {
+      ensureSpace(ctx, 30);
+      doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.success)
+         .text(lang === 'ja' ? '推奨される修正方法:' : 'Recommended Solution:');
+      writeFlowText(ctx, v.solution, { lineGap: 2, fontSize: 9, color: COLORS.text });
+      doc.moveDown(0.2);
+    }
+        if (v.reference) {
+      ensureSpace(ctx, 16);
+      doc.font('NotoSans').fontSize(8).fillColor(COLORS.textLight)
+          .text(`${lang === 'ja' ? '参考情報' : 'References'}: ${sanitizeTextForPdf(v.reference, lang)}`);
+    }
+    doc.moveDown(0.4);
+    ensureSpace(ctx, 12);
+    doc.moveTo(TEMPLATE_MARGIN.left, doc.y)
+       .lineTo(doc.page.width - TEMPLATE_MARGIN.right, doc.y)
+       .lineWidth(0.5).stroke(COLORS.border);
+    doc.moveDown(0.4);
+  });
+}
+
+function renderDisclaimerPage(ctx) {
+  const t = ctx.templateStatic;
+  addTemplateSectionHeader(ctx, t.disclaimerTitle);
+  // Render each paragraph separated by double newline
+  const paragraphs = String(sanitizeTextForPdf(t.disclaimerBody || '', t.lang) || '').split('\n\n');
+  paragraphs.forEach(para => {
+    writeFlowText(ctx, para, { lineGap: 4, fontSize: 10, color: COLORS.text });
+    ctx.doc.moveDown(0.5);
+  });
+}
+
+function renderDiagnosisHistoryPage(ctx, { allowPageBreaks = true } = {}) {
+  const doc = ctx.doc, t = ctx.templateStatic;
+  addTemplateSectionHeader(ctx, t.diagnosisTitle);
+
+  const W  = doc.page.width - TEMPLATE_MARGIN.left - TEMPLATE_MARGIN.right;
+  const headers = t.diagnosisHeaders || [];
+  const cn  = Math.max(1, headers.length);
+
+  // Column widths: 3-col → date 25%, user 40%, status 35%
+  let cw;
+  if (cn === 3) cw = [W * 0.25, W * 0.40, W * 0.35];
+  else if (cn === 4) cw = [W * 0.2, W * 0.2, W * 0.25, W * 0.35];
+  else cw = Array.from({ length: cn }, () => W / cn);
+
+  drawTablePaged(ctx, TEMPLATE_MARGIN.left, doc.y, cw, [headers, ...(t.diagnosisRows || [])], { allowPageBreaks });
+}
+
+/**
+ * Final page: AEVUS logo + scan metadata — matches the PDF template exactly.
+ */
+function renderFinalPage(ctx) {
+  const doc = ctx.doc, t = ctx.templateStatic;
+  const W  = doc.page.width, ML = TEMPLATE_MARGIN.left, MR = TEMPLATE_MARGIN.right;
+  const cw = W - ML - MR;
+  const cx = W / 2;
+  const lang = t?.lang || 'en';
+
+  // 1. Logo (folder override preferred)
+  const logo = t?.logoOverride?.buffer || getTemplateImage(t, 'image2.png', TEMPLATE_IMAGES.logo);
+  if (logo) {
+    const lw = 240;
+    doc.image(logo, cx - lw / 2, 100, { width: lw });
+  }
+
+  // 2. DOCX marketing copy (verbatim)
+  const lines = Array.isArray(t?.finalPageLines) ? t.finalPageLines : [];
+  const body = sanitizeTextForPdf(lines.filter(Boolean).join('\n'), lang);
+  if (body) {
+    doc.font('NotoSans').fontSize(12).fillColor(COLORS.text)
+       .text(body, ML, 300, { width: cw, align: 'center', lineGap: 6 });
+  }
+
+  // 3. URL (verbatim)
+  if (t?.finalPageUrl) {
+    const url = sanitizeTextForPdf(t.finalPageUrl, lang);
+    doc.font('NotoSans-Bold').fontSize(12).fillColor(COLORS.accent)
+       .text(url, ML, 540, { width: cw, align: 'center' });
+  }
+}
+
+function drawTablePaged(ctx, startX, startY, colWidths, rows, { allowPageBreaks = true } = {}) {
+  const doc = ctx.doc;
+  const lang = ctx?.templateStatic?.lang || 'en';
+  let y = startY;
+  const pad = 6;
+  rows.forEach((row, ri) => {
+    const rowSan = (row || []).map(cell => sanitizeTextForPdf(String(cell || ''), lang));
+    const heights = rowSan.map((cell, i) => {
+      doc.font('NotoSans').fontSize(ri === 0 ? 10 : 9);
+      return doc.heightOfString(String(cell || ''), { width: colWidths[i] - pad * 2 });
+    });
+    const rowH = Math.max(...heights) + pad * 2;
+    if (y + rowH > ctx.bottomY) {
+      if (!allowPageBreaks) return;
+      ctx.addFramedPage(); y = doc.y;
+      if (ri > 0 && rows.length > 1) {
+        let x2 = startX;
+        const hdr = (rows[0] || []).map(cell => sanitizeTextForPdf(String(cell || ''), lang));
+        hdr.forEach((cell, i) => {
+          doc.rect(x2, y, colWidths[i], rowH).stroke(COLORS.border);
+          doc.font('NotoSans').fontSize(10).fillColor(COLORS.text)
+             .text(String(cell || ''), x2 + pad, y + pad, { width: colWidths[i] - pad * 2 });
+          x2 += colWidths[i];
+        });
+        y += rowH; doc.y = y;
+      }
+    }
+    let x = startX;
+    rowSan.forEach((cell, i) => {
+      // Header row gets a light fill
+      if (ri === 0) {
+        doc.rect(x, y, colWidths[i], rowH).fillAndStroke('#f3f4f6', COLORS.border);
+        doc.fillColor(COLORS.text);
+      } else {
+        doc.rect(x, y, colWidths[i], rowH).stroke(COLORS.border);
+      }
+      doc.font('NotoSans').fontSize(ri === 0 ? 10 : 9).fillColor(COLORS.text)
+         .text(String(cell || ''), x + pad, y + pad, { width: colWidths[i] - pad * 2 });
+      x += colWidths[i];
+    });
+    y += rowH; doc.y = y;
+  });
+}
+
+// ─── Template report orchestrator ───────────────────────────────────────────────
+
+function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, ts) {
+  renderCoverPage(doc, scanData, lang, ts);
+  doc.addPage();
+
+  const ctx = createCtx(doc, ts);
+  ctx.initFramedPage();
+
+  // Page 2: Disclaimer + Scan History
+  renderDisclaimerPage(ctx);
+  ctx.doc.moveDown(0.6);
+  renderDiagnosisHistoryPage(ctx, { allowPageBreaks: false });
+
+  // Page 3+: All scan results (Gemini-driven), as before
+  ctx.addFramedPage();
+  renderExecutiveSummarySection(ctx, scanData, lang);
+  renderAiAnalysisSection(ctx, aiAnalysis, lang);
+  renderScanResultsSection(ctx, scanData, lang);
+  renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
+
+  // Last page
+  ctx.addFramedPage();
+  renderFinalPage(ctx);
+}
+
+function renderTemplateZapReport(doc, vulnerabilities, lang, ts) {
+  const ctx = createCtx(doc, ts);
+  ctx.initFramedPage();
+  renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
+  ctx.addFramedPage();
+  renderFinalPage(ctx);
+}
+
+function makePdfDoc(meta) {
+  const doc = new PDFDocument({
+    size: 'A4', bufferPages: true,
+    margins: { top: 0, bottom: 0, left: 0, right: 0 },
+    info: { ...meta, CreationDate: new Date() }
+  });
+  doc.registerFont('NotoSans',      FONTS.regular);
+  doc.registerFont('NotoSans-Bold', FONTS.bold);
+  return doc;
+}
+
+function collectBuffer(doc) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end',  () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a bilingual (EN + JA) PDF.
  */
 async function generatePdfReport(scanResult) {
-    console.log('📄 Starting PDF generation...');
+  console.log('📄 Starting bilingual PDF generation…');
 
-    // Step 1: Format scan data (includes English + Japanese)
-    console.log('📊 Step 1/3: Formatting scan data...');
-    let scanData;
+  // Scan history input is dynamic and generated by Gemini as part of scanData.
+  const scanHistoryRows = await fetchScanHistoryRows(scanResult);
+
+  // Step 1 – scan data
+  let scanData;
+  try   { scanData = await formatScanDataForPdf(scanResult, { scanHistoryRows }); }
+  catch (e) {
+    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+    console.warn('⚠️ Gemini scan data failed, using fallback');
+    scanData = buildFallbackScanDataForPdf(scanResult);
+  }
+
+  // Ensure scanHistory is always Gemini-generated even if scanData fallback path is used.
+  await ensureGeminiScanHistory(scanData, scanHistoryRows);
+
+  const zapSection = scanData.sections?.find(s => s.id === 'zap');
+  await fetchFullAlertsFromGridFS(scanResult, zapSection);
+
+  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
+
+  // Step 2 – AI analysis (EN)
+  let aiAnalysisEn = null;
+  if (scanResult.refinedReport) {
+    try { aiAnalysisEn = await formatAiAnalysisForPdf(scanResult.refinedReport); }
+    catch (e) {
+      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+      console.error('⚠️ AI analysis format failed:', e.message);
+    }
+  }
+
+  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
+
+  // Step 3 – translate to JA
+  const vulnsEn = zapSection?.detailedAlerts || [];
+  let aiAnalysisJa = null, vulnsJa = [];
+
+  if (aiAnalysisEn || vulnsEn.length) {
     try {
-        scanData = await formatScanDataForPdf(scanResult);
-    } catch (error) {
-        console.error('❌ Failed to format scan data:', error.message);
-        throw new Error('Failed to format scan data for PDF');
+      const ja = await translateToJapanese(aiAnalysisEn || {}, vulnsEn);
+      aiAnalysisJa = ja.aiAnalysis;
+      vulnsJa      = ja.vulnerabilities;
+    } catch (e) {
+      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+      console.error('❌ JA translation failed:', e.message);
+      throw e;
     }
+  }
+  if (aiAnalysisJa && !containsJapanese(JSON.stringify(aiAnalysisJa))) {
+    const err = new Error('Japanese translation output did not contain Japanese text');
+    err.code = 'JA_TRANSLATION_INVALID';
+    throw err;
+  }
 
-    // Debug: Check what ZAP data we have
-    const zapSection = scanData.sections?.find(s => s.id === 'zap');
-    console.log(`🔍 ZAP section found: ${!!zapSection}`);
-    if (zapSection) {
-        console.log(`🔍 ZAP detailedAlerts: ${zapSection.detailedAlerts?.length || 0} items`);
-        console.log(`🔍 ZAP alerts: ${zapSection.alerts?.length || 0} items`);
-        if (zapSection.detailedAlerts && zapSection.detailedAlerts.length > 0) {
-            console.log(`🔍 First detailedAlert: ${JSON.stringify(zapSection.detailedAlerts[0]).substring(0, 200)}`);
-        }
-    }
+  const scanHistory = scanData?.scanHistory || null;
+  const diagnosisEn = {
+    title: scanHistory?.title?.en || 'Scan History',
+    headers: (scanHistory?.headers && scanHistory.headers.en) ? scanHistory.headers.en : ['Date', 'Executed by', 'Status'],
+    rows: (scanHistory?.rows && scanHistory.rows.en) ? scanHistory.rows.en : [[scanHistoryRows[0]?.dateEn || '', scanHistoryRows[0]?.executedByEn || '', scanHistoryRows[0]?.status || 'unknown']]
+  };
 
-    // CRITICAL FIX: Fetch full detailed alerts from GridFS to avoid truncated remediation text
-    // The MongoDB summaryAlerts truncate solution to 150 chars, but GridFS has the full text
-    if (zapSection && scanResult.zapResult?.reportFiles?.length > 0) {
-        const detailedAlertsFile = scanResult.zapResult.reportFiles.find(
-            f => f.filename && f.filename.includes('detailed_alerts')
-        );
+  // Strict EN-only validation (all English pages content must be English)
+  assertEnglishOnlyPdfContent({
+    scanData,
+    aiAnalysis: aiAnalysisEn,
+    vulnerabilities: vulnsEn,
+    diagnosisTable: diagnosisEn
+  });
 
-        if (detailedAlertsFile && detailedAlertsFile.fileId) {
-            try {
-                console.log(`📥 Fetching full detailed alerts from GridFS: ${detailedAlertsFile.fileId}`);
-                const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
-                    ? 'zap_auth_reports' : 'zap_reports';
-                const detailedAlertsBuffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
-                const fullDetailedAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
+  // PDFKit path
+  const tsBaseEn = await getReportTemplateStaticContent({ lang: 'en' });
+  const tsBaseJa = await getReportTemplateStaticContent({ lang: 'ja' });
+  const tsEn = buildTemplateStaticOverrides(tsBaseEn, { lang: 'en', scanData });
+  const tsJa = buildTemplateStaticOverrides(tsBaseJa, { lang: 'ja', scanData });
+  tsEn.diagnosisTitle   = diagnosisEn.title;
+  tsEn.diagnosisHeaders = diagnosisEn.headers;
+  tsEn.diagnosisRows    = diagnosisEn.rows;
 
-                // Replace truncated alerts with full ones
-                zapSection.detailedAlerts = fullDetailedAlerts.map(alert => ({
-                    name: alert.alert,
-                    risk: alert.risk,
-                    confidence: alert.confidence,
-                    description: alert.description || 'No description available',
-                    solution: alert.solution || 'No solution provided',
-                    reference: alert.reference || '',
-                    cweid: alert.cweid,
-                    wascid: alert.wascid,
-                    totalOccurrences: alert.totalOccurrences || alert.occurrences?.length || 0
-                }));
+  const diagnosisJa = {
+    title: scanHistory?.title?.ja || '診断履歴',
+    headers: (scanHistory?.headers && scanHistory.headers.ja) ? scanHistory.headers.ja : ['日付', '実行ユーザー', 'ステータス'],
+    rows: (scanHistory?.rows && scanHistory.rows.ja) ? scanHistory.rows.ja : [[scanHistoryRows[0]?.dateJa || '', scanHistoryRows[0]?.executedByJa || '', getStatusLabel(scanHistoryRows[0]?.status, 'ja')]]
+  };
+  tsJa.diagnosisTitle   = diagnosisJa.title;
+  tsJa.diagnosisHeaders = diagnosisJa.headers;
+  tsJa.diagnosisRows    = diagnosisJa.rows;
 
-                console.log(`✅ Replaced with ${zapSection.detailedAlerts.length} full detailed alerts from GridFS`);
-                if (zapSection.detailedAlerts.length > 0 && zapSection.detailedAlerts[0].solution) {
-                    console.log(`🔍 First solution length: ${zapSection.detailedAlerts[0].solution.length} chars (full text)`);
-                }
-            } catch (gridfsError) {
-                console.warn(`⚠️ Failed to fetch detailed alerts from GridFS: ${gridfsError.message}`);
-                console.warn('⚠️ Using truncated alerts from MongoDB (solution text may be incomplete)');
-            }
-        }
-    }
-
-    // Wait for rate limit
-    console.log(`⏳ Waiting ${RATE_LIMIT_DELAY / 1000}s for rate limit...`);
-    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-
-    // Step 2: Format AI analysis (English)
-    console.log('📝 Step 2/3: Formatting AI analysis...');
-    let aiAnalysisEn = null;
-    if (scanResult.refinedReport) {
-        try {
-            aiAnalysisEn = await formatAiAnalysisForPdf(scanResult.refinedReport);
-        } catch (error) {
-            console.error('⚠️ Failed to format AI analysis:', error.message);
-        }
-    }
-
-    // Wait for rate limit
-    console.log(`⏳ Waiting ${RATE_LIMIT_DELAY / 1000}s for rate limit...`);
-    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-
-    // Step 3: Translate both AI analysis AND vulnerabilities to Japanese (combined in single API call)
-    console.log('🌐 Step 3/3: Translating AI analysis + vulnerabilities to Japanese...');
-    let aiAnalysisJa = null;
-    let vulnerabilitiesJa = [];
-    // zapSection already declared above during debug
-    const vulnerabilitiesEn = zapSection?.detailedAlerts || [];
-
-    console.log(`📊 Found ${vulnerabilitiesEn.length} vulnerabilities in scan data`);
-    if (vulnerabilitiesEn.length > 0) {
-        console.log(`📝 First vulnerability: ${vulnerabilitiesEn[0]?.name || vulnerabilitiesEn[0]?.alert}`);
-    }
-
-    if (aiAnalysisEn || (vulnerabilitiesEn && vulnerabilitiesEn.length > 0)) {
-        try {
-            const japaneseData = await translateToJapanese(
-                aiAnalysisEn || {},
-                vulnerabilitiesEn || []
-            );
-            aiAnalysisJa = japaneseData.aiAnalysis;
-            vulnerabilitiesJa = japaneseData.vulnerabilities;
-            console.log(`✅ Translated ${vulnerabilitiesJa.length} vulnerabilities to Japanese`);
-        } catch (error) {
-            console.error('⚠️ Failed to translate to Japanese:', error.message);
-            // Fallback to English if translation fails
-            aiAnalysisJa = aiAnalysisEn;
-            vulnerabilitiesJa = vulnerabilitiesEn;
-        }
-    }
-
-    console.log('✅ All Gemini calls completed, generating PDF...');
-
-    // Generate the PDF
-    return new Promise((resolve, reject) => {
-        try {
-            const doc = new PDFDocument({
-                size: 'A4',
-                bufferPages: true,
-                margins: { top: 50, bottom: 50, left: 50, right: 50 },
-                info: {
-                    Title: `Security Scan Report - ${scanResult.target}`,
-                    Author: 'SSDT Security Scanner',
-                    Subject: 'Comprehensive Security and Performance Analysis',
-                    CreationDate: new Date()
-                }
-            });
-
-            // Register Japanese fonts
-            doc.registerFont('NotoSans', FONTS.regular);
-            doc.registerFont('NotoSans-Bold', FONTS.bold);
-
-            const chunks = [];
-            doc.on('data', chunk => chunks.push(chunk));
-            doc.on('end', () => resolve(Buffer.concat(chunks)));
-            doc.on('error', reject);
-
-            // ==================== RENDER ENGLISH VERSION ====================
-            renderReport(doc, scanData, aiAnalysisEn, vulnerabilitiesEn, 'en');
-
-            // ==================== PAGE BREAK ====================
-            doc.addPage();
-
-            // ==================== RENDER JAPANESE VERSION ====================
-            renderJapaneseHeader(doc);
-            renderReport(doc, scanData, aiAnalysisJa, vulnerabilitiesJa, 'ja');
-
-            // ==================== ADD FOOTERS ====================
-            addFooters(doc);
-
-            doc.end();
-        } catch (error) {
-            reject(error);
-        }
-    });
+  const doc = makePdfDoc({
+    Title:   `Security Scan Report - ${scanResult.target}`,
+    Author:  'SSDT Security Scanner',
+    Subject: 'Comprehensive Security and Performance Analysis'
+  });
+  const buf = collectBuffer(doc);
+  renderTemplateReport(doc, scanData, aiAnalysisEn, vulnsEn, 'en', tsEn);
+  doc.addPage();
+  renderTemplateReport(doc, scanData, aiAnalysisJa, vulnsJa, 'ja', tsJa);
+  doc.end();
+  return buf;
 }
 
 /**
- * Render the report content
- */
-function renderReport(doc, scanData, aiAnalysis, vulnerabilities, lang) {
-    const isJapanese = lang === 'ja';
-
-    // Header
-    renderHeader(doc, scanData, lang);
-
-    // Overall Risk Level
-    renderSummary(doc, scanData, lang);
-
-    // AI Analysis Results
-    if (aiAnalysis) {
-        renderAiAnalysis(doc, aiAnalysis, isJapanese, scanData.header?.target);
-    }
-
-    // Details of Each Scan Result
-    renderScanSections(doc, scanData, lang);
-
-    // Vulnerability Details & Remediation
-    if (vulnerabilities && vulnerabilities.length > 0) {
-        renderDetailedVulnerabilities(doc, vulnerabilities, lang);
-    }
-}
-
-/**
- * Render the report header
- */
-function renderHeader(doc, scanData, lang) {
-    const header = scanData.header;
-    const title = typeof header.title === 'object' ? header.title[lang] : header.title;
-
-    doc.font('NotoSans-Bold')
-        .fontSize(24)
-        .fillColor(COLORS.primary)
-        .text(title, { align: 'center' });
-
-    doc.moveDown(0.3);
-
-    doc.font('NotoSans')
-        .fontSize(12)
-        .fillColor(COLORS.text)
-        .text(`Target: ${header.target}`, { align: 'center' });
-
-    doc.fontSize(10)
-        .fillColor(COLORS.textLight)
-        .text(`${lang === 'ja' ? '生成日' : 'Generated'}: ${header.date}`, { align: 'center' })
-        .text(`Scan ID: ${header.scanId}`, { align: 'center' });
-
-    doc.moveDown(0.5);
-
-    // Divider line
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke(COLORS.border);
-    doc.moveDown(0.5);
-}
-
-/**
- * Render Japanese version header
- */
-function renderJapaneseHeader(doc) {
-    doc.font('NotoSans-Bold')
-        .fontSize(18)
-        .fillColor(COLORS.primary)
-        .text('Japanese Version', { align: 'center' });
-
-    doc.moveDown(0.3);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke(COLORS.border);
-    doc.moveDown(0.5);
-}
-
-/**
- * Render executive summary
- */
-function renderSummary(doc, scanData, lang) {
-    const summary = scanData.summary;
-    const title = typeof summary.title === 'object' ? summary.title[lang] : summary.title;
-    const riskLabel = typeof summary.riskLabel === 'object' ? summary.riskLabel[lang] : summary.riskLabel;
-    const riskLevel = typeof summary.riskLevel === 'object' ? summary.riskLevel[lang] : summary.riskLevel;
-
-    // Section header
-    addSectionHeader(doc, title);
-
-    // Risk level with color
-    const riskColor = getRiskColor(riskLevel);
-    doc.font('NotoSans-Bold')
-        .fontSize(11)
-        .fillColor(COLORS.text)
-        .text(`${riskLabel}: `, { continued: true })
-        .fillColor(riskColor)
-        .text(riskLevel.toUpperCase());
-
-    doc.moveDown(0.5);
-}
-
-/**
- * Render scan data sections
- */
-function renderScanSections(doc, scanData, lang) {
-    for (const section of scanData.sections) {
-        // Check if we need a new page
-        if (doc.y > 680) {
-            doc.addPage();
-        }
-
-        const title = typeof section.title === 'object' ? section.title[lang] : section.title;
-        addSectionHeader(doc, title);
-
-        // Render items
-        for (const item of section.items) {
-            renderItem(doc, item, lang);
-        }
-
-        // Fix 8: Render alerts grouped by risk level
-        if (section.alerts && section.alerts.length > 0) {
-            doc.moveDown(0.3);
-            doc.font('NotoSans-Bold')
-                .fontSize(10)
-                .fillColor(COLORS.text)
-                .text(lang === 'ja' ? '検出された脆弱性:' : 'Detected Vulnerabilities:');
-            doc.moveDown(0.2);
-
-            // Group alerts by risk level
-            const riskGroups = {};
-            for (const alert of section.alerts) {
-                const risk = alert.risk || 'Unknown';
-                if (!riskGroups[risk]) riskGroups[risk] = [];
-                riskGroups[risk].push(alert);
-            }
-
-            const riskOrder = ['High', 'Medium', 'Low', 'Informational'];
-            for (const risk of riskOrder) {
-                if (!riskGroups[risk] || riskGroups[risk].length === 0) continue;
-                const riskColor = getRiskColor(risk);
-                doc.font('NotoSans-Bold')
-                    .fontSize(9)
-                    .fillColor(riskColor)
-                    .text(lang === 'ja'
-                        ? `${risk}リスクの脆弱性 (${riskGroups[risk].length}):`
-                        : `${risk} Risk Vulnerabilities (${riskGroups[risk].length}):`);
-
-                for (const alert of riskGroups[risk]) {
-                    doc.font('NotoSans')
-                        .fontSize(9)
-                        .fillColor(COLORS.text)
-                        .text(`\u2022  ${alert.alert}`, { width: 475, indent: 10 });
-                }
-                doc.moveDown(0.2);
-            }
-        }
-
-        // Fix 5: More spacing between scan sections
-        doc.moveDown(0.7);
-    }
-}
-
-/**
- * Render a single item
- */
-function renderItem(doc, item, lang) {
-    const label = typeof item.label === 'object' ? item.label[lang] : item.label;
-    let value = item.value;
-
-    // Handle bilingual values
-    if (typeof value === 'object' && value !== null && (value.en || value.ja)) {
-        value = value[lang] || value.en || '';
-    }
-
-    const typeColor = getTypeColor(item.type);
-
-    // Fix 4: Consistent bullet indentation (no extra leading spaces)
-    doc.font('NotoSans')
-        .fontSize(10)
-        .fillColor(COLORS.textLight)
-        .text('\u2022  ', { continued: true })
-        .font('NotoSans-Bold')
-        .fillColor(COLORS.text)
-        .text(`${label}: `, { continued: true })
-        .font('NotoSans')
-        .fillColor(typeColor)
-        .text(String(value));
-}
-
-/**
- * Render AI analysis section
- */
-function renderAiAnalysis(doc, analysis, isJapanese, targetUrl) {
-    // Check if we need a new page
-    if (doc.y > 500) {
-        doc.addPage();
-    }
-
-    // Fix 1 & 9: Render as proper H2 heading with target URL below
-    const title = analysis.title || (isJapanese ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis');
-    addSectionHeader(doc, title);
-
-    if (targetUrl) {
-        doc.font('NotoSans')
-            .fontSize(10)
-            .fillColor(COLORS.text)
-            .text(`${isJapanese ? '対象URL' : 'Target URL'}: ${targetUrl}`);
-        doc.moveDown(0.3);
-    }
-
-    if (!analysis.sections) return;
-
-    for (const section of analysis.sections) {
-        // Fix 2: Skip duplicate Executive Summary (already rendered by renderSummary)
-        if (section.heading && section.heading.toLowerCase().includes('executive summary')) {
-            continue;
-        }
-
-        // Check for page break
-        if (doc.y > 680) {
-            doc.addPage();
-        }
-
-        // Fix 9: H3 sub-heading (11pt bold)
-        if (section.heading) {
-            doc.font('NotoSans-Bold')
-                .fontSize(11)
-                .fillColor(COLORS.primary)
-                .text(section.heading);
-            doc.moveDown(0.3);
-        }
-
-        // Render content
-        if (section.content) {
-            for (const block of section.content) {
-                renderContentBlock(doc, block);
-            }
-        }
-
-        // Fix 5: More spacing between subsections
-        doc.moveDown(0.5);
-    }
-}
-
-/**
- * Parse and render text with markdown bold (**text**) support
- */
-function renderTextWithBold(doc, text, options = {}) {
-    const parts = [];
-    let lastIndex = 0;
-    const boldRegex = /\*\*([^*]+)\*\*/g;
-    let match;
-
-    while ((match = boldRegex.exec(text)) !== null) {
-        // Add text before the bold part
-        if (match.index > lastIndex) {
-            parts.push({ text: text.substring(lastIndex, match.index), bold: false });
-        }
-        // Add the bold part (without the **)
-        parts.push({ text: match[1], bold: true });
-        lastIndex = match.index + match[0].length;
-    }
-
-    // Add remaining text
-    if (lastIndex < text.length) {
-        parts.push({ text: text.substring(lastIndex), bold: false });
-    }
-
-    // If no bold parts found, render as single text
-    if (parts.length === 0) {
-        doc.text(text, options);
-        return;
-    }
-
-    // Render each part with appropriate font
-    for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        const isLast = i === parts.length - 1;
-
-        doc.font(part.bold ? 'NotoSans-Bold' : 'NotoSans')
-            .text(part.text, { ...options, continued: !isLast });
-    }
-}
-
-/**
- * Render a content block (paragraph, bullets, bold_text)
- */
-function renderContentBlock(doc, block) {
-    switch (block.type) {
-        case 'paragraph':
-            doc.fontSize(10)
-                .fillColor(COLORS.text);
-            // Fix 3: Better lineGap for readability; Fix 7: Split long paragraphs
-            if (block.text && block.text.length > 350) {
-                const sentences = block.text.match(/[^.!?。！？]+[.!?。！？]+\s*/g) || [block.text];
-                if (sentences.length >= 4) {
-                    const mid = Math.ceil(sentences.length / 2);
-                    const part1 = sentences.slice(0, mid).join('').trim();
-                    const part2 = sentences.slice(mid).join('').trim();
-                    if (part1) {
-                        renderTextWithBold(doc, part1, { width: 495, align: 'left', lineGap: 3 });
-                        doc.moveDown(0.3);
-                    }
-                    if (part2) {
-                        renderTextWithBold(doc, part2, { width: 495, align: 'left', lineGap: 3 });
-                    }
-                } else {
-                    renderTextWithBold(doc, block.text, { width: 495, align: 'left', lineGap: 3 });
-                }
-            } else {
-                renderTextWithBold(doc, block.text, { width: 495, align: 'left', lineGap: 3 });
-            }
-            doc.moveDown(0.3);
-            break;
-
-        case 'bullets':
-            if (block.items && Array.isArray(block.items)) {
-                for (const item of block.items) {
-                    if (doc.y > 700) doc.addPage();
-                    // Fix 4: Consistent bullet indentation
-                    doc.fontSize(10)
-                        .fillColor(COLORS.text);
-                    renderTextWithBold(doc, `\u2022  ${item}`, { width: 480, indent: 10 });
-                }
-            }
-            doc.moveDown(0.3);
-            break;
-
-        case 'bold_text':
-            // Fix 6: Consistent metric formatting as key-value pairs
-            doc.font('NotoSans-Bold')
-                .fontSize(10)
-                .fillColor(COLORS.text)
-                .text(`${block.label} `, { continued: true })
-                .font('NotoSans')
-                .fillColor(getTypeColor(block.text?.toLowerCase?.() === 'high' ? 'danger' : 'stat'))
-                .text(block.text || '');
-            doc.moveDown(0.2);
-            break;
-
-        default:
-            // Handle as paragraph if unknown type
-            if (block.text) {
-                doc.fontSize(10)
-                    .fillColor(COLORS.text);
-                renderTextWithBold(doc, block.text, { width: 495, lineGap: 3 });
-                doc.moveDown(0.3);
-            }
-    }
-}
-
-/**
- * Render detailed vulnerabilities section
- */
-function renderDetailedVulnerabilities(doc, vulnerabilities, lang) {
-    // Check if we need a new page
-    if (doc.y > 500) {
-        doc.addPage();
-    }
-
-    const title = lang === 'ja'
-        ? '脆弱性の詳細と修正方法'
-        : 'Vulnerability Details & Remediation';
-
-    addSectionHeader(doc, title);
-
-    for (let i = 0; i < vulnerabilities.length; i++) {
-        const vuln = vulnerabilities[i];
-
-        // Check for page break before each vulnerability
-        if (doc.y > 650) {
-            doc.addPage();
-        }
-
-        // Vulnerability heading with number and name
-        doc.moveDown(0.3);
-        const riskColor = getRiskColor(vuln.risk);
-
-        doc.font('NotoSans-Bold')
-            .fontSize(11)
-            .fillColor(COLORS.text)
-            .text(`${i + 1}. ${vuln.name || vuln.alert}`, { continued: false });
-
-        doc.moveDown(0.2);
-
-        // Risk and Confidence badges
-        doc.font('NotoSans')
-            .fontSize(9)
-            .fillColor(COLORS.textLight)
-            .text(`${lang === 'ja' ? 'リスク' : 'Risk'}: `, { continued: true })
-            .fillColor(riskColor)
-            .font('NotoSans-Bold')
-            .text(vuln.risk || 'Unknown', { continued: true })
-            .fillColor(COLORS.textLight)
-            .font('NotoSans')
-            .text(`  |  ${lang === 'ja' ? '信頼度' : 'Confidence'}: `, { continued: true })
-            .fillColor(COLORS.text)
-            .text(vuln.confidence || 'Unknown');
-
-        doc.moveDown(0.3);
-
-        // Description section
-        if (vuln.description) {
-            doc.font('NotoSans-Bold')
-                .fontSize(9)
-                .fillColor(COLORS.primary)
-                .text(lang === 'ja' ? '説明:' : 'Description:', { continued: false });
-
-            doc.moveDown(0.1);
-
-            doc.fontSize(9)
-                .fillColor(COLORS.text);
-            renderTextWithBold(doc, vuln.description, { width: 485, align: 'left', lineGap: 2 });
-
-            doc.moveDown(0.3);
-        }
-
-        // Solution section
-        if (vuln.solution) {
-            doc.font('NotoSans-Bold')
-                .fontSize(9)
-                .fillColor(COLORS.success)
-                .text(lang === 'ja' ? '推奨される修正方法:' : 'Recommended Solution:', { continued: false });
-
-            doc.moveDown(0.1);
-
-            doc.fontSize(9)
-                .fillColor(COLORS.text);
-            renderTextWithBold(doc, vuln.solution, { width: 485, align: 'left', lineGap: 2 });
-
-            doc.moveDown(0.3);
-        }
-
-        // Additional metadata (CWE, WASC, Occurrences)
-        const metadata = [];
-        if (vuln.cweid) metadata.push(`CWE-${vuln.cweid}`);
-        if (vuln.wascid) metadata.push(`WASC-${vuln.wascid}`);
-        if (vuln.totalOccurrences) {
-            metadata.push(lang === 'ja'
-                ? `${vuln.totalOccurrences}回検出`
-                : `${vuln.totalOccurrences} occurrence(s)`);
-        }
-
-        if (metadata.length > 0) {
-            doc.font('NotoSans')
-                .fontSize(8)
-                .fillColor(COLORS.textLight)
-                .text(metadata.join(' | '), { width: 485 });
-
-            doc.moveDown(0.2);
-        }
-
-        // Reference links
-        if (vuln.reference) {
-            doc.font('NotoSans')
-                .fontSize(8)
-                .fillColor(COLORS.info)
-                .text(lang === 'ja' ? '参考情報: ' : 'References: ', { continued: true })
-                .fillColor(COLORS.textLight)
-                .text(vuln.reference, { width: 450, link: vuln.reference });
-        }
-
-        // Divider line between vulnerabilities (except for the last one)
-        if (i < vulnerabilities.length - 1) {
-            doc.moveDown(0.3);
-            doc.moveTo(60, doc.y).lineTo(535, doc.y).stroke(COLORS.border);
-        }
-
-        doc.moveDown(0.4);
-    }
-}
-
-/**
- * Add a section header
- */
-function addSectionHeader(doc, title) {
-    // Fix 5: More spacing before section headers
-    doc.moveDown(0.6);
-
-    // Fix 9: H2 heading - larger font with taller background box
-    const startY = doc.y;
-    doc.rect(50, startY, 495, 26)
-        .fill(COLORS.background);
-
-    doc.font('NotoSans-Bold')
-        .fontSize(14)
-        .fillColor(COLORS.primary)
-        .text(title, 55, startY + 5);
-
-    doc.y = startY + 32;
-}
-
-/**
- * Add footers to all pages
- */
-function addFooters(doc) {
-    const range = doc.bufferedPageRange();
-    if (!range || range.count === 0) {
-        console.warn('No pages to add footers to');
-        return;
-    }
-
-    const pageCount = range.count;
-
-    for (let i = 0; i < pageCount; i++) {
-        doc.switchToPage(i);
-
-        // Access page dimensions after switching to ensure correct values
-        const pageWidth = doc.page.width;
-        const footerY = doc.page.height - 30;
-
-        // Fix 10: Better date format (DD Mon YYYY)
-        const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-        const footerText = `Page ${i + 1} of ${pageCount} | SSDT Security Scanner | Generated: ${dateStr}`;
-
-        // Set font before measuring text width
-        doc.font('NotoSans').fontSize(8);
-        const textWidth = doc.widthOfString(footerText);
-        const centerX = (pageWidth - textWidth) / 2;
-
-        // Simple text call without alignment options to prevent page creation
-        doc.fillColor(COLORS.textLight)
-            .text(footerText, centerX, footerY, { lineBreak: false });
-    }
-}
-
-/**
- * Get color based on risk level
- */
-function getRiskColor(risk) {
-    if (!risk) return COLORS.textLight;
-    const r = String(risk).toLowerCase();
-    if (r === 'high' || r.includes('high')) return COLORS.danger;
-    if (r === 'medium' || r.includes('medium')) return COLORS.warning;
-    if (r === 'low' || r.includes('low')) return COLORS.info;
-    return COLORS.success;
-}
-
-/**
- * Get color based on item type
- */
-function getTypeColor(type) {
-    switch (type) {
-        case 'danger': return COLORS.danger;
-        case 'warning': return COLORS.warning;
-        case 'success': return COLORS.success;
-        case 'info': return COLORS.info;
-        case 'grade':
-            return COLORS.primary;
-        case 'score':
-        case 'stat':
-        default:
-            return COLORS.text;
-    }
-}
-
-/**
- * Generate a single-language PDF report (English or Japanese only)
- * @param {Object} scanResult - The complete scan result from MongoDB
- * @param {string} lang - Language code ('en' or 'ja')
- * @returns {Promise<Buffer>} - PDF as a buffer
+ * Generate a single-language PDF (EN or JA).
  */
 async function generateSingleLanguagePdf(scanResult, lang = 'en') {
-    console.log(`📄 Starting ${lang.toUpperCase()} PDF generation...`);
+  console.log(`📄 Starting ${lang.toUpperCase()} PDF generation…`);
+  const isJa = lang === 'ja';
 
-    const isJapanese = lang === 'ja';
+  const scanHistoryRows = await fetchScanHistoryRows(scanResult);
 
-    // Step 1: Format scan data (includes English + Japanese labels)
-    console.log('📊 Step 1: Formatting scan data...');
-    let scanData;
+  let scanData;
+  try   { scanData = await formatScanDataForPdf(scanResult, { scanHistoryRows }); }
+  catch (e) {
+    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+    scanData = buildFallbackScanDataForPdf(scanResult);
+  }
+
+  await ensureGeminiScanHistory(scanData, scanHistoryRows);
+
+  const zapSection = scanData.sections?.find(s => s.id === 'zap');
+  await fetchFullAlertsFromGridFS(scanResult, zapSection);
+
+  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
+
+  let aiAnalysis = null;
+  if (scanResult.refinedReport) {
+    try { aiAnalysis = await formatAiAnalysisForPdf(scanResult.refinedReport); }
+    catch (e) {
+      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+      console.error('⚠️ AI analysis failed:', e.message);
+    }
+  }
+
+  const vulnsEn = zapSection?.detailedAlerts || [];
+  let aiToUse = aiAnalysis, vulnsToUse = vulnsEn;
+
+  if (isJa && (aiAnalysis || vulnsEn.length)) {
+    await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
     try {
-        scanData = await formatScanDataForPdf(scanResult);
-    } catch (error) {
-        console.error('❌ Failed to format scan data:', error.message);
-        throw new Error('Failed to format scan data for PDF');
+      const ja = await translateToJapanese(aiAnalysis || {}, vulnsEn);
+      aiToUse    = ja.aiAnalysis;
+      vulnsToUse = ja.vulnerabilities;
+    } catch (e) {
+      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+      console.error('❌ JA translation failed:', e.message);
+      throw e;
     }
+  }
+  if (isJa && aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
+    const err = new Error('Japanese translation output did not contain Japanese text');
+    err.code = 'JA_TRANSLATION_INVALID';
+    throw err;
+  }
 
-    // Fetch full ZAP detailed alerts from GridFS
-    const zapSection = scanData.sections?.find(s => s.id === 'zap');
-    if (zapSection && scanResult.zapResult?.reportFiles?.length > 0) {
-        const detailedAlertsFile = scanResult.zapResult.reportFiles.find(
-            f => f.filename && f.filename.includes('detailed_alerts')
-        );
+  const disclaimer = getDisclaimerContent(lang);
+  const scanHistory = scanData?.scanHistory || null;
+  const diagnosis = {
+    title: projectLangValue(scanHistory?.title, lang) || (lang === 'ja' ? '診断履歴' : 'Scan History'),
+    headers: (scanHistory?.headers && scanHistory.headers[lang]) ? scanHistory.headers[lang] : (lang === 'ja' ? ['日付', '実行ユーザー', 'ステータス'] : ['Date', 'Executed by', 'Status']),
+    rows: (scanHistory?.rows && scanHistory.rows[lang]) ? scanHistory.rows[lang] : [[
+      lang === 'ja' ? (scanHistoryRows[0]?.dateJa || '') : (scanHistoryRows[0]?.dateEn || ''),
+      lang === 'ja' ? (scanHistoryRows[0]?.executedByJa || '') : (scanHistoryRows[0]?.executedByEn || ''),
+      lang === 'ja' ? getStatusLabel(scanHistoryRows[0]?.status, 'ja') : (scanHistoryRows[0]?.status || 'unknown')
+    ]]
+  };
 
-        if (detailedAlertsFile && detailedAlertsFile.fileId) {
-            try {
-                console.log(`📥 Fetching full detailed alerts from GridFS: ${detailedAlertsFile.fileId}`);
-                const bucket2 = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
-                    ? 'zap_auth_reports' : 'zap_reports';
-                const detailedAlertsBuffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket2);
-                const fullDetailedAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
-
-                zapSection.detailedAlerts = fullDetailedAlerts.map(alert => ({
-                    name: alert.alert,
-                    risk: alert.risk,
-                    confidence: alert.confidence,
-                    description: alert.description || 'No description available',
-                    solution: alert.solution || 'No solution provided',
-                    reference: alert.reference || '',
-                    cweid: alert.cweid,
-                    wascid: alert.wascid,
-                    totalOccurrences: alert.totalOccurrences || alert.occurrences?.length || 0
-                }));
-                console.log(`✅ Loaded ${zapSection.detailedAlerts.length} full detailed alerts from GridFS`);
-            } catch (gridfsError) {
-                console.warn(`⚠️ Failed to fetch detailed alerts from GridFS: ${gridfsError.message}`);
-            }
-        }
-    }
-
-    // Wait for rate limit
-    console.log(`⏳ Waiting ${RATE_LIMIT_DELAY / 1000}s for rate limit...`);
-    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-
-    // Step 2: Format AI analysis (English)
-    console.log('📝 Step 2: Formatting AI analysis...');
-    let aiAnalysis = null;
-    if (scanResult.refinedReport) {
-        try {
-            aiAnalysis = await formatAiAnalysisForPdf(scanResult.refinedReport);
-        } catch (error) {
-            console.error('⚠️ Failed to format AI analysis:', error.message);
-        }
-    }
-
-    // Get vulnerabilities
-    const vulnerabilities = zapSection?.detailedAlerts || [];
-
-    // Step 3: For Japanese, translate content
-    let aiAnalysisToUse = aiAnalysis;
-    let vulnerabilitiesToUse = vulnerabilities;
-
-    if (isJapanese && (aiAnalysis || vulnerabilities.length > 0)) {
-        console.log(`⏳ Waiting ${RATE_LIMIT_DELAY / 1000}s for rate limit...`);
-        await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-
-        console.log('🌐 Step 3: Translating to Japanese...');
-        try {
-            const japaneseData = await translateToJapanese(
-                aiAnalysis || {},
-                vulnerabilities || []
-            );
-            aiAnalysisToUse = japaneseData.aiAnalysis;
-            vulnerabilitiesToUse = japaneseData.vulnerabilities;
-            console.log(`✅ Translated ${vulnerabilitiesToUse.length} vulnerabilities to Japanese`);
-        } catch (error) {
-            console.error('⚠️ Failed to translate to Japanese:', error.message);
-            // Fall back to English if translation fails
-        }
-    } else if (!isJapanese) {
-        console.log('⏭️ Skipping translation for English PDF');
-    }
-
-    console.log(`✅ Gemini calls completed, generating ${lang.toUpperCase()} PDF...`);
-
-    // Generate the PDF
-    return new Promise((resolve, reject) => {
-        try {
-            const doc = new PDFDocument({
-                size: 'A4',
-                bufferPages: true,
-                margins: { top: 50, bottom: 50, left: 50, right: 50 },
-                info: {
-                    Title: `Security Scan Report (${lang.toUpperCase()}) - ${scanResult.target}`,
-                    Author: 'SSDT Security Scanner',
-                    Subject: 'Comprehensive Security and Performance Analysis',
-                    CreationDate: new Date()
-                }
-            });
-
-            // Register Japanese fonts
-            doc.registerFont('NotoSans', FONTS.regular);
-            doc.registerFont('NotoSans-Bold', FONTS.bold);
-
-            const chunks = [];
-            doc.on('data', chunk => chunks.push(chunk));
-            doc.on('end', () => resolve(Buffer.concat(chunks)));
-            doc.on('error', reject);
-
-            // Render single language version
-            renderReport(doc, scanData, aiAnalysisToUse, vulnerabilitiesToUse, lang);
-
-            // Add footers
-            addFooters(doc);
-
-            doc.end();
-        } catch (error) {
-            reject(error);
-        }
+  if (!isJa) {
+    assertEnglishOnlyPdfContent({
+      scanData,
+      aiAnalysis: aiToUse,
+      vulnerabilities: vulnsToUse,
+      diagnosisTable: diagnosis
     });
+  }
+
+  if (PDF_RENDERER === 'html') {
+    try {
+      const html = buildSingleLanguageReportHtml({ scanData, aiAnalysis: aiToUse, vulnerabilities: vulnsToUse, lang, disclaimer, diagnosis });
+      return await renderHtmlToPdfBuffer(html);
+    } catch (e) { console.warn('⚠️ HTML renderer failed:', e.message); }
+  }
+
+  const tsBase = await getReportTemplateStaticContent({ lang });
+  const ts = buildTemplateStaticOverrides(tsBase, { lang, scanData });
+  ts.diagnosisTitle   = diagnosis.title;
+  ts.diagnosisHeaders = diagnosis.headers;
+  ts.diagnosisRows    = diagnosis.rows;
+
+  const doc = makePdfDoc({
+    Title:   `Security Scan Report (${lang.toUpperCase()}) - ${scanResult.target}`,
+    Author:  'SSDT',
+    Subject: 'Security Analysis'
+  });
+  const buf = collectBuffer(doc);
+  renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts);
+  doc.end();
+  return buf;
 }
 
 /**
- * Generate a ZAP-only vulnerability PDF report
- * @param {Object} scanResult - The complete scan result from MongoDB
- * @param {string} lang - Language code ('en' or 'ja')
- * @returns {Promise<Buffer>} - PDF as a buffer
+ * Generate a ZAP-only vulnerability PDF.
  */
 async function generateZapPdf(scanResult, lang = 'en') {
-    console.log(`📄 Starting ZAP ${lang.toUpperCase()} PDF generation...`);
+  console.log(`📄 Starting ZAP ${lang.toUpperCase()} PDF generation…`);
+  const isJa = lang === 'ja';
+  let vulnerabilities = [];
 
-    const isJapanese = lang === 'ja';
-
-    // Step 1: Fetch full ZAP detailed alerts from GridFS
-    let vulnerabilities = [];
-
-    if (scanResult.zapResult?.reportFiles?.length > 0) {
-        const detailedAlertsFile = scanResult.zapResult.reportFiles.find(
-            f => f.filename && f.filename.includes('detailed_alerts')
-        );
-
-        if (detailedAlertsFile && detailedAlertsFile.fileId) {
-            try {
-                console.log(`📥 Fetching full detailed alerts from GridFS: ${detailedAlertsFile.fileId}`);
-                const bucket3 = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
-                    ? 'zap_auth_reports' : 'zap_reports';
-                const detailedAlertsBuffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket3);
-                const fullDetailedAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
-
-                vulnerabilities = fullDetailedAlerts.map(alert => ({
-                    name: alert.alert,
-                    risk: alert.risk,
-                    confidence: alert.confidence,
-                    description: alert.description || 'No description available',
-                    solution: alert.solution || 'No solution provided',
-                    reference: alert.reference || '',
-                    cweid: alert.cweid,
-                    wascid: alert.wascid,
-                    totalOccurrences: alert.totalOccurrences || alert.occurrences?.length || 0,
-                    urls: alert.occurrences?.map(o => o.url) || []
-                }));
-                console.log(`✅ Loaded ${vulnerabilities.length} detailed alerts from GridFS`);
-            } catch (gridfsError) {
-                console.warn(`⚠️ Failed to fetch detailed alerts from GridFS: ${gridfsError.message}`);
-            }
-        }
-    }
-
-    // Fallback to summary alerts if GridFS fetch failed
-    if (vulnerabilities.length === 0 && scanResult.zapResult?.summaryAlerts) {
-        vulnerabilities = scanResult.zapResult.summaryAlerts.map(alert => ({
-            name: alert.alert,
-            risk: alert.risk,
-            confidence: alert.confidence,
-            description: alert.description || 'No description available',
-            solution: alert.solution || 'No solution provided',
-            reference: alert.reference || '',
-            cweid: alert.cweid,
-            wascid: alert.wascid,
-            totalOccurrences: alert.totalOccurrences || 0,
-            urls: []
+  if (scanResult.zapResult?.reportFiles?.length) {
+    const file = scanResult.zapResult.reportFiles.find(f => f.filename?.includes('detailed_alerts'));
+    if (file?.fileId) {
+      try {
+        const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
+        const buf    = await gridfsService.downloadFile(file.fileId, bucket);
+        const full   = JSON.parse(buf.toString('utf-8'));
+        vulnerabilities = full.map(a => ({
+          name: a.alert, risk: a.risk, confidence: a.confidence,
+          description: a.description || 'No description available',
+          solution:    a.solution    || 'No solution provided',
+          reference:   a.reference   || '',
+          cweid: a.cweid, wascid: a.wascid,
+          totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
+          urls: a.occurrences?.map(o => o.url) || []
         }));
-        console.log(`⚠️ Using ${vulnerabilities.length} summary alerts (URLs not available)`);
+      } catch (e) { console.warn(`⚠️ GridFS fetch failed: ${e.message}`); }
     }
+  }
 
-    // Step 2: Translate if Japanese
-    let vulnerabilitiesToUse = vulnerabilities;
+  if (!vulnerabilities.length && scanResult.zapResult?.summaryAlerts) {
+    vulnerabilities = scanResult.zapResult.summaryAlerts.map(a => ({
+      name: a.alert, risk: a.risk, confidence: a.confidence,
+      description: a.description || 'No description available',
+      solution:    a.solution    || 'No solution provided',
+      reference: a.reference || '', cweid: a.cweid, wascid: a.wascid,
+      totalOccurrences: a.totalOccurrences || 0, urls: []
+    }));
+  }
 
-    if (isJapanese && vulnerabilities.length > 0) {
-        console.log(`⏳ Waiting ${RATE_LIMIT_DELAY / 1000}s for rate limit...`);
-        await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-
-        console.log('🌐 Translating vulnerabilities to Japanese...');
-        try {
-            const japaneseData = await translateToJapanese({}, vulnerabilities);
-            vulnerabilitiesToUse = japaneseData.vulnerabilities;
-            // Preserve URLs from original data
-            vulnerabilitiesToUse = vulnerabilitiesToUse.map((v, i) => ({
-                ...v,
-                urls: vulnerabilities[i]?.urls || []
-            }));
-            console.log(`✅ Translated ${vulnerabilitiesToUse.length} vulnerabilities to Japanese`);
-        } catch (error) {
-            console.error('⚠️ Failed to translate to Japanese:', error.message);
-            // Fall back to English
-        }
+  let vulnsToUse = vulnerabilities;
+  if (isJa && vulnerabilities.length) {
+    await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
+    try {
+      const ja   = await translateToJapanese({}, vulnerabilities);
+      vulnsToUse = ja.vulnerabilities.map((v, i) => ({ ...v, urls: vulnerabilities[i]?.urls || [] }));
+    } catch (e) {
+      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+      console.error('❌ JA translation failed:', e.message);
+      throw e;
     }
+  }
 
-    // Calculate risk counts
-    const riskCounts = { High: 0, Medium: 0, Low: 0, Informational: 0 };
-    vulnerabilities.forEach(v => {
-        if (riskCounts[v.risk] !== undefined) riskCounts[v.risk]++;
-    });
+  const ts  = await getReportTemplateStaticContent({ lang });
+  const tsFinal = buildTemplateStaticOverrides(ts, { lang });
 
-    console.log(`✅ Generating ZAP ${lang.toUpperCase()} PDF...`);
-
-    // Generate the PDF
-    return new Promise((resolve, reject) => {
-        try {
-            const doc = new PDFDocument({
-                size: 'A4',
-                bufferPages: true,
-                margins: { top: 50, bottom: 50, left: 50, right: 50 },
-                info: {
-                    Title: `ZAP Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
-                    Author: 'SSDT Security Scanner - OWASP ZAP',
-                    Subject: 'Detailed Vulnerability Analysis',
-                    CreationDate: new Date()
-                }
-            });
-
-            // Register Japanese fonts
-            doc.registerFont('NotoSans', FONTS.regular);
-            doc.registerFont('NotoSans-Bold', FONTS.bold);
-
-            const chunks = [];
-            doc.on('data', chunk => chunks.push(chunk));
-            doc.on('end', () => resolve(Buffer.concat(chunks)));
-            doc.on('error', reject);
-
-            // === HEADER ===
-            doc.font('NotoSans-Bold')
-                .fontSize(24)
-                .fillColor(COLORS.primary)
-                .text(isJapanese ? '脆弱性スキャンレポート' : 'Vulnerability Scan Report', { align: 'center' });
-
-            doc.moveDown(0.3);
-
-            doc.font('NotoSans')
-                .fontSize(12)
-                .fillColor(COLORS.text)
-                .text(`Target: ${scanResult.target}`, { align: 'center' });
-
-            doc.fontSize(10)
-                .fillColor(COLORS.textLight)
-                .text(`${isJapanese ? '生成日' : 'Generated'}: ${new Date().toLocaleDateString()}`, { align: 'center' })
-                .text(`Scan ID: ${scanResult.analysisId}`, { align: 'center' });
-
-            doc.moveDown(0.5);
-            doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke(COLORS.border);
-            doc.moveDown(0.5);
-
-            // === RISK SUMMARY ===
-            addSectionHeader(doc, isJapanese ? 'リスクサマリー' : 'Risk Summary');
-
-            // Render risk counts with colored indicators
-            const riskY = doc.y;
-            let xOffset = 55;
-
-            doc.font('NotoSans-Bold').fontSize(11);
-
-            if (riskCounts.High > 0) {
-                doc.fillColor(COLORS.danger).text(`[HIGH] ${riskCounts.High}`, xOffset, riskY, { continued: false });
-                xOffset += 100;
-            }
-            if (riskCounts.Medium > 0) {
-                doc.fillColor(COLORS.warning).text(`[MEDIUM] ${riskCounts.Medium}`, xOffset, riskY, { continued: false });
-                xOffset += 120;
-            }
-            if (riskCounts.Low > 0) {
-                doc.fillColor('#ffb900').text(`[LOW] ${riskCounts.Low}`, xOffset, riskY, { continued: false });
-                xOffset += 90;
-            }
-            if (riskCounts.Informational > 0) {
-                doc.fillColor(COLORS.info).text(`[INFO] ${riskCounts.Informational}`, xOffset, riskY, { continued: false });
-            }
-
-            if (riskCounts.High === 0 && riskCounts.Medium === 0 && riskCounts.Low === 0 && riskCounts.Informational === 0) {
-                doc.fillColor(COLORS.success).text('No vulnerabilities detected', 55, riskY);
-            }
-
-            doc.y = riskY + 20;
-            doc.moveDown(0.3);
-
-            const totalOccurrences = vulnerabilities.reduce((sum, v) => sum + (v.totalOccurrences || 0), 0);
-            doc.fontSize(10)
-                .fillColor(COLORS.textLight)
-                .text(`${isJapanese ? '合計' : 'Total'}: ${vulnerabilities.length} ${isJapanese ? '種類の脆弱性' : 'vulnerability types'}, ${totalOccurrences} ${isJapanese ? '件の検出' : 'occurrences'}`);
-
-            doc.moveDown(0.5);
-
-            // === DETAILED VULNERABILITIES ===
-            if (vulnerabilitiesToUse.length > 0) {
-                renderZapVulnerabilities(doc, vulnerabilitiesToUse, lang);
-            } else {
-                doc.font('NotoSans')
-                    .fontSize(12)
-                    .fillColor(COLORS.success)
-                    .text(isJapanese ? '脆弱性は検出されませんでした' : 'No vulnerabilities detected', { align: 'center' });
-            }
-
-            // Add footers
-            addFooters(doc);
-
-            doc.end();
-        } catch (error) {
-            reject(error);
-        }
-    });
+  const doc = makePdfDoc({
+    Title:   `ZAP Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
+    Author:  'SSDT - OWASP ZAP',
+    Subject: 'Detailed Vulnerability Analysis'
+  });
+  const buf = collectBuffer(doc);
+  renderTemplateZapReport(doc, vulnsToUse, lang, tsFinal);
+  doc.end();
+  return buf;
 }
 
-/**
- * Render ZAP vulnerabilities with URLs
- */
-function renderZapVulnerabilities(doc, vulnerabilities, lang) {
-    const isJapanese = lang === 'ja';
-
-    addSectionHeader(doc, isJapanese ? '脆弱性の詳細と修正方法' : 'Vulnerability Details & Remediation');
-
-    for (let i = 0; i < vulnerabilities.length; i++) {
-        const vuln = vulnerabilities[i];
-
-        // Check for page break before each vulnerability
-        if (doc.y > 620) {
-            doc.addPage();
-        }
-
-        // Vulnerability heading with number and name
-        doc.moveDown(0.3);
-        const riskColor = getRiskColor(vuln.risk);
-
-        doc.font('NotoSans-Bold')
-            .fontSize(11)
-            .fillColor(COLORS.text)
-            .text(`${i + 1}. ${vuln.name || vuln.alert}`, { continued: false });
-
-        doc.moveDown(0.2);
-
-        // Risk and Confidence badges
-        doc.font('NotoSans')
-            .fontSize(9)
-            .fillColor(COLORS.textLight)
-            .text(`${isJapanese ? 'リスク' : 'Risk'}: `, { continued: true })
-            .fillColor(riskColor)
-            .font('NotoSans-Bold')
-            .text(vuln.risk || 'Unknown', { continued: true })
-            .fillColor(COLORS.textLight)
-            .font('NotoSans')
-            .text(`  |  ${isJapanese ? '信頼度' : 'Confidence'}: `, { continued: true })
-            .fillColor(COLORS.text)
-            .text(vuln.confidence || 'Unknown');
-
-        doc.moveDown(0.3);
-
-        // Description section
-        if (vuln.description) {
-            doc.font('NotoSans-Bold')
-                .fontSize(9)
-                .fillColor(COLORS.primary)
-                .text(isJapanese ? '説明:' : 'Description:', { continued: false });
-
-            doc.moveDown(0.1);
-
-            doc.font('NotoSans')
-                .fontSize(9)
-                .fillColor(COLORS.text);
-            renderTextWithBold(doc, vuln.description, { width: 485, align: 'left', lineGap: 2 });
-
-            doc.moveDown(0.3);
-        }
-
-        // Solution section
-        if (vuln.solution) {
-            doc.font('NotoSans-Bold')
-                .fontSize(9)
-                .fillColor(COLORS.success)
-                .text(isJapanese ? '推奨される修正方法:' : 'Recommended Solution:', { continued: false });
-
-            doc.moveDown(0.1);
-
-            doc.font('NotoSans')
-                .fontSize(9)
-                .fillColor(COLORS.text);
-            renderTextWithBold(doc, vuln.solution, { width: 485, align: 'left', lineGap: 2 });
-
-            doc.moveDown(0.3);
-        }
-
-        // URLs section (key difference from main PDF)
-        if (vuln.urls && vuln.urls.length > 0) {
-            // Check for page break before URLs
-            if (doc.y > 650) {
-                doc.addPage();
-            }
-
-            doc.font('NotoSans-Bold')
-                .fontSize(9)
-                .fillColor(COLORS.warning)
-                .text(`${isJapanese ? '影響を受けるURL' : 'Affected URLs'} (${vuln.urls.length}):`, { continued: false });
-
-            doc.moveDown(0.1);
-
-            doc.font('NotoSans')
-                .fontSize(8)
-                .fillColor(COLORS.textLight);
-
-            vuln.urls.forEach((url, idx) => {
-                // Check for page break
-                if (doc.y > 720) {
-                    doc.addPage();
-                }
-                doc.text(`  ${idx + 1}. ${url}`, { width: 480 });
-            });
-
-            doc.moveDown(0.3);
-        }
-
-        // Additional metadata (CWE, WASC, Occurrences)
-        const metadata = [];
-        if (vuln.cweid) metadata.push(`CWE-${vuln.cweid}`);
-        if (vuln.wascid) metadata.push(`WASC-${vuln.wascid}`);
-        if (vuln.totalOccurrences) {
-            metadata.push(isJapanese
-                ? `${vuln.totalOccurrences}回検出`
-                : `${vuln.totalOccurrences} occurrence(s)`);
-        }
-
-        if (metadata.length > 0) {
-            doc.font('NotoSans')
-                .fontSize(8)
-                .fillColor(COLORS.textLight)
-                .text(metadata.join(' | '), { width: 485 });
-
-            doc.moveDown(0.2);
-        }
-
-        // Reference links
-        if (vuln.reference) {
-            doc.font('NotoSans')
-                .fontSize(8)
-                .fillColor(COLORS.info)
-                .text(isJapanese ? '参考情報: ' : 'References: ', { continued: true })
-                .fillColor(COLORS.textLight)
-                .text(vuln.reference, { width: 450 });
-        }
-
-        // Divider line between vulnerabilities (except for the last one)
-        if (i < vulnerabilities.length - 1) {
-            doc.moveDown(0.3);
-            doc.moveTo(60, doc.y).lineTo(535, doc.y).stroke(COLORS.border);
-        }
-
-        doc.moveDown(0.4);
-    }
-}
-
-module.exports = {
-    generatePdfReport,
-    generateSingleLanguagePdf,
-    generateZapPdf
-};
+module.exports = { generatePdfReport, generateSingleLanguagePdf, generateZapPdf };
