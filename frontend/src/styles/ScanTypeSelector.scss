@@ -22,8 +22,8 @@
     text-align: center;
 
     .highlight {
-      color: #005f73;
-      text-shadow: none;
+      color: #FF6B00;
+      text-shadow: 0 0 10px rgba(255, 107, 0, 0.4);
     }
   }
 
@@ -54,7 +54,7 @@
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
-    box-shadow: 0 0 20px rgba(0, 95, 115, 0.3);
+    box-shadow: 0 0 20px rgba(255, 107, 0, 0.15);
 
     &::before {
       content: '';
@@ -71,7 +71,7 @@
 
     &:hover {
       transform: translateY(-8px);
-      box-shadow: 0 8px 30px rgba(0, 176, 198, 0.5), 0 0 60px rgba(0, 176, 198, 0.3);
+      box-shadow: 0 8px 30px rgba(255, 107, 0, 0.3), 0 0 60px rgba(255, 107, 0, 0.2);
       border-color: var(--accent-light);
 
       &::before {
@@ -80,7 +80,7 @@
 
       .card-icon {
         transform: scale(1.1);
-        box-shadow: 0 0 30px rgba(0, 176, 198, 0.6);
+        box-shadow: 0 0 30px rgba(255, 107, 0, 0.4);
       }
 
       .card-button {
@@ -94,36 +94,38 @@
     }
 
     &--auth {
-      border-color: #3b82f6;
-      box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+      &.pro-mode {
+        border-color: #a855f7;
+        box-shadow: 0 0 20px rgba(168, 85, 247, 0.3);
 
-      &::before {
-        background: linear-gradient(135deg, #3b82f6, #60a5fa);
-      }
+        &::before {
+          background: linear-gradient(135deg, #a855f7, #c084fc);
+        }
 
-      &:hover {
-        box-shadow: 0 8px 30px rgba(59, 130, 246, 0.5), 0 0 60px rgba(59, 130, 246, 0.3);
-        border-color: #60a5fa;
+        &:hover {
+          box-shadow: 0 8px 30px rgba(168, 85, 247, 0.5), 0 0 60px rgba(168, 85, 247, 0.3);
+          border-color: #c084fc;
+
+          .card-icon {
+            box-shadow: 0 0 30px rgba(168, 85, 247, 0.6);
+          }
+
+          .card-button {
+            background: #c084fc;
+          }
+        }
 
         .card-icon {
-          box-shadow: 0 0 30px rgba(59, 130, 246, 0.6);
+          background: linear-gradient(135deg, #a855f7, #c084fc);
+          box-shadow: 0 0 20px rgba(168, 85, 247, 0.4);
         }
 
         .card-button {
-          background: #60a5fa;
-        }
-      }
+          background: #a855f7;
 
-      .card-icon {
-        background: linear-gradient(135deg, #3b82f6, #60a5fa);
-        box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
-      }
-
-      .card-button {
-        background: #3b82f6;
-
-        &:hover {
-          background: #60a5fa;
+          &:hover {
+            background: #c084fc;
+          }
         }
       }
     }
@@ -143,7 +145,7 @@
       justify-content: center;
       margin: 0 auto 1.5rem;
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 0 20px rgba(0, 176, 198, 0.4);
+      box-shadow: 0 0 20px rgba(255, 107, 0, 0.2);
 
       svg {
         width: 40px;
@@ -232,7 +234,7 @@
     justify-content: center;
     gap: 0.75rem;
     padding: 1.5rem;
-    background: rgba(0, 176, 198, 0.1);
+    background: rgba(255, 107, 0, 0.05);
     border: 1px solid var(--accent);
     border-radius: 8px;
     color: var(--accent-light);
@@ -250,8 +252,8 @@
 /* Dark mode styling */
 body.dark {
   .scan-type-title .highlight {
-    color: #0ff;
-    text-shadow: 0 0 20px rgba(0, 255, 255, 0.5), 0 0 40px rgba(0, 255, 255, 0.3);
+    color: #FFA366;
+    text-shadow: 0 0 20px rgba(255, 107, 0, 0.6), 0 0 40px rgba(255, 107, 0, 0.3);
   }
 }
 

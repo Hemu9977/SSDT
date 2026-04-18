@@ -3,7 +3,6 @@
    File: frontend/src/styles/SplashScreen.scss
    ============================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&display=swap');
 
 #splash-screen {
   position: fixed;
@@ -39,7 +38,7 @@
   width: 150px;
   height: 150px;
   object-fit: contain;
-  filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.6));
+  filter: brightness(0) saturate(100%) invert(42%) sepia(93%) saturate(2200%) hue-rotate(8deg) brightness(101%) contrast(105%) drop-shadow(0 0 20px rgba(255, 107, 0, 0.6));
   animation: logoFloat 3s ease-in-out infinite, logoGlow 2s ease-in-out infinite alternate;
 }
 
@@ -47,15 +46,15 @@
   font-family: 'Orbitron', sans-serif;
   font-size: 4rem;
   font-weight: 900;
-  color: #0ff;
+  color: #FF6B00;
   text-transform: uppercase;
   letter-spacing: 8px;
   margin: 0;
   text-shadow:
-    0 0 10px rgba(0, 255, 255, 0.8),
-    0 0 20px rgba(0, 255, 255, 0.6),
-    0 0 30px rgba(0, 255, 255, 0.4),
-    0 0 40px rgba(0, 255, 255, 0.2);
+    0 0 10px rgba(255, 107, 0, 0.8),
+    0 0 20px rgba(255, 107, 0, 0.6),
+    0 0 30px rgba(255, 107, 0, 0.4),
+    0 0 40px rgba(255, 107, 0, 0.2);
   animation: textGlow 2s ease-in-out infinite alternate;
 }
 
@@ -63,7 +62,7 @@
   font-family: 'Orbitron', sans-serif;
   font-size: 1.2rem;
   font-weight: 400;
-  color: #9adeff; /* Light cyan for non-pro users */
+  color: #FFA366; /* Light orange for non-pro users */
   letter-spacing: 3px;
   margin: 0;
   opacity: 0.8;
@@ -74,9 +73,9 @@
   font-family: 'Orbitron', sans-serif;
   font-size: 1.1rem;
   font-weight: 700;
-  color: #0ff;
+  color: #FF6B00;
   background: transparent;
-  border: 2px solid #0ff;
+  border: 2px solid #FF6B00;
   padding: 1rem 3rem;
   border-radius: 10px;
   text-transform: uppercase;
@@ -86,8 +85,8 @@
   overflow: hidden;
   transition: all 0.3s ease;
   box-shadow:
-    0 0 10px rgba(0, 255, 255, 0.3),
-    inset 0 0 10px rgba(0, 255, 255, 0.1);
+    0 0 10px rgba(255, 107, 0, 0.3),
+    inset 0 0 10px rgba(255, 107, 0, 0.1);
   animation: buttonPulse 2s ease-in-out infinite;
 
   &::before {
@@ -97,17 +96,17 @@
     left: -100%;
     width: 100%;
     height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(0, 255, 255, 0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255, 107, 0, 0.3), transparent);
     transition: left 0.5s ease;
   }
 
   &:hover {
     color: #000;
-    background: #0ff;
-    border-color: #0ff;
+    background: #FF6B00;
+    border-color: #FF6B00;
     transform: translateY(-3px) scale(1.05);
     box-shadow:
-      0 0 20px rgba(0, 255, 255, 0.8),
+      0 0 20px rgba(255, 107, 0, 0.8),
       0 5px 15px rgba(0, 0, 0, 0.3),
       inset 0 0 20px rgba(255, 255, 255, 0.2);
 
@@ -150,40 +149,40 @@
 
 @keyframes logoGlow {
   from {
-    filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.6));
+    filter: brightness(0) saturate(100%) invert(42%) sepia(93%) saturate(2200%) hue-rotate(8deg) brightness(101%) contrast(105%) drop-shadow(0 0 20px rgba(255, 107, 0, 0.6));
   }
   to {
-    filter: drop-shadow(0 0 30px rgba(0, 255, 255, 1));
+    filter: brightness(0) saturate(100%) invert(42%) sepia(93%) saturate(2200%) hue-rotate(8deg) brightness(101%) contrast(105%) drop-shadow(0 0 30px rgba(255, 107, 0, 1));
   }
 }
 
 @keyframes textGlow {
   from {
     text-shadow:
-      0 0 10px rgba(0, 255, 255, 0.8),
-      0 0 20px rgba(0, 255, 255, 0.6),
-      0 0 30px rgba(0, 255, 255, 0.4),
-      0 0 40px rgba(0, 255, 255, 0.2);
+      0 0 10px rgba(255, 107, 0, 0.8),
+      0 0 20px rgba(255, 107, 0, 0.6),
+      0 0 30px rgba(255, 107, 0, 0.4),
+      0 0 40px rgba(255, 107, 0, 0.2);
   }
   to {
     text-shadow:
-      0 0 20px rgba(0, 255, 255, 1),
-      0 0 30px rgba(0, 255, 255, 0.8),
-      0 0 40px rgba(0, 255, 255, 0.6),
-      0 0 50px rgba(0, 255, 255, 0.4);
+      0 0 20px rgba(255, 107, 0, 1),
+      0 0 30px rgba(255, 107, 0, 0.8),
+      0 0 40px rgba(255, 107, 0, 0.6),
+      0 0 50px rgba(255, 107, 0, 0.4);
   }
 }
 
 @keyframes buttonPulse {
   0%, 100% {
     box-shadow:
-      0 0 10px rgba(0, 255, 255, 0.3),
-      inset 0 0 10px rgba(0, 255, 255, 0.1);
+      0 0 10px rgba(255, 107, 0, 0.3),
+      inset 0 0 10px rgba(255, 107, 0, 0.1);
   }
   50% {
     box-shadow:
-      0 0 20px rgba(0, 255, 255, 0.5),
-      inset 0 0 15px rgba(0, 255, 255, 0.2);
+      0 0 20px rgba(255, 107, 0, 0.5),
+      inset 0 0 15px rgba(255, 107, 0, 0.2);
   }
 }
 
@@ -193,91 +192,91 @@
 
 /* Light mode - use darker, more visible colors */
 body.light .splash-logo {
-  filter: drop-shadow(0 0 20px rgba(0, 95, 115, 0.6));
+  filter: drop-shadow(0 0 20px rgba(255, 107, 0, 0.6));
 }
 
 body.light .splash-title {
-  color: var(--accent-dark); /* #005f73 */
+  color: #CC5500;
   text-shadow:
-    0 0 10px rgba(0, 95, 115, 0.4),
-    0 0 20px rgba(0, 95, 115, 0.3),
-    0 0 30px rgba(0, 95, 115, 0.2);
+    0 0 10px rgba(204, 85, 0, 0.4),
+    0 0 20px rgba(204, 85, 0, 0.3),
+    0 0 30px rgba(204, 85, 0, 0.2);
 }
 
 body.light .splash-subtitle {
-  color: #005f73; /* Match SSDT logo color in light mode */
+  color: #CC5500;
 }
 
 body.light .splash-enter-btn {
-  color: var(--accent-dark);
-  border-color: var(--accent-dark);
+  color: #CC5500;
+  border-color: #CC5500;
   box-shadow:
-    0 0 10px rgba(0, 95, 115, 0.2),
-    inset 0 0 10px rgba(0, 95, 115, 0.05);
+    0 0 10px rgba(204, 85, 0, 0.2),
+    inset 0 0 10px rgba(204, 85, 0, 0.05);
 
   &::before {
-    background: linear-gradient(90deg, transparent, rgba(0, 95, 115, 0.2), transparent);
+    background: linear-gradient(90deg, transparent, rgba(204, 85, 0, 0.2), transparent);
   }
 
   &:hover {
     color: white;
-    background: var(--accent-dark);
-    border-color: var(--accent-dark);
+    background: #CC5500;
+    border-color: #CC5500;
     box-shadow:
-      0 0 20px rgba(0, 95, 115, 0.5),
+      0 0 20px rgba(204, 85, 0, 0.5),
       0 5px 15px rgba(0, 0, 0, 0.2),
       inset 0 0 20px rgba(255, 255, 255, 0.2);
   }
 
   &:active {
     box-shadow:
-      0 0 15px rgba(0, 95, 115, 0.4),
+      0 0 15px rgba(204, 85, 0, 0.4),
       0 2px 8px rgba(0, 0, 0, 0.2);
   }
 }
 
-/* Dark mode - keep original cyan neon styles */
+/* Dark mode - keep original orange neon styles */
 body.dark .splash-logo {
-  filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.6));
+  filter: brightness(0) saturate(100%) invert(42%) sepia(93%) saturate(2200%) hue-rotate(8deg) brightness(101%) contrast(105%) drop-shadow(0 0 20px rgba(255, 107, 0, 0.6));
 }
 
 body.dark .splash-title {
-  color: #0ff;
+  color: #FF6B00;
   text-shadow:
-    0 0 10px rgba(0, 255, 255, 0.8),
-    0 0 20px rgba(0, 255, 255, 0.6),
-    0 0 30px rgba(0, 255, 255, 0.4),
-    0 0 40px rgba(0, 255, 255, 0.2);
+    0 0 10px rgba(255, 107, 0, 0.8),
+    0 0 20px rgba(255, 107, 0, 0.6),
+    0 0 30px rgba(255, 107, 0, 0.4),
+    0 0 40px rgba(255, 107, 0, 0.2);
 }
 
 body.dark .splash-subtitle {
-  color: #9adeff; /* Light cyan for non-pro users */
+  color: #FFA366; /* Light orange for non-pro users */
 }
 
 body.dark .splash-enter-btn {
-  color: #0ff;
-  border-color: #0ff;
+  color: #FF6B00;
+  border-color: #FF6B00;
   box-shadow:
-    0 0 10px rgba(0, 255, 255, 0.3),
-    inset 0 0 10px rgba(0, 255, 255, 0.1);
+    0 0 10px rgba(255, 107, 0, 0.3),
+    inset 0 0 10px rgba(255, 107, 0, 0.1);
 
   &::before {
-    background: linear-gradient(90deg, transparent, rgba(0, 255, 255, 0.3), transparent);
+    background: linear-gradient(90deg, transparent, rgba(255, 107, 0, 0.3), transparent);
   }
 
   &:hover {
     color: #000;
-    background: #0ff;
-    border-color: #0ff;
+    background: #FF6B00;
+    border-color: #FF6B00;
     box-shadow:
-      0 0 20px rgba(0, 255, 255, 0.8),
+      0 0 20px rgba(255, 107, 0, 0.8),
       0 5px 15px rgba(0, 0, 0, 0.3),
       inset 0 0 20px rgba(255, 255, 255, 0.2);
   }
 
   &:active {
     box-shadow:
-      0 0 15px rgba(0, 255, 255, 0.6),
+      0 0 15px rgba(255, 107, 0, 0.6),
       0 2px 8px rgba(0, 0, 0, 0.3);
   }
 }
@@ -286,38 +285,38 @@ body.dark .splash-enter-btn {
 body.light {
   @keyframes logoGlow {
     from {
-      filter: drop-shadow(0 0 20px rgba(0, 95, 115, 0.6));
+      filter: drop-shadow(0 0 20px rgba(255, 107, 0, 0.6));
     }
     to {
-      filter: drop-shadow(0 0 30px rgba(0, 95, 115, 0.9));
+      filter: drop-shadow(0 0 30px rgba(255, 107, 0, 0.9));
     }
   }
 
   @keyframes textGlow {
     from {
       text-shadow:
-        0 0 10px rgba(0, 95, 115, 0.4),
-        0 0 20px rgba(0, 95, 115, 0.3),
-        0 0 30px rgba(0, 95, 115, 0.2);
+        0 0 10px rgba(255, 107, 0, 0.4),
+        0 0 20px rgba(255, 107, 0, 0.3),
+        0 0 30px rgba(255, 107, 0, 0.2);
     }
     to {
       text-shadow:
-        0 0 20px rgba(0, 95, 115, 0.6),
-        0 0 30px rgba(0, 95, 115, 0.4),
-        0 0 40px rgba(0, 95, 115, 0.3);
+        0 0 20px rgba(255, 107, 0, 0.6),
+        0 0 30px rgba(255, 107, 0, 0.4),
+        0 0 40px rgba(255, 107, 0, 0.3);
     }
   }
 
   @keyframes buttonPulse {
     0%, 100% {
       box-shadow:
-        0 0 10px rgba(0, 95, 115, 0.2),
-        inset 0 0 10px rgba(0, 95, 115, 0.05);
+        0 0 10px rgba(255, 107, 0, 0.2),
+        inset 0 0 10px rgba(255, 107, 0, 0.05);
     }
     50% {
       box-shadow:
-        0 0 20px rgba(0, 95, 115, 0.3),
-        inset 0 0 15px rgba(0, 95, 115, 0.1);
+        0 0 20px rgba(255, 107, 0, 0.3),
+        inset 0 0 15px rgba(255, 107, 0, 0.1);
     }
   }
 }

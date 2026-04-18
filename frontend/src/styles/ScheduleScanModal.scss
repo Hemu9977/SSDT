@@ -4,19 +4,19 @@
 :root {
   --modal-bg: rgba(0, 0, 0, 0.75);
   --input-bg: rgba(0, 0, 0, 0.4);
-  --input-border: rgba(0, 255, 255, 0.3);
-  --input-color: #0ff;
-  --label-color: #9adeff;
-  --picker-item-bg: rgba(0, 255, 255, 0.05);
+  --input-border: rgba(255, 107, 0, 0.3);
+  --input-color: #FF6B00;
+  --label-color: #FFA366;
+  --picker-item-bg: rgba(255, 107, 0, 0.05);
 }
 
 body.light {
   --modal-bg: rgba(255, 255, 255, 0.85);
   --input-bg: rgba(255, 255, 255, 0.9);
-  --input-border: rgba(0, 95, 115, 0.3);
-  --input-color: #005f73;
-  --label-color: #0081a7;
-  --picker-item-bg: rgba(0, 129, 167, 0.05);
+  --input-border: rgba(204, 85, 0, 0.3);
+  --input-color: #CC5500;
+  --label-color: #CC5500;
+  --picker-item-bg: rgba(204, 85, 0, 0.05);
 }
 
 .schedule-modal-overlay {
@@ -53,7 +53,7 @@ body.light {
     align-items: center;
     justify-content: space-between;
     padding: 20px 24px;
-    border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+    border-bottom: 1px solid rgba(255, 107, 0, 0.1);
     background: rgba(0, 0, 0, 0.2);
 
     h2 {
@@ -64,7 +64,7 @@ body.light {
       color: var(--accent);
       text-transform: uppercase;
       letter-spacing: 2px;
-      text-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+      text-shadow: 0 0 10px rgba(255, 107, 0, 0.3);
     }
   }
 
@@ -80,8 +80,8 @@ body.light {
 
     &:hover {
       color: var(--foreground);
-      background: rgba(0, 255, 255, 0.1);
-      box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+      background: rgba(255, 107, 0, 0.1);
+      box-shadow: 0 0 10px rgba(255, 107, 0, 0.3);
       transform: rotate(90deg);
     }
   }
@@ -100,7 +100,7 @@ body.light {
       background: transparent;
     }
     &::-webkit-scrollbar-thumb {
-      background: rgba(0, 176, 198, 0.3);
+      background: rgba(255, 107, 0, 0.3);
       border-radius: 3px;
     }
   }
@@ -112,7 +112,7 @@ body.light {
     justify-content: flex-end;
     padding: 20px 24px;
     background: rgba(0, 0, 0, 0.2);
-    border-top: 1px solid rgba(0, 176, 198, 0.1);
+    border-top: 1px solid rgba(255, 107, 0, 0.1);
   }
 }
 
@@ -149,11 +149,11 @@ body.light {
 
     &:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 15px rgba(0, 176, 198, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 0 15px rgba(255, 107, 0, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.1);
     }
 
     &::placeholder {
-      color: rgba(0, 176, 198, 0.3);
+      color: rgba(255, 107, 0, 0.3);
     }
     
     &:disabled {
@@ -212,7 +212,7 @@ body.light {
       width: 4px;
     }
     &::-webkit-scrollbar-thumb {
-      background: rgba(0, 176, 198, 0.2);
+      background: rgba(255, 107, 0, 0.2);
       border-radius: 2px;
     }
   }
@@ -231,14 +231,14 @@ body.light {
     text-align: center;
 
     &:hover {
-      background: rgba(0, 176, 198, 0.15);
+      background: rgba(255, 107, 0, 0.15);
       border-color: var(--accent);
     }
 
     &.active {
       background: var(--accent);
       color: #000;
-      box-shadow: 0 0 10px rgba(0, 176, 198, 0.4);
+      box-shadow: 0 0 10px rgba(255, 107, 0, 0.4);
     }
   }
 
@@ -311,16 +311,16 @@ body.light {
   &:hover {
     transform: translateY(-3px);
     border-color: var(--accent);
-    box-shadow: 0 8px 15px rgba(0, 176, 198, 0.15);
+    box-shadow: 0 8px 15px rgba(255, 107, 0, 0.15);
   }
 
   &.active {
-    background: rgba(0, 255, 255, 0.12);
+    background: rgba(255, 107, 0, 0.12);
     border-color: var(--accent);
-    box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+    box-shadow: 0 0 20px rgba(255, 107, 0, 0.3);
     
     body.light & {
-      background: rgba(0, 129, 167, 0.15);
+      background: rgba(204, 85, 0, 0.15);
     }
 
     .mode-label {
@@ -360,25 +360,25 @@ body.light {
 
 .btn-cancel {
   background: transparent;
-  border: 1px solid rgba(0, 176, 198, 0.3);
+  border: 1px solid rgba(255, 107, 0, 0.3);
   color: var(--label-color);
 
   &:hover {
-    background: rgba(0, 176, 198, 0.1);
+    background: rgba(255, 107, 0, 0.1);
     border-color: var(--accent);
     color: var(--accent);
   }
 }
 
 .btn-submit {
-  background: linear-gradient(135deg, var(--accent) 0%, #0081a7 100%);
+  background: linear-gradient(135deg, var(--accent) 0%, #CC5500 100%);
   color: #000;
   border: none;
-  box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+  box-shadow: 0 0 20px rgba(255, 107, 0, 0.2);
 
   &:hover:not(:disabled) {
     transform: translateY(-2px);
-    box-shadow: 0 10px 25px rgba(0, 255, 255, 0.4);
+    box-shadow: 0 10px 25px rgba(255, 107, 0, 0.4);
   }
 
   &:disabled {
@@ -412,14 +412,14 @@ body.light {
 
   &:hover {
     border-color: var(--accent);
-    background: rgba(0, 176, 198, 0.1);
+    background: rgba(255, 107, 0, 0.1);
   }
 
   &.active {
     background: var(--accent);
     color: #000;
     border-color: var(--accent);
-    box-shadow: 0 0 10px rgba(0, 176, 198, 0.3);
+    box-shadow: 0 0 10px rgba(255, 107, 0, 0.3);
   }
 }
 
@@ -447,7 +447,7 @@ body.light {
 
   &:hover {
     border-color: var(--accent);
-    background: rgba(0, 176, 198, 0.15);
+    background: rgba(255, 107, 0, 0.15);
     transform: scale(1.05);
   }
 
@@ -455,14 +455,14 @@ body.light {
     background: var(--accent);
     border-color: var(--accent);
     color: #000;
-    box-shadow: 0 0 12px rgba(0, 176, 198, 0.5);
+    box-shadow: 0 0 12px rgba(255, 107, 0, 0.5);
   }
 }
 
 // Recurring config
 .recurring-config {
-  background: rgba(0, 212, 255, 0.05);
-  border: 1px solid rgba(0, 176, 198, 0.15);
+  background: rgba(255, 107, 0, 0.05);
+  border: 1px solid rgba(255, 107, 0, 0.15);
   border-radius: 14px;
   padding: 20px;
   margin-bottom: 1.5rem;
@@ -502,7 +502,7 @@ body.light {
 
     &:hover {
       border-color: var(--accent);
-      box-shadow: 0 0 10px rgba(0, 176, 198, 0.2);
+      box-shadow: 0 0 10px rgba(255, 107, 0, 0.2);
     }
 
     .calendar-icon {
@@ -523,7 +523,7 @@ body.light {
     border-radius: 16px;
     padding: 1.25rem;
     z-index: 100; // Ensure it's above everything including time picker
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 255, 255, 0.15);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.9), 0 0 30px rgba(255, 107, 0, 0.15);
     backdrop-filter: blur(12px);
     
     body.light & {
@@ -547,7 +547,7 @@ body.light {
       }
 
       button {
-        background: rgba(0, 176, 198, 0.1);
+        background: rgba(255, 107, 0, 0.1);
         border: 1px solid var(--input-border);
         color: var(--accent);
         border-radius: 8px;
@@ -605,19 +605,19 @@ body.light {
 
       &:hover:not(.empty) {
         border-color: var(--accent);
-        background: rgba(0, 176, 198, 0.15);
+        background: rgba(255, 107, 0, 0.15);
       }
 
       &.selected {
         background: var(--accent) !important;
         color: #000 !important;
         font-weight: 800;
-        box-shadow: 0 0 15px rgba(0, 176, 198, 0.5);
+        box-shadow: 0 0 15px rgba(255, 107, 0, 0.5);
       }
 
       &.today {
         border-color: var(--accent);
-        background: rgba(0, 255, 255, 0.05);
+        background: rgba(255, 107, 0, 0.05);
         color: var(--accent);
         font-weight: 700;
       }
@@ -654,7 +654,7 @@ body.light {
 
 // Global button modifications
 .btn-submit {
-  background: linear-gradient(135deg, var(--accent) 0%, #0081a7 100%);
+  background: linear-gradient(135deg, var(--accent) 0%, #CC5500 100%);
   color: #000;
   border: none;
   padding: 12px 32px;
@@ -666,7 +666,7 @@ body.light {
   letter-spacing: 2px;
   cursor: pointer;
   transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+  box-shadow: 0 0 20px rgba(255, 107, 0, 0.2);
   position: relative;
   overflow: hidden;
 
@@ -683,7 +683,7 @@ body.light {
 
   &:hover:not(:disabled) {
     transform: translateY(-3px) scale(1.02);
-    box-shadow: 0 10px 30px rgba(0, 255, 255, 0.5);
+    box-shadow: 0 10px 30px rgba(255, 107, 0, 0.5);
     
     &::before {
       left: 100%;
@@ -696,7 +696,7 @@ body.light {
 
   body.light & {
     color: #fff;
-    box-shadow: 0 5px 15px rgba(0, 176, 198, 0.3);
+    box-shadow: 0 5px 15px rgba(255, 107, 0, 0.3);
   }
   
   &:disabled {

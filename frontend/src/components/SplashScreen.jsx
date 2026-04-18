@@ -30,11 +30,11 @@ const SplashScreen = ({ onEnter }) => {
       <ParticleBackground />
       <div className="splash-content">
         <img
-          src={`${process.env.PUBLIC_URL}/logo192.png`}
+          src={`${process.env.PUBLIC_URL}/logo.png`}
           alt="SSDT Security Scanner Logo"
           className={`splash-logo ${isPro ? 'pro-logo' : ''}`}
         />
-        <h1 className="splash-title">SSDT</h1>
+        <h1 className="splash-title">Fortexa</h1>
         <p className="splash-subtitle">Security Scanner Detection Tool</p>
 
         {showButton && (

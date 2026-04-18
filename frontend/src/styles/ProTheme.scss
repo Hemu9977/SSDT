@@ -17,6 +17,14 @@
   --neon-purple-text: #e9d5ff;
   --neon-purple-text-bright: #ffffff;
 
+  // Override standard accent variables for consistent theming
+  --accent: #a855f7;
+  --accent-light: #c084fc;
+  --accent-dark: #7c3aed;
+  --accent-glow: rgba(168, 85, 247, 0.4);
+  --card-shadow-hover: 0 8px 30px rgba(168, 85, 247, 0.3);
+  --outline: rgba(168, 85, 247, 0.2);
+
   // Transparent background to let particles show through
   background: transparent !important;
   min-height: 100vh;
@@ -113,9 +121,9 @@
     box-shadow: 0 0 15px rgba(232, 17, 35, 0.3) !important;
 
     &:hover:not(:disabled) {
-      background: linear-gradient(135deg, #ff4757 0%, #e81123 100%) !important;
+      background: linear-gradient(135deg, #cb47ff 0%, #e81123 100%) !important;
       color: #ffffff !important; // White text on hover
-      border-color: #ff4757 !important;
+      border-color: #bb47ff !important;
       box-shadow: 0 0 25px rgba(232, 17, 35, 0.6), 0 4px 20px rgba(232, 17, 35, 0.4) !important;
       transform: translateY(-2px) !important;
     }

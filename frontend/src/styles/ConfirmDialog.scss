@@ -95,17 +95,17 @@
 body.dark .confirm-dialog-wrapper:not(.pro-theme) {
   .confirm-dialog {
     background: var(--background-light);
-    border-color: #0ff;
-    box-shadow: 0 0 30px rgba(0, 255, 255, 0.2);
+    border-color: #FF6B00;
+    box-shadow: 0 0 30px rgba(255, 107, 0, 0.2);
   }
 
   .confirm-dialog-header {
     background: var(--background-lighter);
-    border-bottom-color: #0ff;
+    border-bottom-color: #FF6B00;
 
     h3 {
-      color: #0ff;
-      text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+      color: #FF6B00;
+      text-shadow: 0 0 10px rgba(255, 107, 0, 0.5);
     }
   }
 
@@ -118,24 +118,24 @@ body.dark .confirm-dialog-wrapper:not(.pro-theme) {
     color: var(--foreground-darker);
 
     &:hover {
-      border-color: #0ff;
-      color: #0ff;
-      box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+      border-color: #FF6B00;
+      color: #FF6B00;
+      box-shadow: 0 0 15px rgba(255, 107, 0, 0.3);
     }
   }
 
   .confirm-action-btn {
-    border-color: #0ff;
-    color: #0ff;
+    border-color: #FF6B00;
+    color: #FF6B00;
 
     &:hover {
-      background: #0ff;
+      background: #FF6B00;
       color: #000;
-      box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+      box-shadow: 0 0 20px rgba(255, 107, 0, 0.5);
     }
 
     &:active {
-      background: #00cccc;
+      background: #CC5500;
     }
   }
 

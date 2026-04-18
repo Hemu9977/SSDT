@@ -7,6 +7,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useUser } from '../contexts/UserContext';
 import '../styles/ScheduleScanModal.scss';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3001';
@@ -239,6 +240,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const { isPro } = useUser();
 
   const resetForm = React.useCallback(() => {
     setScanType(defaultScanType);
@@ -362,9 +364,9 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
         resetForm();
         onClose();
         if (scanType === 'public') {
-          navigate('/?type=normal');
+          navigate('/?type=normal&mode=schedule');
         } else {
-          navigate('/?type=auth');
+          navigate('/?type=auth&mode=schedule');
         }
       }, 800);
       return;
@@ -418,7 +420,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
         onClick={onClose}
       >
         <motion.div
-          className="schedule-modal"
+          className={`schedule-modal ${isPro ? 'pro-theme' : ''}`}
           initial={{ opacity: 0, scale: 0.9, y: 30 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.9, y: 30 }}

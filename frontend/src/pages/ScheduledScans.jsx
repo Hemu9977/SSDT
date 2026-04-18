@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ScheduleScanModal from '../components/ScheduleScanModal';
+import { useUser } from '../contexts/UserContext';
 import '../styles/LandingPage.scss';
 import '../styles/ScheduledScans.scss';
 
@@ -32,6 +33,7 @@ const ScheduledScans = () => {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const navigate = useNavigate();
   const location = useLocation();
+  const { isPro } = useUser();
   
   const searchParams = new URLSearchParams(location.search);
   const urlScanType = searchParams.get('type') || 'public';
@@ -133,12 +135,14 @@ const ScheduledScans = () => {
     return `Day${recurring.days.length > 1 ? 's' : ''} ${days} at ${recurring.time}`;
   };
 
+  const isAuthTheme = isPro && (urlScanType === 'authenticated' || urlScanType === 'auth');
+
   return (
-    <div className="landing-page">
+    <div className={`landing-page ${isAuthTheme || isPro ? 'pro-theme' : ''}`}>
       <ParticleBackground />
       <Header />
       <main>
-        <div className="schedules-page">
+        <div className={`schedules-page ${isAuthTheme || isPro ? 'pro-theme' : ''}`}>
           {/* Header */}
           <div className="schedules-header">
             <div className="schedules-header__left">
@@ -206,7 +210,7 @@ const ScheduledScans = () => {
                   return (
                     <motion.div
                       key={schedule.id}
-                      className="schedule-card"
+                      className={`schedule-card ${isAuthTheme ? 'pro-theme' : ''}`}
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -20 }}

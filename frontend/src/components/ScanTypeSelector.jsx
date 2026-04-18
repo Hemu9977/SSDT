@@ -1,11 +1,17 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useUser } from '../contexts/UserContext';
 import '../styles/ScanTypeSelector.scss';
 
 const ScanTypeSelector = () => {
   const navigate = useNavigate();
+  const { isPro } = useUser();
 
   const handleScanTypeSelection = (scanType) => {
+    // 🧹 PREVENT WORKFLOW TANGLE: Clear any pending schedule intent
+    // when a user explicitly chooses "Start Scan"
+    sessionStorage.removeItem('pendingScheduleConfig');
+    
     if (scanType === 'normal') {
       navigate('/?type=normal');
     } else {
@@ -22,7 +28,7 @@ const ScanTypeSelector = () => {
         <p className="scan-type-subtitle">
           Select the type of security scan you want to perform
         </p>
-
+        
         <div className="scan-type-cards">
           {/* Normal Scan Card */}
           <div
@@ -113,10 +119,10 @@ const ScanTypeSelector = () => {
 
           {/* Authenticated Scan Card */}
           <div
-            className="scan-type-card scan-type-card--auth"
+            className={`scan-type-card scan-type-card--auth ${isPro ? 'pro-mode' : ''}`}
             onClick={() => handleScanTypeSelection('auth')}
           >
-            <div className="card-icon card-icon--auth">
+            <div className={`card-icon card-icon--auth ${isPro ? 'pro-mode' : ''}`}>
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 fill="none"

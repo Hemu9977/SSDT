@@ -53,8 +53,8 @@ const ParticleBackground = () => {
           color = isDarkMode ? '#c084fc' : '#a855f7';
           alpha = isDarkMode ? 0.8 : 0.6;
         } else {
-          // Cyan for default - darker for light theme
-          color = isDarkMode ? '#00b0c6' : '#005f73';
+          // Orange for default - darker for light theme
+          color = isDarkMode ? '#FF6B00' : '#CC5500';
           alpha = isDarkMode ? 0.8 : 0.7;
         }
 

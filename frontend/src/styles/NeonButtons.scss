@@ -12,9 +12,9 @@
 .analyze-form button {
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 1rem !important;
-  color: #0ff !important;
+  color: var(--accent) !important;
   background: transparent !important;
-  border: 2px solid #0ff !important;
+  border: 2px solid var(--accent) !important;
   padding: 0.8em 2em !important;
   border-radius: 10px !important;
   text-transform: uppercase !important;
@@ -31,9 +31,9 @@
 .google-btn { /* Added .google-btn here */
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 1rem !important;
-  color: #0ff !important;
+  color: var(--accent) !important;
   background: transparent !important;
-  border: 2px solid #0ff !important;
+  border: 2px solid var(--accent) !important;
   padding: 0.8em 2em !important;
   border-radius: 10px !important;
   text-transform: uppercase !important;
@@ -55,21 +55,21 @@
 .auth-form button:hover:not(:disabled),
 .google-btn:hover:not(:disabled) { /* Added .google-btn here */
   color: #000 !important;
-  background: #0ff !important;
-  border-color: #0ff !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
   transform: translateY(-2px) !important;
 }
 
 .analyze-form button:hover:not(:disabled) {
   color: #000 !important;
-  background: #0ff !important;
-  border-color: #0ff !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
   transform: translateY(-2px) !important;
 }
 
 .analyze-form button:active:not(:disabled) {
   transform: translateY(0) !important;
-  background: #00cccc !important;
+  background: var(--accent-dark) !important;
 }
 
 .analyze-form button:disabled {
@@ -86,9 +86,9 @@
 .auth-form button {
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 1rem !important;
-  color: #0ff !important;
+  color: var(--accent) !important;
   background: transparent !important;
-  border: 2px solid #0ff !important;
+  border: 2px solid var(--accent) !important;
   padding: 0.8em 2em !important;
   border-radius: 10px !important;
   text-transform: uppercase !important;
@@ -103,14 +103,14 @@
 
 .auth-form button:hover:not(:disabled) {
   color: #000 !important;
-  background: #0ff !important;
-  border-color: #0ff !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
   transform: translateY(-2px) !important;
 }
 
 .auth-form button:active:not(:disabled) {
   transform: translateY(0) !important;
-  background: #00cccc !important;
+  background: var(--accent-dark) !important;
 }
 
 .auth-form button:disabled {
@@ -129,9 +129,9 @@
 .profile-button {
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 0.9rem !important;
-  color: #0ff !important;
+  color: var(--accent) !important;
   background: transparent !important;
-  border: 2px solid #0ff !important;
+  border: 2px solid var(--accent) !important;
   padding: 0.6rem 1.5rem !important;
   border-radius: 10px !important;
   text-transform: uppercase !important;
@@ -150,8 +150,8 @@
 .logout-button:hover,
 .profile-button:hover {
   color: #000 !important;
-  background: #0ff !important;
-  border-color: #0ff !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
   transform: translateY(-2px) !important;
   text-decoration: none !important;
 }
@@ -160,7 +160,7 @@
 .logout-button:active,
 .profile-button:active {
   transform: translateY(0) !important;
-  background: #00cccc !important;
+  background: var(--accent-dark) !important;
 }
 
 /* ========================================
@@ -171,7 +171,7 @@
 }
 
 .input-wrapper:focus-within {
-  border-color: #0ff !important;
+  border-color: var(--accent) !important;
 }
 
 /* ========================================
@@ -182,7 +182,7 @@
 }
 
 .github-link:hover {
-  color: #0ff !important;
+  color: var(--accent) !important;
 }
 
 /* ========================================
@@ -225,23 +225,23 @@
    CONTAINERS
    ======================================== */
 .report-container {
-  border: 2px solid #0ff;
+  border: 2px solid var(--accent);
 }
 
 .auth-container {
-  border: 2px solid #0ff;
+  border: 2px solid var(--accent);
 }
 
 /* ========================================
    REPORT TABLE
    ======================================== */
 .report-table thead tr {
-  background: rgba(0, 255, 255, 0.1);
-  border: 1px solid #0ff;
+  background: rgba(255, 107, 0, 0.1);
+  border: 1px solid var(--accent);
 }
 
 .report-table thead th {
-  color: #0ff;
+  color: var(--accent);
   font-family: 'Orbitron', var(--font-sans);
   letter-spacing: 1px;
 }
@@ -250,7 +250,7 @@
    LOADING MESSAGE
    ======================================== */
 .loading-message p:first-child {
-  color: #0ff;
+  color: var(--accent);
   font-family: 'Orbitron', var(--font-sans);
   letter-spacing: 1px;
 }
@@ -286,8 +286,8 @@ body.dark .auth-form button,
 body.dark .signup-button,
 body.dark .logout-button,
 body.dark .profile-button {
-  color: #0ff !important;
-  border-color: #0ff !important;
+  color: var(--accent) !important;
+  border-color: var(--accent) !important;
   background: transparent !important;
 }
 
@@ -297,6 +297,6 @@ body.dark .signup-button:hover,
 body.dark .logout-button:hover,
 body.dark .profile-button:hover {
   color: #000 !important;
-  background: #0ff !important;
-  border-color: #0ff !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
 }

@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&display=swap');
+
 /* Light Theme Variables */
 :root {
   --background: #f0f0f0;
@@ -7,11 +9,12 @@
   --foreground-darker: #555555;
   --outline: #dcdcdc;
   --outline-darker: #cccccc;
-  --accent: #00768e;
-  --accent-light: #00b0c6;
-  --accent-dark: #005f73;
+  --accent: #FF6B00;
+  --accent-light: #FFA366;
+  --accent-dark: #CC5500;
   --font-mono: 'Inconsolata', monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
+  --font-title: 'Orbitron', sans-serif;
   --header-height: 4rem;
   --section-padding: 2rem;
   --max-width: 1200px;
@@ -20,9 +23,9 @@
   --card-border: 2px solid var(--accent);
   --card-border-radius: 12px;
   --card-padding: 1.5rem;
-  --card-shadow: 0 4px 12px rgba(0, 176, 198, 0.15);
-  --card-shadow-hover: 0 8px 24px rgba(0, 176, 198, 0.25);
-  --card-glow: 0 0 20px rgba(0, 176, 198, 0.2);
+  --card-shadow: 0 4px 12px rgba(255, 107, 0, 0.15);
+  --card-shadow-hover: 0 8px 24px rgba(255, 107, 0, 0.25);
+  --card-glow: 0 0 20px rgba(255, 107, 0, 0.2);
   --card-transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   --card-bg-hover: #222847;
 }
@@ -36,9 +39,9 @@ body.dark {
   --foreground-darker: #c7c7c7;
   --outline: #2d2d2d;
   --outline-darker: #222222;
-  --accent: #00b0c6;
-  --accent-light: #9adeff;
-  --accent-dark: #00768e;
+  --accent: #FF6B00;
+  --accent-light: #FFA366;
+  --accent-dark: #CC5500;
 }
 
 body {

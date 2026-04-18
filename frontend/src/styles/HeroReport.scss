@@ -88,7 +88,7 @@
   overflow: hidden;
 
   thead tr {
-    background-color: rgba(0, 176, 198, 0.1);
+    background-color: rgba(255, 107, 0, 0.1);
 
     th {
       padding: 1rem;
@@ -106,7 +106,7 @@
     transition: background-color 0.2s;
 
     &:hover {
-      background-color: rgba(0, 176, 198, 0.05);
+      background-color: rgba(255, 107, 0, 0.05);
     }
 
     td {
@@ -227,7 +227,7 @@
   }
 
   code {
-    background: rgba(0, 176, 198, 0.1);
+    background: rgba(255, 107, 0, 0.1);
     padding: 0.2rem 0.4rem;
     border-radius: 4px;
     font-family: var(--font-mono);
@@ -286,13 +286,13 @@
     }
 
     th {
-      background: rgba(0, 176, 198, 0.1);
+      background: rgba(255, 107, 0, 0.1);
       color: var(--accent-light);
       font-weight: 700;
     }
 
     tr:hover {
-      background: rgba(0, 176, 198, 0.05);
+      background: rgba(255, 107, 0, 0.05);
     }
   }
 }
@@ -313,7 +313,7 @@ body.light {
     }
 
     code {
-      background: rgba(0, 176, 198, 0.08);
+      background: rgba(255, 107, 0, 0.08);
     }
   }
 }

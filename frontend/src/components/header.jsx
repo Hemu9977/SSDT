@@ -6,7 +6,7 @@ import ThemeToggle from './ThemeToggle';
 import LanguageToggle from './LanguageToggle';
 import { useUser } from '../contexts/UserContext';
 import '../styles/Header.scss';
-import logo from '../assets/logo.svg';
+import logo from '../assets/logo.png';
 
 const Header = () => {
   const navigate = useNavigate();
@@ -23,7 +23,7 @@ const Header = () => {
     <header className="header-container">
       <Link to="/" className="logo-container">
         <img src={logo} alt="SSDT Logo" className="logo" />
-        <h1>SSDT</h1>
+        <h1>FORTEXA</h1>
       </Link>
       <div className="header-controls">
         <ThemeToggle />
