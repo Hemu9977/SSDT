@@ -52,10 +52,21 @@ router.get('/', auth, async (req, res) => {
         isVerified: user.isVerified,
         totalScans: totalScans,
         scansThisMonth: scansThisMonth,
+        monthlyScansUsed: user.monthlyScansUsed,
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt,
         isPro: user.isPro(),
-        proExpiresAt: user.proExpiresAt
+        proExpiresAt: user.proExpiresAt,
+        // ── Service plan fields ──────────────────────────────────────────────
+        planType:              user.planType,
+        billingCycle:          user.billingCycle,
+        subscriptionStatus:    user.subscriptionStatus,
+        oneTimeRemainingScans: user.oneTimeRemainingScans || 0,
+        totalTargetsUsed:      user.totalTargetsUsed     || 0,
+        // Convert Mongoose Map to plain object for JSON serialisation
+        scanUsagePerTarget: user.scanUsagePerTarget
+          ? Object.fromEntries(user.scanUsagePerTarget)
+          : {}
       },
       limits: limits,
       recentScans: recentScans

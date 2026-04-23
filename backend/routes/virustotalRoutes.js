@@ -9,9 +9,40 @@ const { startAsyncWebCheckScan, stopWebCheckScan, getFullResults } = require('..
 const gridfsService = require('../services/gridfsService');
 const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
+const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { handleScanComplete } = require('../services/notificationService');
+
+/**
+ * filterZapAlertsByPlan — filters ZAP alerts in-memory based on plan vulnerability access level.
+ * NEVER modifies stored data. Operates only on the response payload.
+ * @param {object|null} zapData  — the zapData object built for the response
+ * @param {string} accessLevel  — 'all' | 'critical-high'
+ * @returns modified copy of zapData
+ */
+function filterZapAlertsByPlan(zapData, accessLevel) {
+  if (!zapData || accessLevel === 'all') return zapData;
+  // Only 'critical-high' requires filtering
+  const ALLOWED = ['High']; // ZAP does not have a 'Critical' label; High is the highest
+  const filtered = {
+    ...zapData,
+    alerts: (zapData.alerts || []).filter(a => ALLOWED.includes(a.risk)),
+    totalAlerts: undefined,  // recalculate below
+    riskCounts: zapData.riskCounts
+      ? {
+          High:          zapData.riskCounts.High          || 0,
+          Medium:        0,
+          Low:           0,
+          Informational: 0
+        }
+      : undefined,
+    _filtered: true  // flag so frontend can show a note
+  };
+  filtered.totalAlerts = filtered.alerts.length;
+  return filtered;
+}
 
 const router = express.Router();
 
@@ -399,8 +430,9 @@ router.get('/active-scan', auth, async (req, res) => {
   }
 });
 
-// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
-router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
+// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini)
+// Auth → Plan enforcement → Rate limiting → Handler
+router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (req, res) => {
   try {
     const { url } = req.body;
 
@@ -1084,13 +1116,29 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       }
     }
 
+    // ─── Vulnerability filtering based on user's plan ──────────────────────────
+    // Load user to check vulnerability access level (use req.user.id from auth middleware).
+    // This is a lightweight findById — only select planType + billingCycle.
+    let vulnAccessLevel = 'all';
+    try {
+      const scanUser = await User.findById(req.user.id).select('planType billingCycle accountType proExpiresAt');
+      if (scanUser) {
+        const scanLimits = scanUser.getAccountLimits();
+        vulnAccessLevel = scanLimits.vulnerabilityAccessLevel || 'all';
+      }
+    } catch (_) { /* non-fatal — default to 'all' */ }
+
     // Always return all available data (progressive loading)
     console.log(`📤 Returning combined-analysis response:`);
     console.log(`   Status: ${scan.status}`);
+    console.log(`   Vuln access level: ${vulnAccessLevel}`);
     console.log(`   Has refinedReport: ${!!scan.refinedReport}`);
     if (scan.refinedReport) {
       console.log(`   refinedReport length: ${scan.refinedReport.length} chars`);
     }
+
+    // Apply filter (does nothing when accessLevel === 'all')
+    const filteredZapData = filterZapAlertsByPlan(zapData, vulnAccessLevel);
 
     return res.json({
       success: true,
@@ -1109,7 +1157,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       // Actual data (null if not yet available)
       psiScores: psiScores,
       observatoryData: observatoryData,
-      zapData: zapData,
+      zapData: filteredZapData,          // plan-filtered
+      vulnAccessLevel: vulnAccessLevel,  // inform frontend of restriction
       urlscanData: urlscanData,
       webCheckData: webCheckData,
       refinedReport: scan.refinedReport || null,

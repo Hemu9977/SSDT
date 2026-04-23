@@ -646,6 +646,10 @@ const Hero = ({ historicalScan }) => {
           const retryAfter = errorData.retryAfter || '1 minute';
           throw new Error(`Rate limit exceeded. Please wait ${retryAfter}.`);
         }
+        // Plan quota exceeded — guide user to upgrade
+        if (res.status === 403 && errorData.code === 'PLAN_LIMIT_EXCEEDED') {
+          throw new Error(`${errorData.message || 'Plan limit reached.'} Visit your Profile page to upgrade.`);
+        }
         throw new Error(errorData.error || errorData.details || `HTTP ${res.status}`);
       }
 

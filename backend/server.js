@@ -7,6 +7,7 @@ const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimit
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
 const { initializeSocket } = require('./services/notificationService');
+const { startScheduler } = require('./services/schedulerService'); // Scan scheduler
 
 // IMPORT ZAP ROUTES
 const zapRoutes = require('./routes/zapRoutes');
@@ -24,6 +25,15 @@ if (missingVars.length > 0) {
 }
 
 const app = express();
+
+// ─── STRIPE WEBHOOK — must come BEFORE express.json() —───────────────────────────
+// Stripe requires the raw body (Buffer) to verify the webhook signature.
+// Mounting it here with express.raw() ensures json() middleware is NOT applied.
+if (process.env.STRIPE_SECRET_KEY) {
+  const stripeWebhookHandler = require('./routes/stripeRoutes');
+  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookHandler);
+  console.log('✅ Stripe webhook endpoint mounted at /api/stripe/webhook');
+}
 
 // Connect to database and initialize GridFS
 connectDB().then(() => {
@@ -71,6 +81,12 @@ app.use('/api/pagespeed', apiLimiter, require('./routes/pageSpeedRoutes'));
 
 // 👇 REGISTER PROFILE ROUTE
 app.use('/api/profile', apiLimiter, require('./routes/profile'));
+
+// 👇 REGISTER STRIPE ROUTES (authenticated plan/checkout endpoints)
+if (process.env.STRIPE_SECRET_KEY) {
+  app.use('/api/stripe', apiLimiter, require('./routes/stripeRoutes'));
+  console.log('✅ Stripe API routes mounted at /api/stripe');
+}
 
 // 👇 REGISTER ZAP ROUTE
 app.use('/api/zap', apiLimiter, scanLimiter, zapRoutes);
