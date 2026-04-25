@@ -18,6 +18,8 @@ const router = express.Router();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const auth = require('../middleware/auth');
 const User = require('../models/User');
+const Organization = require('../models/Organization');
+const StripeEvent = require('../models/StripeEvent');
 
 // ─── Stripe price ID mapping ──────────────────────────────────────────────────
 // Create these products/prices in your Stripe dashboard and set the env vars.
@@ -124,9 +126,14 @@ router.post('/create-checkout-session', auth, async (req, res) => {
 router.get('/subscription', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      'planType billingCycle subscriptionStatus stripeSubscriptionId oneTimeRemainingScans monthlyScansUsed proExpiresAt'
+      'planType billingCycle subscriptionStatus stripeSubscriptionId oneTimeRemainingScans proExpiresAt organizationId'
     );
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    let org = null;
+    if (user.organizationId) {
+      org = await Organization.findById(user.organizationId);
+    }
 
     res.json({
       success: true,
@@ -136,7 +143,7 @@ router.get('/subscription', auth, async (req, res) => {
         subscriptionStatus:    user.subscriptionStatus,
         stripeSubscriptionId:  user.stripeSubscriptionId,
         oneTimeRemainingScans: user.oneTimeRemainingScans,
-        monthlyScansUsed:      user.monthlyScansUsed,
+        monthlyScansUsed:      org ? org.scansUsed : 0,
         proExpiresAt:          user.proExpiresAt
       }
     });
@@ -196,6 +203,12 @@ router.post('/webhook', async (req, res) => {
   }
 
   try {
+    const existingEvent = await StripeEvent.findOne({ eventId: event.id });
+    if (existingEvent) {
+      console.log(`♻️  [webhook] Event ${event.id} already processed. Skipping.`);
+      return res.json({ received: true });
+    }
+
     switch (event.type) {
 
       // ── Checkout completed (both subscription and one-time) ──────────────────
@@ -236,6 +249,8 @@ router.post('/webhook', async (req, res) => {
       default:
         console.log(`ℹ️  Unhandled Stripe event: ${event.type}`);
     }
+
+    await StripeEvent.create({ eventId: event.id });
   } catch (err) {
     console.error(`❌ Error processing webhook ${event.type}:`, err.message);
     // Still return 200 so Stripe does not retry — log for manual review
@@ -256,34 +271,68 @@ async function handleCheckoutComplete(session) {
   const key = `${planType}_${billingCycle}`;
   console.log(`✅ [webhook] Checkout complete for user ${userId}: plan=${key}`);
 
-  // Update plan fields
-  user.planType     = planType || null;
-  user.billingCycle = billingCycle || null;
+  let org;
+  if (user.organizationId) {
+    org = await Organization.findById(user.organizationId);
+  }
+
+  if (!org) {
+    org = new Organization({
+      name: `${user.name}'s Organization`,
+      ownerId: user._id,
+      seatsUsed: 1
+    });
+    user.organizationId = org._id;
+    user.role = 'owner';
+    await user.save();
+  }
+
+  org.planType = planType || null;
+  org.billingCycle = billingCycle || null;
+  org.subscriptionStatus = 'active';
 
   if (billingCycle === 'onetime') {
-    // One-time payment: set remaining scans, no subscription
-    const slots = ONETIME_SCANS[key] || 1;
-    user.oneTimeRemainingScans = slots;
-    user.subscriptionStatus    = 'active'; // treat as active for middleware
-    user.stripeSubscriptionId  = null;
-    // Set expiry: one-time plans never expire (null)
+    org.seatsAllowed = 1;
+    org.oneTimeRemainingScans = ONETIME_SCANS[key] || 1;
+    org.stripeSubscriptionId = null;
+    org.expiresAt = null;
+  } else {
+    const PLAN_CONFIGS = {
+      light: { seatsAllowed: 1, scanLimit: 3 },
+      basic: { seatsAllowed: 3, scanLimit: 5 },
+      pro: { seatsAllowed: 5, scanLimit: 10 },
+      trial1: { seatsAllowed: 1, scanLimit: 0 },
+      trial2: { seatsAllowed: 1, scanLimit: 0 }
+    };
+    const config = PLAN_CONFIGS[planType] || { seatsAllowed: 1, scanLimit: 0 };
+    org.seatsAllowed = config.seatsAllowed;
+    org.scanLimit = config.scanLimit;
+    org.stripeSubscriptionId = session.subscription || null;
+    const months = billingCycle === 'annual' ? 12 : 1;
+    org.expiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
+  }
+
+  org.scansUsed = 0;
+  org.lastScanReset = new Date();
+  await org.save();
+
+  // Legacy fallback for UI logic
+  user.planType = planType || null;
+  user.billingCycle = billingCycle || null;
+  user.subscriptionStatus = 'active';
+  if (billingCycle === 'onetime') {
+    user.oneTimeRemainingScans = ONETIME_SCANS[key] || 1;
     user.proExpiresAt = null;
   } else {
-    // Subscription payment
     user.stripeSubscriptionId = session.subscription || null;
-    user.subscriptionStatus   = 'active';
-    // Set proExpiresAt to 1 billing cycle from now as a safety fallback
     const months = billingCycle === 'annual' ? 12 : 1;
     user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
   }
-
-  // Mirror to legacy accountType field for backward compat
   if (['pro', 'basic', 'light'].includes(planType)) {
     user.accountType = planType === 'pro' ? 'pro' : 'free';
   }
-
   await user.save();
-  console.log(`✅ [webhook] User ${userId} plan set to ${key}`);
+  console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}`);
 }
 
 async function handleInvoicePaid(invoice) {
@@ -295,10 +344,24 @@ async function handleInvoicePaid(invoice) {
   const user = await User.findOne({ stripeCustomerId: customerId });
   if (!user) { console.warn(`⚠️  [webhook] No user for customer ${customerId}`); return; }
 
+  let org;
+  if (user.organizationId) {
+    org = await Organization.findById(user.organizationId);
+  }
+
+  if (org) {
+    org.subscriptionStatus = 'active';
+    org.stripeSubscriptionId = invoice.subscription;
+    org.scansUsed = 0;
+    org.lastScanReset = new Date();
+    const months = org.billingCycle === 'annual' ? 12 : 1;
+    org.expiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
+    await org.save();
+  }
+
   // Renew: reset monthly counters and extend expiry
   user.subscriptionStatus  = 'active';
   user.stripeSubscriptionId = invoice.subscription;
-  user.monthlyScansUsed    = 0;
   user.totalTargetsUsed    = 0;
   user.scanUsagePerTarget  = {};
   user.lastResetDate       = new Date();
@@ -315,6 +378,19 @@ async function handleSubscriptionDeleted(subscription) {
   const user = await User.findOne({ stripeCustomerId: customerId });
   if (!user) return;
 
+  let org;
+  if (user.organizationId) {
+    org = await Organization.findById(user.organizationId);
+  }
+  if (org) {
+    org.subscriptionStatus = 'canceled';
+    org.planType = null;
+    org.billingCycle = null;
+    org.stripeSubscriptionId = null;
+    org.expiresAt = null;
+    await org.save();
+  }
+
   user.subscriptionStatus   = 'canceled';
   user.planType             = null;
   user.billingCycle         = null;
@@ -330,6 +406,19 @@ async function handleSubscriptionUpdated(subscription) {
   const user = await User.findOne({ stripeCustomerId: customerId });
   if (!user) return;
 
+  let org;
+  if (user.organizationId) {
+    org = await Organization.findById(user.organizationId);
+  }
+  if (org) {
+    org.subscriptionStatus = subscription.status;
+    if (subscription.status === 'active' || subscription.status === 'trialing') {
+      const periodEnd = subscription.current_period_end;
+      if (periodEnd) org.expiresAt = new Date(periodEnd * 1000);
+    }
+    await org.save();
+  }
+
   user.subscriptionStatus = subscription.status; // active | past_due | canceled | trialing
   if (subscription.status === 'active' || subscription.status === 'trialing') {
     const periodEnd = subscription.current_period_end;
@@ -343,6 +432,15 @@ async function handlePaymentFailed(invoice) {
   const customerId = invoice.customer;
   const user = await User.findOne({ stripeCustomerId: customerId });
   if (!user) return;
+
+  let org;
+  if (user.organizationId) {
+    org = await Organization.findById(user.organizationId);
+  }
+  if (org) {
+    org.subscriptionStatus = 'past_due';
+    await org.save();
+  }
 
   user.subscriptionStatus = 'past_due';
   await user.save();

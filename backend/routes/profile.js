@@ -3,6 +3,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
+const Organization = require('../models/Organization');
 
 // @route   GET /profile
 // @desc    Get user profile with statistics
@@ -41,6 +42,12 @@ router.get('/', auth, async (req, res) => {
     // Get account limits
     const limits = user.getAccountLimits();
 
+    // Fetch organization if user has one
+    let org = null;
+    if (user.organizationId) {
+      org = await Organization.findById(user.organizationId);
+    }
+
     res.json({
       success: true,
       user: {
@@ -52,16 +59,30 @@ router.get('/', auth, async (req, res) => {
         isVerified: user.isVerified,
         totalScans: totalScans,
         scansThisMonth: scansThisMonth,
-        monthlyScansUsed: user.monthlyScansUsed,
+        monthlyScansUsed: org ? org.scansUsed : 0,
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt,
         isPro: user.isPro(),
-        proExpiresAt: user.proExpiresAt,
+        proExpiresAt: org ? org.expiresAt : user.proExpiresAt,
         // ── Service plan fields ──────────────────────────────────────────────
-        planType:              user.planType,
-        billingCycle:          user.billingCycle,
-        subscriptionStatus:    user.subscriptionStatus,
-        oneTimeRemainingScans: user.oneTimeRemainingScans || 0,
+        organization: org ? {
+          id: org._id,
+          name: org.name,
+          role: user.role,
+          planType: org.planType,
+          billingCycle: org.billingCycle,
+          subscriptionStatus: org.subscriptionStatus,
+          seatsAllowed: org.seatsAllowed,
+          seatsUsed: org.seatsUsed,
+          scanLimit: org.scanLimit,
+          scansUsed: org.scansUsed,
+          oneTimeRemainingScans: org.oneTimeRemainingScans,
+          expiresAt: org.expiresAt
+        } : null,
+        planType:              org ? org.planType : user.planType,
+        billingCycle:          org ? org.billingCycle : user.billingCycle,
+        subscriptionStatus:    org ? org.subscriptionStatus : user.subscriptionStatus,
+        oneTimeRemainingScans: org ? (org.oneTimeRemainingScans || 0) : (user.oneTimeRemainingScans || 0),
         totalTargetsUsed:      user.totalTargetsUsed     || 0,
         // Convert Mongoose Map to plain object for JSON serialisation
         scanUsagePerTarget: user.scanUsagePerTarget

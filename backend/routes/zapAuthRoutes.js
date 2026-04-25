@@ -8,6 +8,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const planCheck = require('../middleware/planCheck');
 const { v4: uuidv4 } = require('uuid');
 const { detectLoginFields } = require('../services/loginDetectionService');
 const { testLogin } = require('../services/loginTestService');
@@ -184,7 +185,7 @@ router.post('/test-login', auth, async (req, res) => {
  * Body: { targetUrl, loginUrl, tempSessionId }
  * Returns: { success, scanId, message }
  */
-router.post('/scan', auth, async (req, res) => {
+router.post('/scan', auth, planCheck, async (req, res) => {
   try {
     const { targetUrl, loginUrl, tempSessionId, triggerSource, lang } = req.body;
 

@@ -37,6 +37,18 @@ const UserSchema = new mongoose.Schema({
     type: Date,
   },
 
+  // ─── ORGANIZATION (NEW) ──────────────────────────────────────────────────────
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    default: null
+  },
+  role: {
+    type: String,
+    enum: ['owner', 'admin', 'member'],
+    default: 'owner'
+  },
+
   // ─── LEGACY (keep — existing code reads accountType and proExpiresAt) ───────
   accountType: {
     type: String,
@@ -104,10 +116,6 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  monthlyScansUsed: {
-    type: Number,
-    default: 0
-  },
   lastResetDate: {
     type: Date,
     default: Date.now
@@ -136,7 +144,9 @@ const UserSchema = new mongoose.Schema({
 UserSchema.methods.isPro = function() {
   // New plan system: pro plan OR legacy accountType
   if (this.planType === 'pro' && this.subscriptionStatus === 'active') return true;
-  return this.accountType === 'pro' && (!this.proExpiresAt || this.proExpiresAt > new Date());
+  // Legacy check: accountType 'pro' and not expired
+  const isLegacyPro = this.accountType === 'pro' && (this.proExpiresAt && this.proExpiresAt > new Date());
+  return isLegacyPro;
 };
 
 // ─── METHOD: Reset monthly usage counters when the calendar month rolls over ──
@@ -145,9 +155,8 @@ UserSchema.methods.checkAndResetMonthlyScans = function() {
   const lastReset = new Date(this.lastResetDate);
 
   if (now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()) {
-    this.monthlyScansUsed = 0;
     this.totalTargetsUsed = 0;
-    this.scanUsagePerTarget = {};
+    this.scanUsagePerTarget = new Map();
     this.lastResetDate = now;
     return true; // caller must save
   }

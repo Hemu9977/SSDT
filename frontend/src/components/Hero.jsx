@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from '../contexts/TranslationContext';
 import { useTheme } from '../context/ThemeContext';
+import { useUser } from '../contexts/UserContext';
 import ReactMarkdown from 'react-markdown';
 import ZapReportEnhanced from './ZapReportEnhanced';
 import WebCheckDetails from './WebCheckDetails';
@@ -50,6 +51,7 @@ const Hero = ({ historicalScan }) => {
   const navigate = useNavigate();
   const { currentLang, setHasReport } = useTranslation();
   const { theme } = useTheme();
+  const { user } = useUser();
 
   // 🌐 Report Translation State
   const [translatedReport, setTranslatedReport] = useState(null);
@@ -610,6 +612,13 @@ const Hero = ({ historicalScan }) => {
 
     if (!token) {
       navigate('/login');
+      return;
+    }
+
+    // --- PROACTIVE PLAN GATING ---
+    if (!user || !user.planType) {
+      console.log('⚠️ No plan detected, redirecting to profile');
+      navigate('/profile?redirect=scan');
       return;
     }
 

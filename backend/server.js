@@ -103,6 +103,9 @@ app.use('/api/translate', apiLimiter, require('./routes/translateRoutes'));
 // 👇 REGISTER URLSCAN ROUTES
 app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
 
+// 👇 REGISTER ORGANIZATION ROUTES
+app.use('/api/org', apiLimiter, require('./routes/orgRoutes'));
+
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });

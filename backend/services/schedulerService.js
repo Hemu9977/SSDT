@@ -22,6 +22,15 @@ const {
 } = require('./notificationService');
 const { testLogin } = require('./loginTestService');
 
+const { getPageSpeedReport } = require('./pagespeedService');
+const { scanHost } = require('./observatoryService');
+const { runUrlScan } = require('./urlscanService');
+const { startAsyncZapScan } = require('./zapService');
+const { startAsyncWebCheckScan } = require('./webCheckService');
+const { refineReport } = require('./geminiService');
+
+const { consumeScan } = require('./planService');
+
 let schedulerTask = null;
 let isProcessing = false;
 
@@ -113,12 +122,12 @@ async function executeSingleSchedule(schedule) {
   }
 
   // Validate plan limits before execution
-  const validation = await validatePlanLimits(user, schedule.targetUrl);
-  if (!validation.valid) {
-    console.log(`[Scheduler] Schedule ${schedule._id}: Plan limit exceeded - ${validation.reason}`);
+  const result = await consumeScan(user.organizationId);
+  if (!result) {
+    console.log(`[Scheduler] Schedule ${schedule._id}: Plan limit exceeded or inactive`);
     schedule.status = 'failed';
     schedule.lastFailure = {
-      reason: validation.reason,
+      reason: 'Scan limit reached or subscription inactive',
       failureType: 'plan_limit_exceeded',
       timestamp: new Date()
     };
@@ -130,7 +139,7 @@ async function executeSingleSchedule(schedule) {
       user._id.toString(),
       schedule.scanType === 'public' ? 'Public Scan' : 'Authenticated Scan',
       schedule.targetUrl,
-      validation.reason
+      'Scan limit reached or subscription inactive'
     );
     return;
   }
@@ -179,16 +188,6 @@ async function executeSingleSchedule(schedule) {
       });
     }
 
-    // Update user's monthly scan usage
-    user.checkAndResetMonthlyScans();
-    user.monthlyScansUsed = (user.monthlyScansUsed || 0) + 1;
-    if (!user.targetsUsed) user.targetsUsed = [];
-    if (!user.targetsUsed.includes(schedule.targetUrl)) {
-      user.targetsUsed.push(schedule.targetUrl);
-    }
-    user.totalScans = (user.totalScans || 0) + 1;
-    await user.save();
-
     // Handle schedule completion
     schedule.status = 'completed';
     schedule.lastFailure = { reason: null, details: null, failureType: null, timestamp: null };
@@ -221,16 +220,13 @@ async function executeSingleSchedule(schedule) {
       timestamp: new Date()
     };
 
-    // For recurring schedules, still compute next run but keep failure info
     if (schedule.scheduleType === 'recurring') {
       schedule.computeNextRun();
-      // Reset to scheduled so it runs again next time
       schedule.status = 'scheduled';
     }
 
     await schedule.save();
 
-    // Notify user of failure
     await handleScanFailed(
       schedule.lastScanId,
       user._id.toString(),
@@ -245,11 +241,6 @@ async function executeSingleSchedule(schedule) {
  * Trigger a public scan via internal API orchestration (guarantees combined scan runs fully)
  */
 async function triggerPublicScan(scanId, targetUrl, userId, meta) {
-  // Generate a short-lived internal token
-  const token = jwt.sign({ user: { id: userId } }, process.env.JWT_SECRET, { expiresIn: '5m' });
-  const baseUrl = `http://localhost:${process.env.PORT || 3001}`;
-
-  // Notify UI safely
   emitScanStarted(userId, {
     scanId,
     targetUrl,
@@ -259,33 +250,55 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta) {
 
   console.log(`[Scheduler] Orchestrating internal combined scan for ${targetUrl}`);
   
-  // 1. Create the combined scan using the standard endpoint
-  const postRes = await axios.post(
-    `${baseUrl}/api/vt/combined-url-scan`,
-    { 
-      url: targetUrl,
-      triggerSource: 'scheduled',
-      lang: 'en'
-    },
-    { headers: { 'x-auth-token': token } }
-  );
+  const scan = new ScanResult({
+    target: targetUrl,
+    analysisId: scanId,
+    status: 'combining',
+    userId: userId,
+    triggerSource: 'scheduled',
+    languagePreference: 'en'
+  });
+  await scan.save();
 
-  const analysisId = postRes.data.analysisId;
-
-  // 2. Trigger the orchestration logic (runs PageSpeed, Observatory, URLScan, starts ZAP & WebCheck)
   try {
-    await axios.get(
-      `${baseUrl}/api/vt/combined-analysis/${analysisId}`,
-      { headers: { 'x-auth-token': token }, timeout: 120000 }
+    const hostname = new URL(targetUrl).hostname;
+    
+    const scanPromises = [
+      getPageSpeedReport(targetUrl),
+      scanHost(hostname),
+      runUrlScan(targetUrl),
+      startAsyncZapScan(targetUrl, scanId, userId),
+      startAsyncWebCheckScan(targetUrl, scanId, userId)
+    ];
+
+    const [psiResult, obsResult, urlscanResult, zapInitResult, webCheckInitResult] = await Promise.allSettled(scanPromises);
+
+    const pagespeedResult = psiResult.status === 'fulfilled' ? psiResult.value : { error: psiResult.reason?.message };
+    const observatoryResult = obsResult.status === 'fulfilled' ? obsResult.value : { error: obsResult.reason?.message };
+    const urlscanData = urlscanResult.status === 'fulfilled' ? urlscanResult.value : { error: urlscanResult.reason?.message };
+    const zapResult = zapInitResult.status === 'fulfilled' ? zapInitResult.value : { status: 'failed', error: zapInitResult.reason?.message };
+    const webCheckResult = webCheckInitResult.status === 'fulfilled' ? webCheckInitResult.value : { status: 'failed', error: webCheckInitResult.reason?.message };
+
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      {
+        $set: {
+          pagespeedResult,
+          observatoryResult,
+          urlscanResult: urlscanData,
+          zapResult,
+          webCheckResult,
+          updatedAt: new Date()
+        }
+      }
     );
+
   } catch (err) {
-    if (err.code !== 'ECONNABORTED') {
-      console.warn('[Scheduler] Notice during combined-analysis GET orchestration:', err.message);
-    }
+    console.error('[Scheduler] Error orchestrating public scan:', err.message);
+    await ScanResult.updateOne({ analysisId: scanId }, { $set: { status: 'failed', updatedAt: new Date() } });
   }
 
-  // ZAP and WebCheck will independently call handleScanComplete when they finish.
-  return { scanId: analysisId };
+  return { scanId };
 }
 
 /**
@@ -294,7 +307,6 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta) {
 async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, meta) {
   const { startAsyncAuthScan } = require('./zapAuthService');
 
-  // Notify UI safely
   emitScanStarted(userId, {
     scanId,
     targetUrl,
@@ -318,21 +330,14 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
         console.log(`[Scheduler] ✅ Background login successful for ${targetUrl} (${cookies.length} cookies obtained)`);
       } else {
         console.warn(`[Scheduler] ⚠️ Background login failed for ${targetUrl}: ${loginResult?.errorMessage || 'Unknown error'}`);
-        // We continue anyway, hoping ZAP can handle it or use whatever cookies it might have
       }
     } catch (loginErr) {
       console.error(`[Scheduler] ❌ Background login exception for ${targetUrl}:`, loginErr.message);
     }
   }
 
-  // 1. Generate a tempSessionId for this background scan
   const { v4: uuidv4 } = require('uuid');
   const tempSessionId = uuidv4();
-  
-  // We need to reach into the route's authSessions if we want to use the API, 
-  // but since we are in a service, we can't easily do that without exporting the map.
-  // HOWEVER, we can just call the service directly BUT we need to make sure 
-  // we create the ScanResult with triggerSource first.
   
   const ScanResult = require('../models/ScanResult');
   const skeletonScan = new ScanResult({
@@ -345,7 +350,6 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
   });
   await skeletonScan.save();
 
-  // The startAsyncAuthScan handles the full flow
   const result = await startAsyncAuthScan(
     targetUrl,
     authConfig?.loginUrl || targetUrl,
@@ -354,17 +358,7 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     userId
   );
 
-  // Success notification will be triggered by handleScanComplete inside zapAuthService or status polling logic
   return result;
-}
-
-/**
- * Validate user's plan limits before executing a scheduled scan
- */
-async function validatePlanLimits(user, targetUrl) {
-  // TEMPORARY: Aggressively bypass all plan limits for testing purposes
-  // Previously, limits.scansPerTarget was rejecting the second scheduled scan on the same URL!
-  return { valid: true };
 }
 
 /**
@@ -391,7 +385,6 @@ function classifyFailure(error) {
 
 /**
  * Periodically check for "running" scheduled scans and attempt to finalize them.
- * This handles generating the AI report and sending completion emails for offline users.
  */
 async function finalizeRunningScans() {
   try {
@@ -406,35 +399,63 @@ async function finalizeRunningScans() {
 
     for (const scan of runningScans) {
       try {
-        const userId = scan.userId;
-        const analysisId = scan.analysisId;
-
-        // Generate a short-lived internal token for this user
-        const token = jwt.sign({ user: { id: userId.toString() } }, process.env.JWT_SECRET, { expiresIn: '5m' });
-        const baseUrl = `http://localhost:${process.env.PORT || 3001}`;
-
-        // Differentiate between Public and Authenticated scans to call the correct status endpoint
-        // Authenticated scans have authScanResult; Public scans use combined-analysis
-        const isAuthScan = scan.authScanResult || (analysisId && analysisId.startsWith('scheduled-'));
-        const statusEndpoint = isAuthScan 
-          ? `/api/zap-auth/status/${analysisId}`
-          : `/api/vt/combined-analysis/${analysisId}`;
-
-        console.log(`[Scheduler] 🔍 Polling status for ${isAuthScan ? 'AUTH' : 'PUBLIC'} scan: ${analysisId}`);
-
-        // Call the orchestration GET endpoint to trigger finalization if ready
-        await axios.get(
-          `${baseUrl}${statusEndpoint}`,
-          { 
-            headers: { 'x-auth-token': token },
-            timeout: 60000 // 1 minute timeout
+        const isAuthScan = !!scan.authScanResult || (scan.analysisId && scan.analysisId.startsWith('scheduled-'));
+        
+        // Timeout check logic
+        const ZAP_STALE_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+        const now = Date.now();
+        if (scan.zapResult?.startedAt && !['completed', 'completed_partial', 'failed'].includes(scan.zapResult.status)) {
+          const zapAge = now - new Date(scan.zapResult.startedAt).getTime();
+          if (zapAge > ZAP_STALE_TIMEOUT_MS) {
+            await ScanResult.updateOne({ _id: scan._id }, { $set: { 'zapResult.status': 'failed', status: 'failed' } });
+            continue;
           }
-        );
-      } catch (err) {
-        // Silently fail individual scan finalization - it will retry next cycle
-        if (err.response?.status !== 404) {
-          console.debug(`[Scheduler] Notice: Could not finalize scan ${scan.analysisId}:`, err.message);
         }
+
+        const isZAPComplete = !scan.zapResult || ['completed', 'completed_partial', 'failed'].includes(scan.zapResult.status);
+        const isWebCheckComplete = !scan.webCheckResult || ['completed', 'completed_partial', 'completed_with_errors', 'failed'].includes(scan.webCheckResult.status);
+
+        if (isZAPComplete && isWebCheckComplete && !scan.refinedReport) {
+          console.log(`[Scheduler] Generating AI report for completed scan ${scan.analysisId}`);
+          
+          let aiReport = null;
+          try {
+            if (isAuthScan) {
+              aiReport = await refineReport(scan.target, scan.authScanResult || scan.zapResult);
+            } else {
+              aiReport = await refineReport(
+                scan.target, 
+                scan.zapResult, 
+                scan.pagespeedResult, 
+                scan.observatoryResult, 
+                scan.urlscanResult
+              );
+            }
+          } catch (aiErr) {
+            console.warn(`[Scheduler] AI generation failed for ${scan.analysisId}:`, aiErr.message);
+            aiReport = { error: 'Failed to generate AI summary' };
+          }
+
+          await ScanResult.updateOne(
+            { _id: scan._id },
+            { 
+              $set: { 
+                refinedReport: aiReport,
+                status: 'completed',
+                updatedAt: new Date()
+              } 
+            }
+          );
+          
+          await handleScanComplete(
+            scan.analysisId, 
+            scan.userId.toString(), 
+            isAuthScan ? 'Authenticated Scan' : 'Public Scan', 
+            scan.target
+          );
+        }
+      } catch (err) {
+        console.error(`[Scheduler] Error finalizing scan ${scan.analysisId}:`, err.message);
       }
     }
   } catch (err) {
@@ -447,6 +468,5 @@ module.exports = {
   stopScheduler,
   processScheduledScans,
   finalizeRunningScans,
-  validatePlanLimits,
   classifyFailure
 };

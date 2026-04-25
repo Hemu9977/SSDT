@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const planCheck = require('../middleware/planCheck');
 const { scanLimiter } = require('../middleware/rateLimiter');
 const {
   checkZapHealth,
@@ -54,7 +55,7 @@ router.get('/health', async (req, res) => {
 
 // POST /api/zap/scan
 // Start a comprehensive ZAP scan (Protected + Rate Limited)
-router.post('/scan', auth, scanLimiter, async (req, res) => {
+router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
   try {
     const { url, quickMode = false } = req.body;
 

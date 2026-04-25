@@ -60,6 +60,11 @@ const scanResultSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    index: true
+  },
   triggerSource: {
     type: String,
     enum: ['manual', 'scheduled'],
