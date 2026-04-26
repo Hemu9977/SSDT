@@ -1571,7 +1571,7 @@ const AuthenticatedScanPanel = () => {
                                   }, 6000);
                                   try {
                                     const token = localStorage.getItem('token');
-                                    const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=en`, {
+                                    const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=en`, {
                                       headers: { 'x-auth-token': token }
                                     });
                                     clearInterval(progressInterval);
@@ -1635,7 +1635,7 @@ const AuthenticatedScanPanel = () => {
                                   }, 8000);
                                   try {
                                     const token = localStorage.getItem('token');
-                                    const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=ja`, {
+                                    const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=ja`, {
                                       headers: { 'x-auth-token': token }
                                     });
                                     clearInterval(progressInterval);
@@ -1682,7 +1682,7 @@ const AuthenticatedScanPanel = () => {
                           onClick={async () => {
                             try {
                               const token = localStorage.getItem('token');
-                              const response = await fetch(`${API_BASE}/api/vt/download-complete-json/${report.analysisId}`, {
+                              const response = await fetch(`${API_BASE}/api/scan/download-complete-json/${report.analysisId}`, {
                                 headers: { 'x-auth-token': token }
                               });
                               if (!response.ok) throw new Error('Download failed');

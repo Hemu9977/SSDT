@@ -328,9 +328,10 @@ async function handleCheckoutComplete(session) {
     const months = billingCycle === 'annual' ? 12 : 1;
     user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
   }
-  if (['pro', 'basic', 'light'].includes(planType)) {
-    user.accountType = planType === 'pro' ? 'pro' : 'free';
-  }
+    // Mark accountType as 'paid' for any active subscription plan (not just pro)
+    if (['pro', 'basic', 'light'].includes(planType)) {
+      user.accountType = 'paid';
+    }
   await user.save();
   console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}`);
 }

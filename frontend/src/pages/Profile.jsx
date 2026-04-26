@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { useUser } from '../contexts/UserContext';
 import '../styles/Profile.scss';
 
 const API_BASE = 'http://localhost:3001';
@@ -30,7 +31,11 @@ const Profile = () => {
   const [downgradeDialogOpen, setDowngradeDialogOpen] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState({ planType: 'pro', billingCycle: 'monthly' });
   const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteMessage, setInviteMessage] = useState({ text: '', type: '' });
   const navigate = useNavigate();
+  const { refreshUser } = useUser();
 
   const fetchProfile = async () => {
     const token = localStorage.getItem('token');
@@ -85,6 +90,107 @@ const Profile = () => {
     fetchProfile();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // --- PAYMENT ACTIVATION POLLING LOGIC ---
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const isPaymentSuccess = urlParams.get('payment') === 'success';
+
+    if (!isPaymentSuccess) return;
+
+    let attempts = 0;
+    const maxAttempts = 15;
+    let pollInterval;
+
+    const checkPlanStatus = async () => {
+      // If user logs out during polling, stop immediately
+      const currentToken = localStorage.getItem('token');
+      if (!currentToken) {
+        clearInterval(pollInterval);
+        return;
+      }
+
+      attempts++;
+      console.log(`🔄 Polling for active plan... Attempt ${attempts}/${maxAttempts}`);
+
+      try {
+        const res = await fetch(`${API_BASE}/api/profile`, {
+          headers: { 'x-auth-token': currentToken }
+        });
+
+        if (!res.ok) {
+          if (res.status === 401) {
+            clearInterval(pollInterval);
+          }
+          return;
+        }
+
+        const data = await res.json();
+        
+        // Check if plan is active
+        const org = data.user?.organization;
+        const planIsActive = (org && org.subscriptionStatus === 'active') || (data.user && data.user.planType);
+
+        if (planIsActive) {
+          console.log('✅ Payment Activation Polling: Active plan detected!');
+          clearInterval(pollInterval);
+          
+          // Immediately update frontend state
+          setProfile(data);
+          setFormData({ name: data.user.name, bio: data.user.bio || '' });
+
+          setSaveMessage('✅ Payment successful! Your plan is now active.');
+          
+          // Remove ?payment=success from URL to prevent re-polling on refresh
+          window.history.replaceState({}, document.title, window.location.pathname);
+
+          // Force global context sync before redirecting
+          console.log('🔄 Profile: Refreshing global UserContext state...');
+          await refreshUser();
+          console.log('✅ Profile: Global context refreshed.');
+
+          // Handle pending scan redirect
+          const pendingActionRaw = localStorage.getItem('pendingAction');
+          if (pendingActionRaw) {
+            try {
+              const pendingAction = JSON.parse(pendingActionRaw);
+              const isRecent = (Date.now() - pendingAction.timestamp) < 30 * 60 * 1000; // 30 min window
+              
+              if (isRecent && pendingAction.type === 'scan') {
+                localStorage.removeItem('pendingAction');
+                setSaveMessage('✅ Payment successful! Returning to scan in 2 seconds...');
+                setTimeout(() => {
+                  navigate('/?type=normal');
+                }, 2000);
+              }
+            } catch (e) {
+              localStorage.removeItem('pendingAction');
+            }
+          }
+        } else if (attempts >= maxAttempts) {
+          console.log('⚠️ Payment Activation Polling: Max attempts reached.');
+          clearInterval(pollInterval);
+          setSaveMessage('Activating your plan, please refresh in a moment');
+        } else {
+          // Keep polling, notify user on first attempt
+          if (attempts === 1) {
+             setSaveMessage('Processing payment and activating plan...');
+          }
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    };
+
+    // Start polling every 2 seconds
+    pollInterval = setInterval(checkPlanStatus, 2000);
+    // Execute immediately on mount
+    checkPlanStatus();
+
+    // Cleanup on unmount
+    return () => clearInterval(pollInterval);
+  }, [navigate]);
+  // --- END PAYMENT ACTIVATION POLLING LOGIC ---
 
   const handleEdit = () => {
     setEditing(true);
@@ -143,6 +249,15 @@ const Profile = () => {
     setCheckoutLoading(true);
     const token = localStorage.getItem('token');
 
+    // Store pending scan intent before Stripe redirect so we can restore it after payment
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('redirect') === 'scan') {
+      localStorage.setItem('pendingAction', JSON.stringify({
+        type: 'scan',
+        url: '',  // URL will be re-entered after return
+        timestamp: Date.now()
+      }));
+    }
     try {
       const res = await fetch(`${API_BASE}/api/stripe/create-checkout-session`, {
         method: 'POST',
@@ -200,6 +315,36 @@ const Profile = () => {
     }
   };
 
+  const handleSendInvite = async (e) => {
+    e.preventDefault();
+    if (!inviteEmail) return;
+
+    setInviteLoading(true);
+    setInviteMessage({ text: '', type: '' });
+    const token = localStorage.getItem('token');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/org/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+        body: JSON.stringify({ email: inviteEmail })
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        setInviteMessage({ text: 'Invite sent successfully! Note: Email delivery requires SMTP configuration.', type: 'success' });
+        setInviteEmail('');
+        fetchProfile(); // Refresh to show pending invite
+      } else {
+        setInviteMessage({ text: data.error || 'Failed to send invite', type: 'error' });
+      }
+    } catch (err) {
+      setInviteMessage({ text: 'Network error. Please try again.', type: 'error' });
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       year: 'numeric',
@@ -247,7 +392,9 @@ const Profile = () => {
           <div className="profile-header">
             <h1>My Profile</h1>
             {user.isPro && (
-              <span className="pro-badge">PRO</span>
+              <span className="pro-badge">
+                {user.planType ? user.planType.toUpperCase() : 'PRO'}
+              </span>
             )}
           </div>
 
@@ -384,6 +531,7 @@ const Profile = () => {
           </div>
 
           {/* Upgrade / Plan Selection (only for users without an active paid plan) */}
+          {/* Show upgrade panel only when user has no active paid plan */}
           {!user.isPro && !user.planType && (
             <div className="profile-section pro-upgrade-section">
               <h2>Choose a Plan</h2>
@@ -452,6 +600,7 @@ const Profile = () => {
           )}
 
           {/* Active Plan Info (pro/paid users) */}
+          {/* Show active plan section when user has any active paid plan */}
           {(user.isPro || user.planType) && (
             <div className="profile-section pro-info-section">
               <h2>Active Plan</h2>
@@ -470,11 +619,27 @@ const Profile = () => {
                 {user.billingCycle === 'onetime' && (
                   <p>Remaining scans: <strong>{user.oneTimeRemainingScans}</strong></p>
                 )}
-                <p style={{ marginTop: '0.75rem' }}>
-                  Scans used this month: <strong>{user.monthlyScansUsed || 0}</strong>
-                  {' / '}
-                  {profile.limits.scansPerMonth === -1 ? '∞' : profile.limits.scansPerMonth}
-                </p>
+                {(() => {
+                  const used = user.organization?.scansUsed ?? user.monthlyScansUsed ?? 0;
+                  const limit = user.organization?.scanLimit || profile.limits.scansPerMonth;
+                  const hasLimit = limit !== -1 && limit > 0;
+                  const percent = hasLimit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+                  
+                  return (
+                    <div style={{ marginTop: '1.25rem', marginBottom: '1rem' }}>
+                      <p style={{ marginBottom: '0.5rem', fontSize: '0.95rem', color: 'var(--text-secondary, #a0aec0)' }}>
+                        Scans used this month: <strong style={{ color: 'var(--text-primary, white)' }}>{used}</strong>
+                        {' / '}
+                        <strong style={{ color: 'var(--text-primary, white)' }}>{hasLimit ? limit : '∞'}</strong>
+                      </p>
+                      {hasLimit && (
+                        <div style={{ width: '100%', height: '8px', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${percent}%`, backgroundColor: 'var(--accent)', transition: 'width 0.4s ease' }}></div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <p>Targets used this month: <strong>{user.totalTargetsUsed || 0}</strong>
                   {' / '}
                   {profile.limits.targetsPerMonth === -1 ? '∞' : profile.limits.targetsPerMonth}
@@ -483,6 +648,81 @@ const Profile = () => {
                   <button onClick={handleDowngradeToFree} className="btn-downgrade" style={{ marginTop: '1rem' }}>
                     Cancel Subscription
                   </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Team Management Section */}
+          {(user.isPro || user.planType) && profile.user.organization && (
+            <div className="profile-section pro-info-section" style={{ marginTop: '2rem' }}>
+              <h2>Team Management</h2>
+              <div className="pro-info">
+                <p style={{ marginBottom: '1rem' }}>
+                  Seats used: <strong>{profile.user.organization.seatsUsed} / {profile.user.organization.seatsAllowed}</strong>
+                </p>
+
+                {profile.user.organization.seatsAllowed > 1 ? (
+                  <>
+                    <form onSubmit={handleSendInvite} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                      <input 
+                        type="email" 
+                        value={inviteEmail} 
+                        onChange={(e) => setInviteEmail(e.target.value)} 
+                        placeholder="Email address" 
+                        required 
+                        style={{ flex: 1, padding: '0.75rem', borderRadius: '4px', border: '1px solid #4a5568', backgroundColor: '#2d3748', color: 'white' }}
+                      />
+                      <button 
+                        type="submit" 
+                        disabled={inviteLoading || profile.user.organization.seatsUsed >= profile.user.organization.seatsAllowed}
+                        style={{ padding: '0.75rem 1.5rem', borderRadius: '4px', border: 'none', backgroundColor: 'var(--accent)', color: 'white', cursor: (inviteLoading || profile.user.organization.seatsUsed >= profile.user.organization.seatsAllowed) ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}
+                      >
+                        {inviteLoading ? 'Sending...' : 'Send Invite'}
+                      </button>
+                    </form>
+                    {inviteMessage.text && (
+                      <div style={{ padding: '0.75rem', marginBottom: '1.5rem', borderRadius: '4px', backgroundColor: inviteMessage.type === 'error' ? 'rgba(245, 101, 101, 0.2)' : 'rgba(72, 187, 120, 0.2)', color: inviteMessage.type === 'error' ? '#fc8181' : '#68d391', border: `1px solid ${inviteMessage.type === 'error' ? '#fc8181' : '#68d391'}` }}>
+                        {inviteMessage.text}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p style={{ color: '#a0aec0', marginBottom: '1.5rem', fontStyle: 'italic' }}>
+                    Your current plan does not support team members. Upgrade to a plan with more seats to invite others.
+                  </p>
+                )}
+
+                {/* Member List */}
+                <h3 style={{ fontSize: '1.1rem', marginTop: '1rem', marginBottom: '0.5rem' }}>Active Members</h3>
+                {profile.user.organization.members?.length > 0 ? (
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                    {profile.user.organization.members.map((m, i) => (
+                      <li key={i} style={{ padding: '0.75rem', backgroundColor: '#2d3748', borderRadius: '4px', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong>{m.name || 'User'}</strong> <span style={{ color: '#a0aec0', fontSize: '0.9rem' }}>({m.email})</span>
+                        </div>
+                        <span style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', backgroundColor: '#4a5568', borderRadius: '4px', textTransform: 'uppercase' }}>{m.role}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p style={{ color: '#a0aec0' }}>No active members found.</p>
+                )}
+
+                {/* Pending Invites */}
+                {profile.user.organization.pendingInvites?.length > 0 && (
+                  <>
+                    <h3 style={{ fontSize: '1.1rem', marginTop: '1.5rem', marginBottom: '0.5rem' }}>Pending Invites</h3>
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                      {profile.user.organization.pendingInvites.map((inv, i) => (
+                        <li key={i} style={{ padding: '0.75rem', backgroundColor: '#2d3748', borderRadius: '4px', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: 0.8 }}>
+                          <span>{inv.email}</span>
+                          <span style={{ fontSize: '0.8rem', color: '#ecc94b' }}>Pending</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </div>
             </div>

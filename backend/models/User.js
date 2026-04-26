@@ -52,7 +52,7 @@ const UserSchema = new mongoose.Schema({
   // ─── LEGACY (keep — existing code reads accountType and proExpiresAt) ───────
   accountType: {
     type: String,
-    enum: ['free', 'pro'],
+    enum: ['free', 'pro', 'paid'],   // 'paid' covers all non-pro subscription plans
     default: 'free'
   },
   proExpiresAt: {
@@ -140,10 +140,14 @@ const UserSchema = new mongoose.Schema({
   }
 });
 
-// ─── METHOD: Check if user is Pro (legacy compatibility) ─────────────────────
+// ─── METHOD: Check if user has ANY active paid plan ─────────────────────────
+// Returns true for light, basic, pro — any plan with active org subscription.
+// Also supports legacy accountType='pro' for backward compatibility.
 UserSchema.methods.isPro = function() {
-  // New plan system: pro plan OR legacy accountType
-  if (this.planType === 'pro' && this.subscriptionStatus === 'active') return true;
+  // Primary check: any paid plan that is currently active
+  if (this.planType && this.subscriptionStatus === 'active') return true;
+  // One-time plans: active if remaining scans > 0
+  if (this.billingCycle === 'onetime' && this.oneTimeRemainingScans > 0) return true;
   // Legacy check: accountType 'pro' and not expired
   const isLegacyPro = this.accountType === 'pro' && (this.proExpiresAt && this.proExpiresAt > new Date());
   return isLegacyPro;
@@ -198,6 +202,7 @@ UserSchema.methods.getAccountLimits = function() {
     maxSchedules:              limits.maxSchedules,
     // Legacy fields kept for backward-compat with existing profile/schedule code
     scansPerDay:               limits.scansPerMonth === -1 ? -1 : Math.ceil(limits.scansPerMonth / 30),
+    // All paid plans (light, basic, pro) get the higher file size and priority queue
     maxFileSize:               this.isPro() ? 100 * 1024 * 1024 : 32 * 1024 * 1024,
     priorityQueue:             this.isPro()
   };

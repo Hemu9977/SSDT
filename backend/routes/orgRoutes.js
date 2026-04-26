@@ -91,8 +91,7 @@ router.post('/accept-invite', auth, async (req, res) => {
     await invite.save();
 
     const actualSeats = await User.countDocuments({ 
-      organizationId: org._id,
-      status: 'active'
+      organizationId: org._id
     });
     await Organization.updateOne(
       { _id: org._id },

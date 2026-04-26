@@ -31,7 +31,7 @@ const ScanViewer = () => {
 
       try {
         console.log(`Loading historical scan: ${analysisId}`);
-        const response = await fetch(`${API_BASE}/api/vt/scan/${analysisId}`, {
+        const response = await fetch(`${API_BASE}/api/scan/scan/${analysisId}`, {
           headers: { 'x-auth-token': token },
           signal: controller.signal
         });

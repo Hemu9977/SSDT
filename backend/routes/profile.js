@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
 const Organization = require('../models/Organization');
+const Invite = require('../models/Invite');
 
 // @route   GET /profile
 // @desc    Get user profile with statistics
@@ -44,8 +45,15 @@ router.get('/', auth, async (req, res) => {
 
     // Fetch organization if user has one
     let org = null;
+    let members = [];
+    let pendingInvites = [];
+    
     if (user.organizationId) {
       org = await Organization.findById(user.organizationId);
+      if (org) {
+        members = await User.find({ organizationId: org._id }).select('name email role');
+        pendingInvites = await Invite.find({ organizationId: org._id, status: 'pending' }).select('email role createdAt');
+      }
     }
 
     res.json({
@@ -62,7 +70,8 @@ router.get('/', auth, async (req, res) => {
         monthlyScansUsed: org ? org.scansUsed : 0,
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt,
-        isPro: user.isPro(),
+        // isPro: true for ANY active paid plan (light, basic, pro) — org-first, then user fallback
+        isPro: org ? org.subscriptionStatus === 'active' : user.isPro(),
         proExpiresAt: org ? org.expiresAt : user.proExpiresAt,
         // ── Service plan fields ──────────────────────────────────────────────
         organization: org ? {
@@ -77,7 +86,9 @@ router.get('/', auth, async (req, res) => {
           scanLimit: org.scanLimit,
           scansUsed: org.scansUsed,
           oneTimeRemainingScans: org.oneTimeRemainingScans,
-          expiresAt: org.expiresAt
+          expiresAt: org.expiresAt,
+          members: members,
+          pendingInvites: pendingInvites
         } : null,
         planType:              org ? org.planType : user.planType,
         billingCycle:          org ? org.billingCycle : user.billingCycle,

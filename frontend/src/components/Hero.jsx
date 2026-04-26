@@ -51,7 +51,7 @@ const Hero = ({ historicalScan }) => {
   const navigate = useNavigate();
   const { currentLang, setHasReport } = useTranslation();
   const { theme } = useTheme();
-  const { user } = useUser();
+  const { user, organization } = useUser();
 
   // 🌐 Report Translation State
   const [translatedReport, setTranslatedReport] = useState(null);
@@ -174,6 +174,15 @@ const Hero = ({ historicalScan }) => {
     }
   }, []);
 
+  // Restore pending scan intent after payment redirect
+  useEffect(() => {
+    const pending = JSON.parse(localStorage.getItem('pendingAction') || 'null');
+    if (pending?.type === 'scan' && pending?.url) {
+      setScanUrl(pending.url);
+      localStorage.removeItem('pendingAction');
+    }
+  }, []);
+
   // Translate entire report when language changes
   useEffect(() => {
     if (report || zapReport) {
@@ -197,7 +206,7 @@ const Hero = ({ historicalScan }) => {
       try {
         // First, check the backend for any active scan (most reliable source)
         console.log('🔄 Checking for active scan in database...');
-        const response = await fetch(`${API_BASE}/api/vt/active-scan`, {
+        const response = await fetch(`${API_BASE}/api/scan/active-scan`, {
           headers: { 'x-auth-token': token }
         });
 
@@ -394,7 +403,7 @@ const Hero = ({ historicalScan }) => {
     setLoadingStage('Stopping scan and restarting containers...');
 
     try {
-      const response = await fetch(`${API_BASE}/api/vt/stop-scan/${scanIdToStop}`, {
+      const response = await fetch(`${API_BASE}/api/scan/stop-scan/${scanIdToStop}`, {
         method: 'POST',
         headers: {
           'x-auth-token': token
@@ -459,7 +468,7 @@ const Hero = ({ historicalScan }) => {
         // Create new AbortController for this request
         abortControllerRef.current = new AbortController();
 
-        const analysisRes = await fetch(`${API_BASE}/api/vt/combined-analysis/${analysisId}`, {
+        const analysisRes = await fetch(`${API_BASE}/api/scan/combined-analysis/${analysisId}`, {
           headers: { 'x-auth-token': token },
           signal: abortControllerRef.current.signal
         });
@@ -615,9 +624,20 @@ const Hero = ({ historicalScan }) => {
       return;
     }
 
-    // --- PROACTIVE PLAN GATING ---
-    if (!user || !user.planType) {
-      console.log('⚠️ No plan detected, redirecting to profile');
+    // --- PROACTIVE PLAN GATING (org-based) ---
+    // Check if user has an active organization subscription
+    // Falls back to user.planType for backward compatibility
+    const hasActivePlan = (organization && organization.subscriptionStatus === 'active') ||
+                          (user && user.planType);
+
+    if (!hasActivePlan) {
+      console.warn('⚠️ No active plan detected, redirecting to profile');
+      // Store pending scan intent so we can resume after payment
+      localStorage.setItem('pendingAction', JSON.stringify({
+        type: 'scan',
+        url: url,
+        timestamp: Date.now()
+      }));
       navigate('/profile?redirect=scan');
       return;
     }
@@ -640,7 +660,7 @@ const Hero = ({ historicalScan }) => {
       setLoadingProgress(10);
       setLoadingStage('Analyzing target environment...');
 
-      const res = await fetch(`${API_BASE}/api/vt/combined-url-scan`, {
+      const res = await fetch(`${API_BASE}/api/scan/combined-url-scan`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -651,14 +671,21 @@ const Hero = ({ historicalScan }) => {
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({ error: 'Unknown error' }));
+        if (res.status === 401) {
+          console.error('❌ Scan 401 Unauthorized — token invalid or missing. Please log in again.');
+          navigate('/login');
+          return;
+        }
         if (res.status === 429) {
           const retryAfter = errorData.retryAfter || '1 minute';
           throw new Error(`Rate limit exceeded. Please wait ${retryAfter}.`);
         }
         // Plan quota exceeded — guide user to upgrade
-        if (res.status === 403 && errorData.code === 'PLAN_LIMIT_EXCEEDED') {
+        if (res.status === 403 && (errorData.code === 'PLAN_LIMIT_EXCEEDED' || errorData.error === 'PLAN_LIMIT_EXCEEDED' || errorData.code === 'NO_ORGANIZATION')) {
+          console.error('❌ Scan 403 Plan limit exceeded:', errorData);
           throw new Error(`${errorData.message || 'Plan limit reached.'} Visit your Profile page to upgrade.`);
         }
+        console.error('❌ Scan request failed:', res.status, errorData);
         throw new Error(errorData.error || errorData.details || `HTTP ${res.status}`);
       }
 
@@ -1541,7 +1568,7 @@ const Hero = ({ historicalScan }) => {
                           }, 6000);
 
                           const token = localStorage.getItem('token');
-                          const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=en`, {
+                          const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=en`, {
                             headers: { 'x-auth-token': token }
                           });
 
@@ -1621,7 +1648,7 @@ const Hero = ({ historicalScan }) => {
                           }, 8000);
 
                           const token = localStorage.getItem('token');
-                          const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=ja`, {
+                          const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=ja`, {
                             headers: { 'x-auth-token': token }
                           });
 
@@ -1681,7 +1708,7 @@ const Hero = ({ historicalScan }) => {
                 onClick={async () => {
                   try {
                     const token = localStorage.getItem('token');
-                    const response = await fetch(`${API_BASE}/api/vt/download-complete-json/${report.analysisId}`, {
+                    const response = await fetch(`${API_BASE}/api/scan/download-complete-json/${report.analysisId}`, {
                       headers: { 'x-auth-token': token }
                     });
 
@@ -1771,7 +1798,7 @@ const Hero = ({ historicalScan }) => {
             <form className="analyze-form" onSubmit={handleSubmit}>
               <label htmlFor="url-input">Enter a URL to start</label>
               <div className="input-wrapper">
-                <input id="url-input" name="url" type="text" placeholder="E.g. https://google.com" defaultValue={scanUrl || "https://google.com"} required disabled={loading} />
+                <input id="url-input" name="url" type="text" placeholder="E.g. https://google.com" value={scanUrl} onChange={(e) => setScanUrl(e.target.value)} required disabled={loading} />
                 {!loading ? (
                   <div className="action-buttons" style={{ flexDirection: 'row' }}>
                     <button type="submit" className="analyze-button">

@@ -22,18 +22,20 @@ module.exports = async function planCheck(req, res, next) {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(401).json({ code: 'USER_NOT_FOUND', message: 'User account not found' });
+      return res.status(401).json({ success: false, code: 'USER_NOT_FOUND', error: 'UNAUTHORIZED', message: 'User account not found' });
     }
 
     if (!user.organizationId) {
-      return res.status(403).json({ code: 'NO_ORGANIZATION', message: 'No organization found for user.' });
+      return res.status(403).json({ success: false, code: 'NO_ORGANIZATION', error: 'PLAN_LIMIT_EXCEEDED', message: 'No organization found for user. Please purchase a plan.' });
     }
 
     const result = await consumeScan(user.organizationId);
 
     if (!result) {
       return res.status(403).json({
+        success: false,
         code: 'PLAN_LIMIT_EXCEEDED',
+        error: 'PLAN_LIMIT_EXCEEDED',
         message: 'Scan limit reached or subscription inactive. Please upgrade your plan.',
         limitType: 'monthly_scans_or_inactive'
       });
@@ -44,6 +46,6 @@ module.exports = async function planCheck(req, res, next) {
     next();
   } catch (err) {
     console.error('❌ [planCheck] Error:', err.message);
-    res.status(500).json({ code: 'PLAN_CHECK_ERROR', message: 'Failed to verify plan limits' });
+    res.status(500).json({ success: false, code: 'PLAN_CHECK_ERROR', error: 'PLAN_CHECK_ERROR', message: 'Failed to verify plan limits' });
   }
 };

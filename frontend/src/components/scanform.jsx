@@ -22,7 +22,7 @@ const ScanForm = () => {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/vt/combined-analysis/${currentScanId}`, {
+      const response = await fetch(`${API_BASE}/api/scan/combined-analysis/${currentScanId}`, {
         headers: { 'x-auth-token': token }
       });
 
@@ -104,7 +104,7 @@ const ScanForm = () => {
 
       // Check current scan status from server before resuming
       try {
-        const response = await fetch(`${API_BASE}/api/vt/combined-analysis/${persistedScanId}`, {
+        const response = await fetch(`${API_BASE}/api/scan/combined-analysis/${persistedScanId}`, {
           headers: { 'x-auth-token': token }
         });
 
@@ -160,7 +160,7 @@ const ScanForm = () => {
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/vt/combined-url-scan`, {
+      const response = await fetch(`${API_BASE}/api/scan/combined-url-scan`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -213,7 +213,7 @@ const ScanForm = () => {
 
     try {
       // Call combined scan stop endpoint - stops ZAP & WebCheck, restarts both containers
-      const response = await fetch(`${API_BASE}/api/vt/stop-scan/${scanId}`, {
+      const response = await fetch(`${API_BASE}/api/scan/stop-scan/${scanId}`, {
         method: 'POST',
         headers: {
           'x-auth-token': token

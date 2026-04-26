@@ -76,7 +76,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/auth', authLimiter, require('./routes/auth'));
-app.use('/api/vt', apiLimiter, scanLimiter, require('./routes/virustotalRoutes'));
+app.use('/api/scan', apiLimiter, scanLimiter, require('./routes/virustotalRoutes'));
 app.use('/api/pagespeed', apiLimiter, require('./routes/pageSpeedRoutes'));
 
 // 👇 REGISTER PROFILE ROUTE
