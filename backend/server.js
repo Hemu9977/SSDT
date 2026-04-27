@@ -1,7 +1,10 @@
-require('dotenv').config();
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const helmet = require('helmet');
 const connectDB = require('./db');
 const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimiter');
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
@@ -25,40 +28,16 @@ if (missingVars.length > 0) {
 
 const app = express();
 
-// Connect to database and initialize GridFS
-connectDB().then(() => {
-  // Initialize GridFS after MongoDB connection is established
-  try {
-    gridfsService.initialize('zap_reports');
-    gridfsService.initialize('zap_auth_reports');
-    gridfsService.initialize('webcheck_results');
-    console.log('✅ GridFS initialized (buckets: zap_reports, zap_auth_reports, webcheck_results)');
-  } catch (error) {
-    console.error('⚠️  GridFS initialization failed:', error.message);
-    console.error('   Large file storage may not work properly');
-  }
-
-  // Start cleanup job for expired scans and orphaned data
-  try {
-    startCleanupJob();
-    console.log('✅ Cleanup job scheduler started');
-  } catch (error) {
-    console.error('⚠️  Cleanup job initialization failed:', error.message);
-  }
-});
-
+app.use(helmet());
 app.set('trust proxy', 1);
 
-app.use(cors({
-  origin: [
-    process.env.CLIENT_URL || 'http://localhost:3000',
-    'http://localhost:3002',
-    'http://localhost:3003'
-  ],
-  credentials: true
-}));
+const allowedOrigins = [process.env.FRONTEND_URL || 'http://localhost:3000'];
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push('http://localhost:3002', 'http://localhost:3003');
+}
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ extended: false, limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - IP: ${req.ip}`);
@@ -88,7 +67,11 @@ app.use('/api/translate', apiLimiter, require('./routes/translateRoutes'));
 app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok' });
 });
 
 app.use((req, res) => {
@@ -103,16 +86,69 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // Create HTTP server and attach Socket.IO
 const server = http.createServer(app);
 initializeSocket(server);
 
-server.listen(PORT, () => {
-  console.log('\n=================================');
-  console.log('🚀 Server started successfully!');
-  console.log(`📡 Listening on port ${PORT}`);
-  console.log('🔌 Socket.IO notifications enabled');
-  console.log('=================================\n');
+// Graceful shutdown — ECS sends SIGTERM on deploy/scale-in, waits 30s then SIGKILL
+const shutdown = (signal) => {
+  console.log(`\n${signal} received. Closing server gracefully...`);
+  server.close(() => {
+    console.log('✅ HTTP server closed. Exiting.');
+    process.exit(0);
+  });
+  // Force-exit if server hasn't closed within 25s (before ECS sends SIGKILL at 30s)
+  setTimeout(() => {
+    console.error('⚠️  Graceful shutdown timed out. Forcing exit.');
+    process.exit(1);
+  }, 25000);
+};
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled Promise Rejection:', reason);
 });
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught Exception:', err);
+  process.exit(1);
+});
+
+async function startServer() {
+  try {
+    await connectDB();
+
+    try {
+      gridfsService.initialize('zap_reports');
+      gridfsService.initialize('zap_auth_reports');
+      gridfsService.initialize('webcheck_results');
+      console.log('✅ GridFS initialized (buckets: zap_reports, zap_auth_reports, webcheck_results)');
+    } catch (error) {
+      console.error('⚠️  GridFS initialization failed:', error.message);
+      console.error('   Large file storage may not work properly');
+    }
+
+    try {
+      startCleanupJob();
+      console.log('✅ Cleanup job scheduler started');
+    } catch (error) {
+      console.error('⚠️  Cleanup job initialization failed:', error.message);
+    }
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log('\n=================================');
+      console.log('🚀 Server started successfully!');
+      console.log(`📡 Listening on port ${PORT}`);
+      console.log('🔌 Socket.IO notifications enabled');
+      console.log('=================================\n');
+    });
+
+  } catch (err) {
+    console.error(' Fatal: could not connect to MongoDB on startup:', err.message);
+    process.exit(1);
+  }
+}
+
+startServer();

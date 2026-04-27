@@ -22,7 +22,7 @@ function initializeSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
       origin: [
-        'http://localhost:3000',
+        process.env.FRONTEND_URL || 'http://localhost:3000',
         'http://localhost:3001',
         'http://localhost:3002'
       ],
@@ -85,7 +85,7 @@ function emitScanCompleted(userId, payload) {
  */
 async function handleScanComplete(scanId, userId, scanType, targetUrl) {
   const completedAt = new Date().toISOString();
-  const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
+  const clientUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
   let dashboardLink = `${clientUrl}/scan/${scanId}`;
 
   // 0. Fetch scan result to check triggerSource

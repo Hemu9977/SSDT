@@ -1,0 +1,48 @@
+{
+  "family": "ssdt-backend-task",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsBackendTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "459181228792.dkr.ecr.ap-south-1.amazonaws.com/ssdt-backend:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3001, "protocol": "tcp" }
+      ],
+      "secrets": [
+        { "name": "MONGO_URI",        "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/MONGO_URI" },
+        { "name": "JWT_SECRET",       "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/JWT_SECRET" },
+        { "name": "GEMINI_API_KEY",   "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GEMINI_API_KEY" },
+        { "name": "PSI_API_KEY",      "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/PSI_API_KEY" },
+        { "name": "URLSCAN_API_KEY",  "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/URLSCAN_API_KEY" },
+        { "name": "GOOGLE_CLIENT_ID", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_ID" },
+        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_SECRET" }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",               "value": "production" },
+        { "name": "PORT",                   "value": "3001" },
+        { "name": "AWS_REGION",             "value": "ap-south-1" },
+        { "name": "ECS_CLUSTER_NAME",       "value": "ssdt-cluster" },
+        { "name": "ECS_ZAP_TASK_DEF",       "value": "ssdt-zap-task" },
+        { "name": "RATE_LIMIT_ENABLED",     "value": "true" },
+        { "name": "GEMINI_MODEL",           "value": "gemini-2.0-flash" },
+        { "name": "SES_FROM_EMAIL",         "value": "noreply@yourdomain.com" },
+        { "name": "FRONTEND_URL",           "value": "https://yourdomain.com" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ssdt-backend",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "backend",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

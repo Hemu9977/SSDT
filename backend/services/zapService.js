@@ -12,7 +12,7 @@ const cleanupService = require('./cleanupService');
 // ============================================================================
 
 const ZAP_URL = process.env.ZAP_API_URL || 'http://127.0.0.1:8080';
-const ZAP_API_KEY = process.env.ZAP_API_KEY || 'ssdt-secure-zap-2025';
+const ZAP_API_KEY = process.env.ZAP_API_KEY; // Optional when ZAP runs with api.disablekey=true
 
 // Create HTTP agent with keep-alive to prevent socket hang up errors
 const http = require('http');
@@ -23,21 +23,27 @@ const httpAgent = new http.Agent({
   timeout: 120000
 });
 
-const zapApi = axios.create({
-  baseURL: ZAP_URL,
-  timeout: 120000, // Increased timeout to 2 minutes
-  httpAgent: httpAgent,
-  headers: {
-    'X-Zap-Api-Key': ZAP_API_KEY,
+// Factory: create a per-scan ZAP API client pointing at a specific container URL.
+// Called inside runZapScanWithDB so concurrent scans each get their own client.
+function createZapClient(zapUrl) {
+  const headers = {
     'Content-Type': 'application/json',
-    'Connection': 'keep-alive'
-  },
-  params: {
-    apikey: ZAP_API_KEY
-  },
-  // Retry on network errors
-  maxRedirects: 5
-});
+    'Connection': 'keep-alive',
+    ...(ZAP_API_KEY ? { 'X-Zap-Api-Key': ZAP_API_KEY } : {})
+  };
+
+  return axios.create({
+    baseURL: zapUrl,
+    timeout: 120000,
+    httpAgent: httpAgent,
+    headers,
+    params: ZAP_API_KEY ? { apikey: ZAP_API_KEY } : {},
+    maxRedirects: 5
+  });
+}
+
+// Module-level client used only by checkZapHealth() (health endpoint, not scans).
+const zapApi = createZapClient(ZAP_URL);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -554,7 +560,11 @@ async function checkZapHealth() {
  * This is the main entry point called from the API routes
  */
 async function runZapScanWithDB(targetUrl, userId, options = {}) {
-  const { scanId } = options;
+  const { scanId, zapUrl: scanZapUrl } = options;
+  // Per-scan client pointing at this scan's dedicated container.
+  // All zapApi.get() calls inside runZapScanWithDB reference this local variable,
+  // not the module-level client used only by checkZapHealth().
+  const zapApi = createZapClient(scanZapUrl || ZAP_URL);
 
   console.log(`🚀 Starting ZAP comprehensive scan for user ${userId}: ${targetUrl}`);
   console.log(`   Scan ID: ${scanId}`);
@@ -563,22 +573,30 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
   let scanResult = null;
 
   try {
-    // Create initial scan result in database with status "scanning"
-    scanResult = new ScanResult({
-      analysisId: scanId,
-      userId: userId,
-      target: targetUrl,
-      status: 'scanning',
-      zapResult: {
-        status: 'initializing',
-        phase: 'starting',
-        progress: 0,
-        urlsFound: 0,
-        alerts: []
-      }
-    });
-    await scanResult.save();
-    console.log(`✅ Initial scan result created in database: ${scanId}`);
+    // Atomic upsert — works whether the route pre-created a skeleton record during
+    // ECS provisioning or this is the first DB touch for this scan.
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      {
+        $set: {
+          status: 'scanning',
+          zapContainerUrl: scanZapUrl || null,
+          zapResult: { status: 'initializing', phase: 'starting', progress: 0, urlsFound: 0, alerts: [] },
+          containerStartedAt: new Date(),
+          updatedAt: new Date()
+        },
+        $setOnInsert: {
+          analysisId: scanId,
+          userId: userId,
+          target: targetUrl,
+          createdAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
+    // Minimal stub used by the catch block's cleanupFailedScan call.
+    scanResult = { analysisId: scanId, userId };
+    console.log(`✅ Scan record initialized in database: ${scanId}`);
 
     // Update helper function to update database as scan progresses
     const updateProgress = async (phase, progress, additionalData = {}) => {

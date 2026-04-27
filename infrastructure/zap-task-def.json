@@ -1,0 +1,48 @@
+{
+  "family": "ssdt-zap-task",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "zap",
+      "image": "ghcr.io/zaproxy/zaproxy:stable",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8080, "protocol": "tcp" }
+      ],
+      "command": [
+        "zap.sh", "-daemon",
+        "-host", "0.0.0.0",
+        "-port", "8080",
+        "-config", "api.addrs.addr.name=.*",
+        "-config", "api.addrs.addr.regex=true",
+        "-config", "api.disablekey=true",
+        "-config", "spider.maxDepth=20",
+        "-config", "spider.threadCount=10",
+        "-config", "scanner.threadPerHost=10",
+        "-config", "connection.timeoutInSecs=60"
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ssdt-zap",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "zap",
+          "awslogs-create-group": "true"
+        }
+      },
+      "environment": [],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -sf http://localhost:8080/JSON/core/view/version/ || exit 1"],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

@@ -15,20 +15,36 @@ const { handleScanComplete } = require('../services/notificationService');
 
 const router = express.Router();
 
+// Expose err.message in dev only — never leak internals to production clients
+const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
+
 // In-memory lock to prevent parallel Gemini AI report calls for the same scan
 const geminiInProgress = new Set();
+
+// Patterns covering all RFC-1918/loopback/link-local ranges plus cloud metadata
+const BLOCKED_HOST_PATTERNS = [
+  /^localhost$/i,
+  /^127\./,                         // 127.0.0.0/8 loopback
+  /^0\./,                           // 0.0.0.0/8
+  /^10\./,                          // 10.0.0.0/8
+  /^172\.(1[6-9]|2\d|3[01])\./,    // 172.16.0.0/12
+  /^192\.168\./,                    // 192.168.0.0/16
+  /^169\.254\./,                    // 169.254.0.0/16 link-local + AWS metadata
+  /^::1$/,                          // IPv6 loopback
+  /^fc00:/i,                        // IPv6 ULA fc00::/7
+  /^fe[89ab][0-9a-f]:/i,            // IPv6 link-local fe80::/10
+  /\.local$/i,                      // mDNS .local domains
+];
 
 // URL validation helper
 const isValidUrl = (urlString) => {
   try {
     const url = new URL(urlString);
-    // Only allow http and https protocols
     if (!['http:', 'https:'].includes(url.protocol)) {
       return { valid: false, error: 'Only HTTP and HTTPS URLs are allowed' };
     }
-    // Prevent localhost/internal IPs for security
     const hostname = url.hostname.toLowerCase();
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.') || hostname.startsWith('10.')) {
+    if (BLOCKED_HOST_PATTERNS.some(p => p.test(hostname))) {
       return { valid: false, error: 'Localhost and private IPs are not allowed' };
     }
     return { valid: true };
@@ -74,7 +90,7 @@ router.get('/history', auth, async (req, res) => {
     console.error('❌ History retrieval error:', err.message);
     res.status(500).json({
       error: 'Failed to retrieve scan history',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -185,7 +201,7 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
     console.error('❌ Load scan error:', err.message);
     res.status(500).json({
       error: 'Failed to load scan',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -394,7 +410,7 @@ router.get('/active-scan', auth, async (req, res) => {
     console.error('❌ Active scan retrieval error:', err.message);
     res.status(500).json({
       error: 'Failed to retrieve active scan',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -444,7 +460,7 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
     }
     res.status(500).json({
       error: 'Failed to initiate combined scan',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -1127,7 +1143,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     console.error('❌ Error stack:', err.stack);
     res.status(500).json({
       error: 'Failed to retrieve combined analysis',
-      details: err.message,
+      details: devMsg(err),
       stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
   }
@@ -1250,7 +1266,7 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
     console.error('❌ Download complete JSON error:', err);
     res.status(500).json({
       error: 'Failed to download complete JSON report',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -1297,7 +1313,7 @@ router.post('/stop-scan/:id', auth, async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to stop scan',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });
@@ -1384,7 +1400,7 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
     }
     res.status(500).json({
       error: 'Failed to generate PDF report',
-      details: err.message
+      details: devMsg(err)
     });
   }
 });

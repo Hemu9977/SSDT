@@ -42,3 +42,18 @@ backend/zap-report-*.html
 backend/zap-report-*.json
 backend/zap-report-*.xml
 .claude/settings.local.json
+
+#deployment
+awscliv2.zip
+aws/
+
+# Test coverage
+coverage/
+frontend/coverage/
+backend/coverage/
+
+# Temp / runtime
+*.tmp
+*.pid
+*.seed
+backend/uploads/

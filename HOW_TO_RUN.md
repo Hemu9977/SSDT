@@ -5,7 +5,7 @@
 - **Node.js** v18+ and npm v9+
 - **Docker Desktop** (with Docker Compose)
 - **Python 3.x** (for ZAP scanner scripts)
-- **MongoDB** (local or cloud - MongoDB Atlas)
+- **MongoDB Atlas** account with a cluster (local MongoDB is not supported)
 
 ---
 
@@ -25,9 +25,8 @@ cd SSDT
 Create `backend/.env` with the following variables:
 
 ```env
-# MongoDB
-MONGODB_URI=mongodb://localhost:27017/ssdt
-# or MongoDB Atlas: mongodb+srv://user:pass@cluster.mongodb.net/ssdt
+# MongoDB Atlas (required — local MongoDB is not supported)
+MONGO_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/virustotal-scanner?retryWrites=true&w=majority
 
 # JWT Secret (generate a random string)
 JWT_SECRET=your-super-secret-jwt-key-here

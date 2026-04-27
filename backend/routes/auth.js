@@ -13,12 +13,11 @@ const crypto = require('crypto');
 // Initialize Google Client
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-console.log("✅ AUTH ROUTES LOADED - Google Login Enabled"); // <--- This log proves the file is loaded
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // @route   POST /auth/google
 // @desc    Login or Register with Google
 router.post('/google', async (req, res) => {
-  console.log("🔔 Google Login Request Received"); // <--- This log proves the route is hit
   const { token, googleAccessToken } = req.body;
 
   try {
@@ -49,7 +48,7 @@ router.post('/google', async (req, res) => {
       return res.status(400).json({ message: 'No token provided' });
     }
 
-    console.log(`Processing Google Login for: ${email}`);
+    console.log(`Processing Google Login for user`);
 
     // Check if user exists
     let user = await User.findOne({ email: email.toLowerCase() });
@@ -96,13 +95,22 @@ router.post('/google', async (req, res) => {
     );
   } catch (err) {
     console.error('Google Auth Error:', err.message);
-    res.status(500).json({ message: 'Google authentication failed', error: err.message });
+    res.status(500).json({ message: 'Google authentication failed' });
   }
 });
 
 // Existing Register Route
 router.post('/register', async (req, res) => {
   const { name, email, password } = req.body;
+  if (!name || typeof name !== 'string' || name.trim().length < 1) {
+    return res.status(400).json({ message: 'Name is required' });
+  }
+  if (!email || !EMAIL_RE.test(email)) {
+    return res.status(400).json({ message: 'Valid email is required' });
+  }
+  if (!password || password.length < 8) {
+    return res.status(400).json({ message: 'Password must be at least 8 characters' });
+  }
   try {
     let user = await User.findOne({ email: email.toLowerCase() });
     if (user) return res.status(400).json({ message: 'User already exists' });
@@ -129,6 +137,12 @@ router.post('/register', async (req, res) => {
 // Existing Login Route
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
+  if (!email || !EMAIL_RE.test(email)) {
+    return res.status(400).json({ message: 'Valid email is required' });
+  }
+  if (!password) {
+    return res.status(400).json({ message: 'Password is required' });
+  }
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
@@ -156,6 +170,12 @@ router.post('/login', async (req, res) => {
 // Existing Verify OTP Route
 router.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
+  if (!email || !EMAIL_RE.test(email)) {
+    return res.status(400).json({ message: 'Valid email is required' });
+  }
+  if (!otp || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ message: 'OTP must be a 6-digit number' });
+  }
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user || user.otp !== otp || user.otpExpires < new Date()) {

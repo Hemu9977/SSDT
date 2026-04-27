@@ -5,6 +5,8 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 
+const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
+
 /**
  * POST /api/urlscan/scan
  * Submit URL for scanning
@@ -35,7 +37,7 @@ router.post('/scan', auth, async (req, res) => {
         console.error('❌ urlscan submission error:', err.message);
         res.status(500).json({
             error: 'Failed to submit scan',
-            details: err.message
+            details: devMsg(err)
         });
     }
 });
@@ -91,7 +93,7 @@ router.get('/result/:uuid', auth, async (req, res) => {
         console.error('❌ urlscan result error:', err.message);
         res.status(500).json({
             error: 'Failed to retrieve result',
-            details: err.message
+            details: devMsg(err)
         });
     }
 });

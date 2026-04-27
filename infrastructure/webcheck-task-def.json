@@ -1,0 +1,34 @@
+{
+  "family": "ssdt-webcheck-task",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "webcheck",
+      "image": "459181228792.dkr.ecr.ap-south-1.amazonaws.com/ssdt-webcheck:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3002, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "PORT",          "value": "3002" },
+        { "name": "WC_SERVER",     "value": "true" },
+        { "name": "CHROME_PATH",   "value": "/usr/bin/chromium" },
+        { "name": "NODE_ENV",      "value": "production" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ssdt-webcheck",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "webcheck",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

@@ -17,6 +17,7 @@ const {
   getAuthScanStatus,
   stopAuthScan
 } = require('../services/zapAuthService');
+const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
 const { handleScanComplete } = require('../services/notificationService');
@@ -214,48 +215,61 @@ router.post('/scan', auth, async (req, res) => {
     const cookies = session.cookies;
     const resolvedLoginUrl = loginUrl || session.loginUrl;
 
-    // Check ZAP health before starting
-    const health = await checkZapAuthHealth();
-    if (!health.healthy) {
-      return res.status(503).json({
-        error: 'ZAP authenticated scanner is not available',
-        details: health.error
-      });
-    }
-
     // Generate scan ID
     const scanId = `zap-auth-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
     console.log(`[ZAP-AUTH] Starting authenticated scan: ${scanId} for ${targetUrl} (Source: ${triggerSource || 'manual'})`);
 
-    // Create a skeleton scan record immediately to store the triggerSource
-    const skeletonScan = new ScanResult({
-      target: targetUrl,
-      analysisId: scanId,
-      status: 'pending',
-      userId: req.user.id,
-      triggerSource: triggerSource || 'manual',
-      languagePreference: lang || 'en'
-    });
-    await skeletonScan.save();
-
-    // Start async auth ZAP scan
-    const result = await startAsyncAuthScan(
-      targetUrl,
-      resolvedLoginUrl,
-      cookies,
-      scanId,
-      req.user.id
+    // Create skeleton record so polling shows "queued" during provisioning.
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      {
+        $setOnInsert: {
+          target: targetUrl,
+          analysisId: scanId,
+          status: 'queued',
+          userId: req.user.id,
+          triggerSource: triggerSource || 'manual',
+          languagePreference: lang || 'en',
+          authScanResult: { status: 'provisioning', phase: 'provisioning', progress: 0 },
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      },
+      { upsert: true }
     );
 
-    // Delete the session after use (one-time use)
+    // Delete session after use (one-time use)
     authSessions.delete(tempSessionId);
 
-    res.json({
-      success: true,
-      scanId: result.scanId,
-      message: result.message
-    });
+    // Respond immediately — provisioning + scan run in background.
+    res.json({ success: true, scanId, message: 'Authenticated scan started' });
+
+    // Async: provision container → scan → release
+    (async () => {
+      let zapUrl;
+      try {
+        const container = await requestContainer(scanId, 'auth');
+        zapUrl = container.zapUrl;
+      } catch (err) {
+        console.error(`[ZAP-AUTH] Container provisioning failed for scan ${scanId}:`, err.message);
+        await ScanResult.updateOne(
+          { analysisId: scanId },
+          { $set: { status: 'failed', 'authScanResult.status': 'failed', 'authScanResult.error': 'Container provisioning failed', updatedAt: new Date() } }
+        );
+        return;
+      }
+
+      await startAsyncAuthScan(
+        targetUrl,
+        resolvedLoginUrl,
+        cookies,
+        scanId,
+        req.user.id,
+        zapUrl,
+        (id) => releaseContainer(id)
+      );
+    })();
   } catch (error) {
     console.error('[ZAP-AUTH] Scan start error:', error.message);
     res.status(500).json({ error: 'Failed to start authenticated scan', details: error.message });

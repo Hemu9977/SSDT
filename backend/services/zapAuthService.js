@@ -16,7 +16,7 @@ const gridfsService = require('./gridfsService');
 // ============================================================================
 
 const ZAP_AUTH_URL = process.env.ZAP_AUTH_API_URL || 'http://127.0.0.1:8081';
-const ZAP_AUTH_API_KEY = process.env.ZAP_AUTH_API_KEY || 'ssdt-secure-zap-auth-2025';
+const ZAP_AUTH_API_KEY = process.env.ZAP_AUTH_API_KEY; // Optional when ZAP runs with api.disablekey=true
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -25,24 +25,31 @@ const httpAgent = new http.Agent({
   timeout: 120000
 });
 
-// ZAP's API matching is Host-header-sensitive. Since the zap-auth container
-// listens on port 8080 internally but is mapped to 8081 externally, we must
-// set the Host header to match the internal port so ZAP recognizes API requests.
-const zapAuthApi = axios.create({
-  baseURL: ZAP_AUTH_URL,
-  timeout: 120000,
-  httpAgent: httpAgent,
-  headers: {
-    'X-Zap-Api-Key': ZAP_AUTH_API_KEY,
+// Factory: create a per-scan ZAP auth client.
+// In AWS mode, each auth scan gets its own Fargate container (port 8080 internal).
+// In local mode, the default ZAP_AUTH_URL points at the docker-compose mapped port 8081.
+// The Host header is forced to 'localhost:8080' because ZAP's API validation is
+// Host-header-sensitive — ZAP always listens on port 8080 internally.
+function createZapAuthClient(zapUrl) {
+  const headers = {
     'Content-Type': 'application/json',
     'Connection': 'keep-alive',
-    'Host': 'localhost:8080'
-  },
-  params: {
-    apikey: ZAP_AUTH_API_KEY
-  },
-  maxRedirects: 5
-});
+    'Host': 'localhost:8080',
+    ...(ZAP_AUTH_API_KEY ? { 'X-Zap-Api-Key': ZAP_AUTH_API_KEY } : {})
+  };
+
+  return axios.create({
+    baseURL: zapUrl,
+    timeout: 120000,
+    httpAgent: httpAgent,
+    headers,
+    params: ZAP_AUTH_API_KEY ? { apikey: ZAP_AUTH_API_KEY } : {},
+    maxRedirects: 5
+  });
+}
+
+// Module-level client used only by checkZapAuthHealth() (not by scans).
+const zapAuthApi = createZapAuthClient(ZAP_AUTH_URL);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -189,7 +196,7 @@ async function checkZapAuthHealth() {
  * Configure ZAP authentication context with session cookies.
  * Uses the Replacer API to inject Cookie headers into all requests.
  */
-async function configureAuthContext({ targetUrl, cookies, scanId }) {
+async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
   const contextName = `auth_scan_${scanId}`;
   const targetUrlObj = new URL(targetUrl);
   const targetDomain = targetUrlObj.hostname;
@@ -199,7 +206,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
 
   // Create a new context
   const contextResponse = await zapAuthApiWithRetry(
-    () => zapAuthApi.get('/JSON/context/action/newContext/', {
+    () => zapClient.get('/JSON/context/action/newContext/', {
       params: { contextName }
     }),
     3, 1000, 'Create context'
@@ -215,7 +222,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
 
   for (const pattern of includePatterns) {
     try {
-      await zapAuthApi.get('/JSON/context/action/includeInContext/', {
+      await zapClient.get('/JSON/context/action/includeInContext/', {
         params: { contextName, regex: pattern }
       });
     } catch (err) {
@@ -237,7 +244,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
 
   for (const pattern of excludePatterns) {
     try {
-      await zapAuthApi.get('/JSON/context/action/excludeFromContext/', {
+      await zapClient.get('/JSON/context/action/excludeFromContext/', {
         params: { contextName, regex: pattern }
       });
     } catch (_) {
@@ -246,7 +253,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
   }
 
   // Set context in scope
-  await zapAuthApi.get('/JSON/context/action/setContextInScope/', {
+  await zapClient.get('/JSON/context/action/setContextInScope/', {
     params: { contextName, booleanInScope: 'true' }
   });
 
@@ -261,7 +268,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
     try {
       // Remove any existing cookie replacer rule
       try {
-        await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
+        await zapClient.get('/JSON/replacer/action/removeRule/', {
           params: { description: 'auth_cookie' }
         });
       } catch (_) {
@@ -270,7 +277,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
 
       // Add Cookie header replacement rule
       await zapAuthApiWithRetry(
-        () => zapAuthApi.get('/JSON/replacer/action/addRule/', {
+        () => zapClient.get('/JSON/replacer/action/addRule/', {
           params: {
             description: 'auth_cookie',
             enabled: 'true',
@@ -305,7 +312,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
 
   for (const pattern of exclusionPatterns) {
     try {
-      await zapAuthApi.get('/JSON/core/action/excludeFromProxy/', {
+      await zapClient.get('/JSON/core/action/excludeFromProxy/', {
         params: { regex: pattern }
       });
     } catch (_) {
@@ -324,7 +331,11 @@ async function configureAuthContext({ targetUrl, cookies, scanId }) {
  * Run a full authenticated ZAP scan in the background.
  * Updates ScanResult.authScanResult as it progresses.
  */
-async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId) {
+async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl) {
+  // Per-scan client pointing at this scan's dedicated container.
+  // All zapAuthApi.get() calls inside this function reference this local variable.
+  const zapAuthApi = createZapAuthClient(zapUrl || ZAP_AUTH_URL);
+
   console.log(`[ZAP-AUTH] Starting authenticated scan for user ${userId}: ${targetUrl}`);
   console.log(`[ZAP-AUTH] Scan ID: ${scanId}`);
   console.log(`[ZAP-AUTH] Login URL: ${loginUrl}`);
@@ -358,7 +369,8 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     const { contextId, contextName: ctxName } = await configureAuthContext({
       targetUrl,
       cookies,
-      scanId
+      scanId,
+      zapClient: zapAuthApi
     });
     contextName = ctxName;
 
@@ -809,7 +821,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
  * Start an authenticated scan asynchronously. Returns immediately.
  * The actual scan runs in the background.
  */
-async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId) {
+async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, zapUrl, onComplete) {
   console.log(`[ZAP-AUTH] Starting async auth scan for: ${targetUrl}`);
 
   // Check if a scan already exists for this ID
@@ -866,10 +878,14 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId) 
 
   console.log(`[ZAP-AUTH] Scan record created: ${scanId}`);
 
-  // Fire and forget - run scan in background
-  runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId).catch(error => {
-    console.error(`[ZAP-AUTH] Background scan error for ${scanId}:`, error.message);
-  });
+  // Fire and forget — run scan in background
+  runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl)
+    .catch(error => {
+      console.error(`[ZAP-AUTH] Background scan error for ${scanId}:`, error.message);
+    })
+    .finally(() => {
+      if (typeof onComplete === 'function') onComplete(scanId);
+    });
 
   return {
     scanId,

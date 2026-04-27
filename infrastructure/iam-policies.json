@@ -1,0 +1,64 @@
+{
+  "_comment": "IAM policies for SSDT ECS deployment. Account: 459181228792",
+
+  "ecsBackendTaskRole": {
+    "_comment": "Attached to backend ECS task — allows it to spawn/stop ZAP tasks",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ecs:RunTask",
+          "ecs:StopTask",
+          "ecs:DescribeTasks",
+          "ecs:ListTasks"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": "iam:PassRole",
+        "Resource": [
+          "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
+          "arn:aws:iam::459181228792:role/ecsTaskRole"
+        ]
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ses:SendEmail",
+          "ses:SendRawEmail"
+        ],
+        "Resource": "arn:aws:ses:ap-south-1:459181228792:identity/*"
+      }
+    ]
+  },
+
+  "ecsTaskExecutionRole": {
+    "_comment": "Standard ECS execution role — allows pulling images and writing logs",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:CreateLogGroup",
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": "*"
+      }
+    ]
+  }
+}

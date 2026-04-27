@@ -7,6 +7,8 @@ const {
   runZapScanWithDB,
   getZapScanStatus
 } = require('../services/zapService');
+const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
+const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
 const ZapAlert = require('../models/ZapAlert');
 const { handleScanComplete } = require('../services/notificationService');
@@ -78,42 +80,64 @@ router.post('/scan', auth, scanLimiter, async (req, res) => {
     console.log(`🔐 User ${req.user.id} initiated ZAP scan for: ${url}`);
     console.log(`   Mode: ${quickMode ? 'Quick' : 'Full'}`);
 
-    // Check ZAP health before starting scan
-    const health = await checkZapHealth();
-    if (!health.healthy) {
-      return res.status(503).json({
-        success: false,
-        error: 'ZAP service is not available',
-        details: health.error,
-        message: 'Please ensure ZAP Docker container is running'
-      });
-    }
-
-    // Generate scan ID BEFORE starting scan (Issue #10 fix)
+    // Generate scan ID
     const scanId = `zap-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const userId = req.user.id;
 
-    // Start the scan asynchronously with the pre-generated scanId
-    const scanPromise = runZapScanWithDB(url, req.user.id, { quickMode, scanId });
+    // Create skeleton record immediately so polling shows "queued" during provisioning.
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      {
+        $setOnInsert: {
+          analysisId: scanId,
+          userId,
+          target: url,
+          status: 'queued',
+          zapResult: { status: 'provisioning', phase: 'provisioning', progress: 0, alerts: [] },
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
 
-    // Don't wait for completion - return scan ID immediately
-    scanPromise.then(result => {
-      console.log(`✅ Scan completed for user ${req.user.id}: ${result.scanId}`);
-      // Trigger notification (email + UI popup)
-      handleScanComplete(result.scanId || scanId, req.user.id, 'Public Scan', url);
-    }).catch(error => {
-      console.error(`❌ Scan failed for user ${req.user.id}:`, error.message);
-    });
-
+    // Return immediately — provisioning + scan run in background.
     res.json({
       success: true,
       message: 'ZAP scan initiated',
-      scanId: scanId,
+      scanId,
       analysisId: scanId,
       target: url,
       scanMode: quickMode ? 'quick' : 'full',
       estimatedTime: quickMode ? '5-15 minutes' : '15-60 minutes',
       note: 'Poll /api/zap/status/:scanId for progress updates'
     });
+
+    // Async: provision container → scan → release
+    (async () => {
+      let zapUrl;
+      try {
+        const container = await requestContainer(scanId, 'public');
+        zapUrl = container.zapUrl;
+      } catch (err) {
+        console.error(`❌ Container provisioning failed for scan ${scanId}:`, err.message);
+        await ScanResult.updateOne(
+          { analysisId: scanId },
+          { $set: { status: 'failed', 'zapResult.status': 'failed', 'zapResult.error': 'Container provisioning failed', updatedAt: new Date() } }
+        );
+        return;
+      }
+
+      try {
+        const result = await runZapScanWithDB(url, userId, { quickMode, scanId, zapUrl });
+        console.log(`✅ Scan completed for user ${userId}: ${result.scanId}`);
+        handleScanComplete(result.scanId || scanId, userId, 'Public Scan', url);
+      } catch (error) {
+        console.error(`❌ Scan failed for user ${userId}:`, error.message);
+      } finally {
+        await releaseContainer(scanId);
+      }
+    })();
 
   } catch (error) {
     console.error('❌ ZAP scan error:', error);

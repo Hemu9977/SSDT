@@ -60,6 +60,11 @@ const scanResultSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // ECS Fargate container tracking (null in local/dev mode)
+  zapContainerUrl:     { type: String, default: null },
+  containerTaskArn:    { type: String, default: null },
+  containerStartedAt:  { type: Date,   default: null },
+  containerStoppedAt:  { type: Date,   default: null },
   triggerSource: {
     type: String,
     enum: ['manual', 'scheduled'],

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { analyzeUrl } = require('../services/pageSpeedService');
+const { analyzeUrl } = require('../services/pagespeedService');
 
 // @route   POST /api/pagespeed/analyze
 // @desc    Analyze a URL with PageSpeed Insights

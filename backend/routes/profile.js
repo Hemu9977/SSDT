@@ -4,6 +4,8 @@ const auth = require('../middleware/auth');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
 
+const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
+
 // @route   GET /profile
 // @desc    Get user profile with statistics
 // @access  Private
@@ -64,7 +66,7 @@ router.get('/', auth, async (req, res) => {
     console.error('Profile retrieval error:', err.message);
     res.status(500).json({
       message: 'Server error',
-      error: err.message
+      error: devMsg(err)
     });
   }
 });
@@ -112,7 +114,7 @@ router.put('/', auth, async (req, res) => {
     console.error('Profile update error:', err.message);
     res.status(500).json({
       message: 'Server error',
-      error: err.message
+      error: devMsg(err)
     });
   }
 });
@@ -160,7 +162,7 @@ router.get('/stats', auth, async (req, res) => {
     console.error('Stats retrieval error:', err.message);
     res.status(500).json({
       message: 'Server error',
-      error: err.message
+      error: devMsg(err)
     });
   }
 });
@@ -203,7 +205,7 @@ router.post('/upgrade-to-pro', auth, async (req, res) => {
     console.error('Pro upgrade error:', err.message);
     res.status(500).json({
       message: 'Server error',
-      error: err.message
+      error: devMsg(err)
     });
   }
 });
@@ -246,7 +248,7 @@ router.post('/downgrade-to-free', auth, async (req, res) => {
     console.error('Downgrade error:', err.message);
     res.status(500).json({
       message: 'Server error',
-      error: err.message
+      error: devMsg(err)
     });
   }
 });
