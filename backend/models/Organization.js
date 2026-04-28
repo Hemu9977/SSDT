@@ -22,6 +22,7 @@ const OrganizationSchema = new mongoose.Schema({
   seatsUsed: { type: Number, default: 1 },
   scanLimit: { type: Number, default: 0 },
   scansUsed: { type: Number, default: 0 },
+  targetsUsed: { type: Number, default: 0 },
   oneTimeRemainingScans: { type: Number, default: 0 },
   stripeSubscriptionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },

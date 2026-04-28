@@ -4,185 +4,230 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
-const axios = require('axios'); 
-const User = require('../models/User'); 
+const axios = require('axios');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
-const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService'); 
-const crypto = require('crypto');
+const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
 
-// Initialize Google Client
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-console.log("✅ AUTH ROUTES LOADED - Google Login Enabled"); // <--- This log proves the file is loaded
+console.log("✅ AUTH ROUTES LOADED - Google Login Enabled");
 
-// @route   POST /auth/google
-// @desc    Login or Register with Google
+// GOOGLE LOGIN
 router.post('/google', async (req, res) => {
-  console.log("🔔 Google Login Request Received"); // <--- This log proves the route is hit
   const { token, googleAccessToken } = req.body;
 
   try {
-    let name, email, googleId, picture;
+    let email, googleId;
 
     if (googleAccessToken) {
-      // Flow 1: Access Token (Custom Button)
-      const response = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${googleAccessToken}` }
-      });
-      const data = response.data;
-      name = data.name;
-      email = data.email;
-      googleId = data.sub;
-      picture = data.picture;
+      const response = await axios.get(
+        'https://www.googleapis.com/oauth2/v3/userinfo',
+        {
+          headers: { Authorization: `Bearer ${googleAccessToken}` }
+        }
+      );
+
+      email = response.data.email;
+      googleId = response.data.sub;
+
     } else if (token) {
-      // Flow 2: ID Token (Standard Button)
       const ticket = await client.verifyIdToken({
         idToken: token,
-        audience: process.env.GOOGLE_CLIENT_ID,
+        audience: process.env.GOOGLE_CLIENT_ID
       });
+
       const payload = ticket.getPayload();
-      name = payload.name;
       email = payload.email;
       googleId = payload.sub;
-      picture = payload.picture;
+
     } else {
       return res.status(400).json({ message: 'No token provided' });
     }
 
-    console.log(`Processing Google Login for: ${email}`);
-
-    // Check if user exists
     let user = await User.findOne({ email: email.toLowerCase() });
 
-    if (user) {
-      if (!user.googleId) {
-        user.googleId = googleId;
-        await user.save();
-      }
-    } else {
-      console.log('Creating new user from Google');
-      const randomPassword = crypto.randomBytes(32).toString('hex');
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(randomPassword, salt);
-
-      user = new User({
-        name,
-        email: email.toLowerCase(),
-        password: hashedPassword,
-        googleId,
-        isVerified: true,
-        accountType: 'free'
+    // BLOCK NEW GOOGLE SIGNUPS
+    if (!user) {
+      return res.status(403).json({
+        error: 'ORG_REQUIRED',
+        message: 'You must join an organization via invite or create one via payment.',
+        redirect: '/pricing'
       });
-      await user.save();
     }
 
-    if (!user.isVerified) user.isVerified = true;
+    if (!user.organizationId) {
+      return res.status(403).json({
+        error: 'ORG_REQUIRED',
+        message: 'You must join an organization via invite or create one via payment.',
+        redirect: '/pricing'
+      });
+    }
+
+    if (!user.googleId) {
+      user.googleId = googleId;
+    }
+
     user.lastLoginAt = new Date();
     await user.save();
 
-    const payload = { user: { id: user.id } };
-    jwt.sign(
-      payload,
+    const jwtToken = jwt.sign(
+      { user: { id: user.id } },
       process.env.JWT_SECRET,
-      { expiresIn: '7d' },
-      (err, jwtToken) => {
-        if (err) throw err;
-        res.json({
-          message: 'Google login successful',
-          token: jwtToken,
-          user: { id: user.id, email: user.email, isVerified: user.isVerified }
-        });
-      }
+      { expiresIn: '7d' }
     );
+
+    res.json({
+      message: 'Google login successful',
+      token: jwtToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        isVerified: user.isVerified
+      }
+    });
+
   } catch (err) {
     console.error('Google Auth Error:', err.message);
-    res.status(500).json({ message: 'Google authentication failed', error: err.message });
+    res.status(500).json({
+      message: 'Google authentication failed'
+    });
   }
 });
 
-// Existing Register Route
+// DISABLE DIRECT REGISTRATION
 router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body;
-  try {
-    let user = await User.findOne({ email: email.toLowerCase() });
-    if (user) return res.status(400).json({ message: 'User already exists' });
-
-    user = new User({ name, email: email.toLowerCase(), password });
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(password, salt);
-    await user.save();
-
-    const otp = generateOTP();
-    user.otp = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-    
-    // Attempt email, but don't fail registration if email fails
-    try { await sendOTPEmail(user.email, otp); } catch(e) { console.error("Email failed", e); }
-    
-    res.status(201).json({ message: 'User registered', user: { id: user.id, email: user.email }});
-  } catch (err) {
-    res.status(500).json({ message: 'Server error' });
-  }
+  return res.status(403).json({
+    error: 'ORG_REQUIRED',
+    message: 'You must join an organization via invite or create one via payment.',
+    redirect: '/pricing'
+  });
 });
 
-// Existing Login Route
+// LOGIN
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
+
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
-    const recentlyReset = user.passwordResetAt && (new Date() - user.passwordResetAt) < (86400000);
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    const recentlyReset =
+      user.passwordResetAt &&
+      (new Date() - user.passwordResetAt) < 86400000;
+
     if (recentlyReset) {
-       const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-       return res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true } });
+      const token = jwt.sign(
+        { user: { id: user.id } },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      return res.json({
+        message: 'Login successful',
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          isVerified: true
+        }
+      });
     }
 
     const otp = generateOTP();
     user.otp = otp;
     user.otpExpires = new Date(Date.now() + 600000);
+
     await user.save();
-    try { await sendOTPEmail(user.email, otp); } catch(e) { console.error(e); }
-    res.json({ message: 'Check email for OTP', user: { id: user.id, email: user.email }});
+
+    try {
+      await sendOTPEmail(user.email, otp);
+    } catch (e) {
+      console.error(e);
+    }
+
+    res.json({
+      message: 'Check email for OTP',
+      user: {
+        id: user.id,
+        email: user.email
+      }
+    });
+
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Existing Verify OTP Route
+// VERIFY OTP
 router.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
+
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
+
     if (!user || user.otp !== otp || user.otpExpires < new Date()) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
     }
+
     user.otp = undefined;
     user.otpExpires = undefined;
     user.isVerified = true;
     user.lastLoginAt = new Date();
+
     await user.save();
 
-    const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true }});
+    const token = jwt.sign(
+      { user: { id: user.id } },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        isVerified: true
+      }
+    });
+
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 router.post('/resend-otp', async (req, res) => {
-    /* ... Keep existing resend logic if needed, or minimal stub ... */
-    res.json({message: "OTP sent"});
+  res.json({ message: "OTP sent" });
 });
-router.post('/forgot-password', async (req, res) => { res.json({message: "Reset email sent"}); });
-router.post('/reset-password', async (req, res) => { res.json({message: "Password reset"}); });
+
+router.post('/forgot-password', async (req, res) => {
+  res.json({ message: "Reset email sent" });
+});
+
+router.post('/reset-password', async (req, res) => {
+  res.json({ message: "Password reset" });
+});
+
 router.get('/me', auth, async (req, res) => {
-    try { const user = await User.findById(req.user.id).select('-password'); res.json(user); } 
-    catch(err) { res.status(500).json({message: "Server error"}); }
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 module.exports = router;

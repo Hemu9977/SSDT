@@ -1,5 +1,4 @@
 const rateLimit = require('express-rate-limit');
-const { ipKeyGenerator } = require('express-rate-limit');
 
 // Check if rate limiting is enabled (can be disabled in development)
 const isRateLimitEnabled = process.env.RATE_LIMIT_ENABLED !== 'false';
@@ -53,7 +52,7 @@ const apiLimiter = isRateLimitEnabled ? rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    return req.user?.id || ipKeyGenerator(req);
+    return req.user?.id || req.ip;
   },
   handler: (req, res) => {
     const identifier = req.user?.id ? `User ${req.user.id}` : `IP ${req.ip}`;
@@ -76,6 +75,9 @@ const authLimiter = isRateLimitEnabled ? rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
+  keyGenerator: (req) => {
+    return req.ip;
+  },
   handler: (req, res) => {
     console.log(`🚨 Auth rate limit exceeded for IP: ${req.ip} on ${req.path}`);
     res.status(429).json({
@@ -97,7 +99,7 @@ const scanLimiter = isRateLimitEnabled ? rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    return req.user?.id || ipKeyGenerator(req);
+    return req.user?.id || req.ip;
   },
   handler: (req, res) => {
     const identifier = req.user?.id ? `User ${req.user.id}` : `IP ${req.ip}`;
@@ -121,7 +123,7 @@ const combinedScanLimiter = isRateLimitEnabled ? rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    return req.user?.id || ipKeyGenerator(req);
+    return req.user?.id || req.ip;
   },
   handler: (req, res) => {
     const identifier = req.user?.id ? `User ${req.user.id}` : `IP ${req.ip}`;
@@ -140,4 +142,4 @@ module.exports = {
   authLimiter,
   scanLimiter,
   combinedScanLimiter
-};
+};

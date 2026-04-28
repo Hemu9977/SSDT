@@ -26,7 +26,24 @@ module.exports = async function planCheck(req, res, next) {
     }
 
     if (!user.organizationId) {
-      return res.status(403).json({ success: false, code: 'NO_ORGANIZATION', error: 'PLAN_LIMIT_EXCEEDED', message: 'No organization found for user. Please purchase a plan.' });
+      // 🟡 Stripe payment in progress
+      if (user.stripePending === true) {
+        return res.status(403).json({
+          success: false,
+          code: 'ORG_CREATING',
+          error: 'ORG_CREATING',
+          message: 'Your organization is being created. Please wait a few seconds.',
+          retry: true
+        });
+      }
+
+      return res.status(403).json({
+        success: false,
+        code: 'NO_ORGANIZATION',
+        error: 'ORG_REQUIRED',
+        message: 'You must join an organization via invite or create one via payment.',
+        redirect: '/pricing'
+      });
     }
 
     const result = await consumeScan(user.organizationId);
@@ -43,6 +60,7 @@ module.exports = async function planCheck(req, res, next) {
 
     req.organization = result;
     req.planUser = user;
+
     next();
   } catch (err) {
     console.error('❌ [planCheck] Error:', err.message);

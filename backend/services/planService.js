@@ -21,6 +21,7 @@ async function consumeScan(orgId) {
       {
         $set: {
           scansUsed: 0,
+          targetsUsed: 0,
           lastScanReset: now
         }
       }
@@ -39,7 +40,7 @@ async function consumeScan(orgId) {
   // 🔥 SUBSCRIPTION PLAN
   return Organization.findOneAndUpdate(
     { _id: orgId, scansUsed: { $lt: org.scanLimit } },
-    { $inc: { scansUsed: 1 } },
+    { $inc: { scansUsed: 1, targetsUsed: 1 } },
     { new: true }
   );
 }

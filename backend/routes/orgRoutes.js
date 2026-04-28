@@ -1,106 +1,301 @@
+/**
+ * backend/routes/orgRoutes.js
+ *
+ * Organization invite flow — complete, production-grade implementation.
+ *
+ * Routes:
+ *   POST /api/org/invite              - Send invite (owner/admin only)
+ *   GET  /api/org/invite/:token       - Validate invite token (public)
+ *   POST /api/org/accept-invite       - Accept invite (logged-in OR new user)
+ *   DELETE /api/org/invite/:token     - Cancel/revoke invite (owner/admin only)
+ */
+
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const Organization = require('../models/Organization');
 const Invite = require('../models/Invite');
 const User = require('../models/User');
+const { sendInviteEmail } = require('../services/emailService');
 
-// @route   POST /api/org/invite
-// @desc    Invite user to organization
+// ─── POST /api/org/invite ─────────────────────────────────────────────────────
+// Send an invite. Only owners or admins can invite. Fires email delivery.
 router.post('/invite', auth, async (req, res) => {
   try {
-    const { email, role } = req.body;
+    const { email, role = 'member' } = req.body;
+
     if (!email) return res.status(400).json({ error: 'Email is required' });
 
-    const user = await User.findById(req.user.id);
-    if (!user || !user.organizationId) {
+    const allowedRoles = ['admin', 'member'];
+    if (!allowedRoles.includes(role)) {
+      return res.status(400).json({ error: 'Role must be "admin" or "member"' });
+    }
+
+    const inviter = await User.findById(req.user.id);
+    if (!inviter || !inviter.organizationId) {
       return res.status(400).json({ error: 'User does not belong to an organization' });
     }
 
-    if (!["owner", "admin"].includes(user.role)) {
-      return res.status(403).json({ error: 'Unauthorized: Only owners or admins can invite members' });
+    // Only owners and admins can invite
+    if (!['owner', 'admin'].includes(inviter.role)) {
+      return res.status(403).json({ error: 'Only owners or admins can invite members' });
     }
 
-    const org = await Organization.findById(user.organizationId);
+    // Only owners can invite admins
+    if (role === 'admin' && inviter.role !== 'owner') {
+      return res.status(403).json({ error: 'Only owners can invite admins' });
+    }
+
+    const org = await Organization.findById(inviter.organizationId);
     if (!org) return res.status(404).json({ error: 'Organization not found' });
 
+    // Check seat availability
     if (org.seatsUsed >= org.seatsAllowed) {
-      return res.status(403).json({ error: 'Seat limit reached for this organization' });
+      return res.status(403).json({ error: 'Seat limit reached for this organization. Upgrade your plan to add more members.' });
     }
 
-    // Check if invite exists
-    const existingInvite = await Invite.findOne({ email, organizationId: org._id, status: 'pending' });
-    if (existingInvite) {
-      return res.status(400).json({ error: 'An invite is already pending for this email' });
+    // Block if email already belongs to an org member
+    const existingMember = await User.findOne({ email: email.toLowerCase(), organizationId: org._id });
+    if (existingMember) {
+      return res.status(400).json({ error: 'This user is already a member of your organization' });
     }
 
-    const token = crypto.randomBytes(20).toString('hex');
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
+    // Cancel any pre-existing pending invite for this email + org (re-invite replaces old)
+    await Invite.deleteOne({ email: email.toLowerCase(), organizationId: org._id, status: 'pending' });
+
+    // Generate token and expiry
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
     const invite = new Invite({
-      email,
+      email: email.toLowerCase(),
       organizationId: org._id,
-      role: role || 'member',
+      role,
       token,
       expiresAt
     });
-
     await invite.save();
 
-    res.json({ success: true, message: 'Invite sent', token });
+    // Send invite email — non-blocking (don't fail invite creation if email fails)
+    try {
+      await sendInviteEmail(email.toLowerCase(), {
+        orgName: org.name,
+        inviterName: inviter.name,
+        role,
+        token
+      });
+    } catch (emailErr) {
+      console.error('⚠️  Invite created but email delivery failed:', emailErr.message);
+      // Still return success — token is valid, inviter can share link manually
+      return res.json({
+        success: true,
+        message: 'Invite created. Email delivery failed — share the link manually.',
+        joinLink: `${process.env.CLIENT_URL || 'http://localhost:3000'}/join?token=${token}`,
+        emailDelivered: false
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Invite sent to ${email}`,
+      joinLink: `${process.env.CLIENT_URL || 'http://localhost:3000'}/join?token=${token}`,
+      emailDelivered: true
+    });
   } catch (err) {
     console.error('Invite error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// @route   POST /api/org/accept-invite
-// @desc    Accept an organization invite
-router.post('/accept-invite', auth, async (req, res) => {
+// ─── GET /api/org/invite/:token ───────────────────────────────────────────────
+// Public route — validate a token and return org/role info for the join page.
+router.get('/invite/:token', async (req, res) => {
   try {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Token is required' });
+    const { token } = req.params;
+    const invite = await Invite.findOne({ token });
 
-    const invite = await Invite.findOne({ token, status: 'pending' });
-    if (!invite) return res.status(400).json({ error: 'Invalid or expired invite' });
+    if (!invite) {
+      return res.status(404).json({ error: 'Invalid invite link. It may have already been used or does not exist.' });
+    }
+
+    if (invite.status === 'accepted') {
+      return res.status(400).json({ error: 'This invite has already been accepted.' });
+    }
+
+    if (new Date() > invite.expiresAt) {
+      // Mark expired if not already
+      if (invite.status === 'pending') {
+        invite.status = 'expired';
+        await invite.save();
+      }
+      return res.status(400).json({ error: 'This invite has expired. Ask your team admin for a new invite.' });
+    }
+
+    const org = await Organization.findById(invite.organizationId).select('name planType seatsAllowed seatsUsed');
+    if (!org) {
+      return res.status(404).json({ error: 'Organization not found' });
+    }
+
+    res.json({
+      success: true,
+      invite: {
+        email: invite.email,
+        role: invite.role,
+        orgName: org.name,
+        orgPlan: org.planType,
+        expiresAt: invite.expiresAt
+      }
+    });
+  } catch (err) {
+    console.error('Invite validate error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── POST /api/org/accept-invite ─────────────────────────────────────────────
+// Accepts an invite. Supports two flows:
+//   1. Logged-in user:  { token }  — header: x-auth-token
+//   2. New user:        { token, name, password }  — no auth header required
+router.post('/accept-invite', async (req, res) => {
+  try {
+    const { token, name, password } = req.body;
+    if (!token) return res.status(400).json({ error: 'Invite token is required' });
+
+    // ── Validate invite ──────────────────────────────────────────────────────
+    const invite = await Invite.findOne({ token });
+    if (!invite) return res.status(400).json({ error: 'Invalid invite token' });
+    if (invite.status === 'accepted') return res.status(400).json({ error: 'This invite has already been accepted' });
 
     if (new Date() > invite.expiresAt) {
       invite.status = 'expired';
       await invite.save();
-      return res.status(400).json({ error: 'Invite expired' });
+      return res.status(400).json({ error: 'This invite has expired' });
     }
-
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
 
     const org = await Organization.findById(invite.organizationId);
     if (!org) return res.status(404).json({ error: 'Organization not found' });
 
-    if (org.seatsUsed >= org.seatsAllowed) {
-      return res.status(403).json({ error: 'Organization has no available seats' });
+    // ── Resolve user (logged-in or new registration) ──────────────────────
+    let user = null;
+
+    // Check for auth token in headers (logged-in flow)
+    const authHeader = req.header('Authorization') || '';
+    const legacyToken = req.header('x-auth-token') || '';
+    const rawJwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : legacyToken;
+
+    if (rawJwt) {
+      try {
+        const decoded = jwt.verify(rawJwt, process.env.JWT_SECRET);
+        user = await User.findById(decoded.user.id);
+      } catch (_) {
+        // Token invalid — fall through to new-user registration path
+      }
     }
 
-    // Assign user to org
+    if (!user) {
+      // ── New user registration path ─────────────────────────────────────
+      if (!name || !password) {
+        return res.status(400).json({
+          error: 'Please provide your name and password to create an account',
+          requiresRegistration: true
+        });
+      }
+
+      // Check if email already exists (user registered separately)
+      const existingByEmail = await User.findOne({ email: invite.email });
+      if (existingByEmail) {
+        // User exists but didn't use auth token — tell frontend to log in first
+        return res.status(409).json({
+          error: 'An account with this email already exists. Please log in to accept the invite.',
+          requiresLogin: true,
+          email: invite.email
+        });
+      }
+
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+
+      user = new User({
+        name: name.trim(),
+        email: invite.email,
+        password: hashedPassword,
+        isVerified: true, // Email is confirmed via invite
+        accountType: 'free',
+        lastLoginAt: new Date()
+      });
+      await user.save();
+    }
+
+    // ── Guard: user already in an org ─────────────────────────────────────
+    if (user.organizationId && user.organizationId.toString() === org._id.toString()) {
+      return res.status(400).json({ error: 'You are already a member of this organization' });
+    }
+    if (user.organizationId && user.organizationId.toString() !== org._id.toString()) {
+      return res.status(400).json({ error: 'You already belong to a different organization. Contact support to transfer.' });
+    }
+
+    // ── Seat check ────────────────────────────────────────────────────────
+    if (org.seatsUsed >= org.seatsAllowed) {
+      return res.status(403).json({ error: 'This organization has no available seats' });
+    }
+
+    // ── Assign user to org ────────────────────────────────────────────────
     user.organizationId = org._id;
     user.role = invite.role;
     await user.save();
 
+    // ── Mark invite accepted ──────────────────────────────────────────────
     invite.status = 'accepted';
     await invite.save();
 
-    const actualSeats = await User.countDocuments({ 
-      organizationId: org._id
-    });
-    await Organization.updateOne(
-      { _id: org._id },
-      { $set: { seatsUsed: actualSeats } }
-    );
+    // ── Update seatsUsed (recount from DB for accuracy) ──────────────────
+    const actualSeats = await User.countDocuments({ organizationId: org._id });
+    await Organization.updateOne({ _id: org._id }, { $set: { seatsUsed: actualSeats } });
 
-    res.json({ success: true, message: 'Successfully joined organization' });
+    // ── Issue JWT so frontend can log user in immediately ─────────────────
+    const jwtToken = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      success: true,
+      message: `Welcome to ${org.name}!`,
+      token: jwtToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        organizationId: org._id
+      }
+    });
   } catch (err) {
     console.error('Accept invite error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── DELETE /api/org/invite/:token ───────────────────────────────────────────
+// Cancel a pending invite. Only owners and admins can do this.
+router.delete('/invite/:token', auth, async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const inviter = await User.findById(req.user.id);
+    if (!inviter || !['owner', 'admin'].includes(inviter.role)) {
+      return res.status(403).json({ error: 'Only owners or admins can cancel invites' });
+    }
+
+    const invite = await Invite.findOne({ token, organizationId: inviter.organizationId });
+    if (!invite) return res.status(404).json({ error: 'Invite not found' });
+    if (invite.status !== 'pending') return res.status(400).json({ error: 'This invite is no longer active' });
+
+    await Invite.deleteOne({ _id: invite._id });
+    res.json({ success: true, message: 'Invite cancelled' });
+  } catch (err) {
+    console.error('Cancel invite error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

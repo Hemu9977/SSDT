@@ -13,7 +13,7 @@ const UserSchema = new mongoose.Schema({
   password: {
     type: String,
     // Password is required only if googleId is not present
-    required: function() { return !this.googleId; },
+    required: function () { return !this.googleId; },
   },
   googleId: {
     type: String,
@@ -86,6 +86,10 @@ const UserSchema = new mongoose.Schema({
     enum: ['active', 'canceled', 'past_due', 'trialing', null],
     default: null
   },
+  stripePending: {
+    type: Boolean,
+    default: false
+  },
   // Target-level scan tracking (annual plans: scans per target per month)
   // Stored as a plain object: { 'https://example.com': 2, ... }
   scanUsagePerTarget: {
@@ -93,7 +97,7 @@ const UserSchema = new mongoose.Schema({
     of: Number,
     default: {}
   },
-  // Total distinct targets used this billing period
+  // @deprecated - Use Organization.targetsUsed instead for team-level accuracy
   totalTargetsUsed: {
     type: Number,
     default: 0
@@ -143,18 +147,24 @@ const UserSchema = new mongoose.Schema({
 // ─── METHOD: Check if user has ANY active paid plan ─────────────────────────
 // Returns true for light, basic, pro — any plan with active org subscription.
 // Also supports legacy accountType='pro' for backward compatibility.
-UserSchema.methods.isPro = function() {
+UserSchema.methods.isPro = function (org = null) {
+  // Use organization plan if available, otherwise fallback to user plan
+  const source = org || this;
+
   // Primary check: any paid plan that is currently active
-  if (this.planType && this.subscriptionStatus === 'active') return true;
+  if (source.planType && source.subscriptionStatus === 'active') return true;
   // One-time plans: active if remaining scans > 0
-  if (this.billingCycle === 'onetime' && this.oneTimeRemainingScans > 0) return true;
-  // Legacy check: accountType 'pro' and not expired
-  const isLegacyPro = this.accountType === 'pro' && (this.proExpiresAt && this.proExpiresAt > new Date());
-  return isLegacyPro;
+  if (source.billingCycle === 'onetime' && source.oneTimeRemainingScans > 0) return true;
+  // Legacy check: accountType 'pro' and not expired (only if checking user directly)
+  if (!org) {
+    const isLegacyPro = this.accountType === 'pro' && (this.proExpiresAt && this.proExpiresAt > new Date());
+    return isLegacyPro;
+  }
+  return false;
 };
 
 // ─── METHOD: Reset monthly usage counters when the calendar month rolls over ──
-UserSchema.methods.checkAndResetMonthlyScans = function() {
+UserSchema.methods.checkAndResetMonthlyScans = function () {
   const now = new Date();
   const lastReset = new Date(this.lastResetDate);
 
@@ -170,41 +180,44 @@ UserSchema.methods.checkAndResetMonthlyScans = function() {
 // ─── PLAN DEFINITIONS (single source of truth) ───────────────────────────────
 const PLAN_LIMITS = {
   // Monthly plans
-  light_monthly:  { scansPerMonth: 3,  targetsPerMonth: 3,  scansPerTarget: null, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
-  basic_monthly:  { scansPerMonth: 5,  targetsPerMonth: 5,  scansPerTarget: null, vulnerabilityAccessLevel: 'all',            maxSchedules: 3 },
-  pro_monthly:    { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: null, vulnerabilityAccessLevel: 'all',            maxSchedules: 10 },
+  light_monthly: { scansPerMonth: 3, targetsPerMonth: 3, scansPerTarget: null, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
+  basic_monthly: { scansPerMonth: 5, targetsPerMonth: 5, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 3 },
+  pro_monthly: { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 10 },
   // Annual plans (same quota counts but enforced per-target per month)
-  light_annual:   { scansPerMonth: 3,  targetsPerMonth: 3,  scansPerTarget: 3,  vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
-  basic_annual:   { scansPerMonth: 5,  targetsPerMonth: 5,  scansPerTarget: 5,  vulnerabilityAccessLevel: 'all',            maxSchedules: 3 },
-  pro_annual:     { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: 10, vulnerabilityAccessLevel: 'all',            maxSchedules: 10 },
+  light_annual: { scansPerMonth: 3, targetsPerMonth: 3, scansPerTarget: 3, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
+  basic_annual: { scansPerMonth: 5, targetsPerMonth: 5, scansPerTarget: 5, vulnerabilityAccessLevel: 'all', maxSchedules: 3 },
+  pro_annual: { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: 10, vulnerabilityAccessLevel: 'all', maxSchedules: 10 },
   // One-time / trial
-  trial1_onetime: { scansPerMonth: 1,  targetsPerMonth: 1,  scansPerTarget: 1,  vulnerabilityAccessLevel: 'critical-high', maxSchedules: 0 },
-  trial2_onetime: { scansPerMonth: 2,  targetsPerMonth: 1,  scansPerTarget: 2,  vulnerabilityAccessLevel: 'all',            maxSchedules: 0 },
+  trial1_onetime: { scansPerMonth: 1, targetsPerMonth: 1, scansPerTarget: 1, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 0 },
+  trial2_onetime: { scansPerMonth: 2, targetsPerMonth: 1, scansPerTarget: 2, vulnerabilityAccessLevel: 'all', maxSchedules: 0 },
   // Free / no plan
-  free:           { scansPerMonth: 20, targetsPerMonth: -1, scansPerTarget: null, vulnerabilityAccessLevel: 'all',           maxSchedules: 2 },
+  free: { scansPerMonth: 20, targetsPerMonth: -1, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 2 },
 };
 
 // ─── METHOD: Get account limits (SINGLE SOURCE OF TRUTH) ─────────────────────
-UserSchema.methods.getAccountLimits = function() {
+UserSchema.methods.getAccountLimits = function (org = null) {
+  // Use organization plan if available, otherwise fallback to user plan
+  const source = org || this;
+
   // Derive key
   let key = 'free';
-  if (this.planType && this.billingCycle) {
-    key = `${this.planType}_${this.billingCycle}`;
+  if (source.planType && source.billingCycle) {
+    key = `${source.planType}_${source.billingCycle}`;
   }
 
   const limits = PLAN_LIMITS[key] || PLAN_LIMITS['free'];
 
   return {
-    scansPerMonth:             limits.scansPerMonth,
-    targetsPerMonth:           limits.targetsPerMonth,
-    scansPerTarget:            limits.scansPerTarget,
-    vulnerabilityAccessLevel:  limits.vulnerabilityAccessLevel,
-    maxSchedules:              limits.maxSchedules,
+    scansPerMonth: limits.scansPerMonth,
+    targetsPerMonth: limits.targetsPerMonth,
+    scansPerTarget: limits.scansPerTarget,
+    vulnerabilityAccessLevel: limits.vulnerabilityAccessLevel,
+    maxSchedules: limits.maxSchedules,
     // Legacy fields kept for backward-compat with existing profile/schedule code
-    scansPerDay:               limits.scansPerMonth === -1 ? -1 : Math.ceil(limits.scansPerMonth / 30),
+    scansPerDay: limits.scansPerMonth === -1 ? -1 : Math.ceil(limits.scansPerMonth / 30),
     // All paid plans (light, basic, pro) get the higher file size and priority queue
-    maxFileSize:               this.isPro() ? 100 * 1024 * 1024 : 32 * 1024 * 1024,
-    priorityQueue:             this.isPro()
+    maxFileSize: this.isPro(org) ? 100 * 1024 * 1024 : 32 * 1024 * 1024,
+    priorityQueue: this.isPro(org)
   };
 };
 
