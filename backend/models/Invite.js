@@ -5,7 +5,7 @@ const InviteSchema = new mongoose.Schema({
   organizationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', required: true },
   role: { type: String, enum: ['owner', 'admin', 'member'], default: 'member' },
   token: { type: String, required: true, unique: true },
-  status: { type: String, enum: ['pending', 'accepted'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'accepted', 'expired'], default: 'pending' },
   expiresAt: { type: Date, required: true },
   createdAt: { type: Date, default: Date.now }
 });

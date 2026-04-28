@@ -14,11 +14,16 @@ export const useUser = () => {
 };
 
 export const UserProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem('user_data');
+    return saved ? JSON.parse(saved) : null;
+  });
   const [organization, setOrganization] = useState(null);
   const [limits, setLimits] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [isPro, setIsPro] = useState(false);
+  const [isPro, setIsPro] = useState(() => {
+    return localStorage.getItem('is_pro_user') === 'true';
+  });
 
   const fetchUserProfile = useCallback(async () => {
     const token = localStorage.getItem('token');
@@ -26,6 +31,9 @@ export const UserProvider = ({ children }) => {
     if (!token) {
       setLoading(false);
       setIsPro(false);
+      setUser(null);
+      localStorage.removeItem('is_pro_user');
+      localStorage.removeItem('user_data');
       return;
     }
 
@@ -40,6 +48,9 @@ export const UserProvider = ({ children }) => {
         console.error('❌ UserContext: Failed to fetch profile, status:', res.status);
         if (res.status === 401) {
           console.error('❌ UserContext: 401 Unauthorized — token may be invalid or expired');
+          localStorage.removeItem('token');
+          localStorage.removeItem('is_pro_user');
+          localStorage.removeItem('user_data');
         }
         throw new Error('Failed to fetch profile');
       }
@@ -50,30 +61,31 @@ export const UserProvider = ({ children }) => {
       const userData = data.user;
       const orgData = userData?.organization || null;
 
-      // isPro: true for ANY active paid plan (light, basic, pro, or one-time with scans remaining).
-      // Primary: org subscription status (most reliable after webhook fires).
-      // Fallback: backend-computed user.isPro field (covers edge case before org is created).
-      let proStatus = false;
-      if (orgData) {
-        proStatus = orgData.subscriptionStatus === 'active';
-      } else {
-        // Backend user.isPro is now plan-agnostic (fixed) — safe to use as fallback
-        proStatus = userData?.isPro || false;
-      }
+      // isPro: Strictly true ONLY for the 'pro' plan tier for theming purposes.
+      // Light/Basic users will now correctly see the Orange theme.
+      const currentPlanType = orgData ? orgData.planType : userData?.planType;
+      const isActive = orgData ? orgData.subscriptionStatus === 'active' : userData?.isPro;
+      const proStatus = isActive && currentPlanType === 'pro';
 
-      console.log('🟣 UserContext: isPro =', proStatus, '| org subscriptionStatus =', orgData?.subscriptionStatus);
+      console.log('🟣 UserContext: isPro (theme) =', proStatus, '| planType =', currentPlanType);
+
 
       setUser(userData);
       setOrganization(orgData);
       setLimits(data.limits || null);
       setIsPro(proStatus);
       setLoading(false);
+
+      // Persist to localStorage for hydration on next refresh
+      localStorage.setItem('is_pro_user', proStatus.toString());
+      localStorage.setItem('user_data', JSON.stringify(userData));
     } catch (err) {
       console.error('Failed to fetch user profile:', err);
       setLoading(false);
-      setIsPro(false);
+      // Don't clear localStorage on network error to keep theme stable
     }
   }, []);
+
 
   useEffect(() => {
     console.log('🔵 UserContext: Fetching user profile...');

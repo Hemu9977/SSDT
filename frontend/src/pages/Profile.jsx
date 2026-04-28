@@ -332,9 +332,12 @@ const Profile = () => {
       const data = await res.json();
 
       if (res.ok) {
-        setInviteMessage({ text: 'Invite sent successfully! Note: Email delivery requires SMTP configuration.', type: 'success' });
+        const msg = data.emailDelivered
+          ? `Invite sent to ${inviteEmail}!`
+          : `Invite created. Email delivery failed — share link manually: ${data.joinLink}`;
+        setInviteMessage({ text: msg, type: data.emailDelivered ? 'success' : 'warning' });
         setInviteEmail('');
-        fetchProfile(); // Refresh to show pending invite
+        fetchProfile();
       } else {
         setInviteMessage({ text: data.error || 'Failed to send invite', type: 'error' });
       }
@@ -342,6 +345,24 @@ const Profile = () => {
       setInviteMessage({ text: 'Network error. Please try again.', type: 'error' });
     } finally {
       setInviteLoading(false);
+    }
+  };
+
+  const handleCancelInvite = async (inviteToken) => {
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch(`${API_BASE}/api/org/invite/${inviteToken}`, {
+        method: 'DELETE',
+        headers: { 'x-auth-token': token }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        fetchProfile();
+      } else {
+        setInviteMessage({ text: data.error || 'Failed to cancel invite', type: 'error' });
+      }
+    } catch (err) {
+      setInviteMessage({ text: 'Network error. Please try again.', type: 'error' });
     }
   };
 
@@ -455,8 +476,8 @@ const Profile = () => {
 
               <div className="info-row">
                 <label>Account Type:</label>
-                <span className={`account-type ${user.accountType}`}>
-                  {user.accountType.toUpperCase()}
+                <span className={`account-type ${user.organization?.planType || user.accountType}`}>
+                  {(user.organization?.planType || user.accountType).toUpperCase()}
                 </span>
               </div>
 
@@ -492,6 +513,17 @@ const Profile = () => {
                 <div className="stat-value">{(limits.maxFileSize / (1024 * 1024)).toFixed(0)}MB</div>
                 <div className="stat-label">Max File Size</div>
               </div>
+            </div>
+
+            {/* Usage Information Note */}
+            <div style={{ marginTop: '1.25rem', padding: '1rem', backgroundColor: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', borderLeft: '3px solid #4a5568' }}>
+              <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#e2e8f0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '1.1rem' }}>ℹ️</span> Usage Information
+              </h4>
+              <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.85rem', color: '#a0aec0', lineHeight: '1.6' }}>
+                <li><strong>Scans Used:</strong> Total scans executed by your team this month.</li>
+                <li><strong>Targets Used:</strong> Total scan executions across your organization. Targets currently map 1:1 with scans.</li>
+              </ul>
             </div>
           </div>
 
@@ -640,7 +672,7 @@ const Profile = () => {
                     </div>
                   );
                 })()}
-                <p>Targets used this month: <strong>{user.totalTargetsUsed || 0}</strong>
+                <p>Targets used this month: <strong>{user.organization?.targetsUsed ?? user.totalTargetsUsed ?? 0}</strong>
                   {' / '}
                   {profile.limits.targetsPerMonth === -1 ? '∞' : profile.limits.targetsPerMonth}
                 </p>
@@ -717,8 +749,22 @@ const Profile = () => {
                     <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                       {profile.user.organization.pendingInvites.map((inv, i) => (
                         <li key={i} style={{ padding: '0.75rem', backgroundColor: '#2d3748', borderRadius: '4px', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: 0.8 }}>
-                          <span>{inv.email}</span>
-                          <span style={{ fontSize: '0.8rem', color: '#ecc94b' }}>Pending</span>
+                          <div>
+                            <span style={{ color: '#e2e8f0' }}>{inv.email}</span>
+                            <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: '#a0aec0' }}>({inv.role})</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <span style={{ fontSize: '0.8rem', color: '#ecc94b' }}>Pending</span>
+                            {['owner', 'admin'].includes(profile.user.organization.role) && (
+                              <button
+                                onClick={() => handleCancelInvite(inv.token)}
+                                style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', borderRadius: '4px', border: '1px solid #ff9980', background: 'transparent', color: '#ff9980', cursor: 'pointer' }}
+                                title="Cancel this invite"
+                              >
+                                Revoke
+                              </button>
+                            )}
+                          </div>
                         </li>
                       ))}
                     </ul>

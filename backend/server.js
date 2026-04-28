@@ -105,6 +105,9 @@ app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
 
 // 👇 REGISTER ORGANIZATION ROUTES
 app.use('/api/org', apiLimiter, require('./routes/orgRoutes'));
+// After the /api/org line:
+app.use('/api/notifications', apiLimiter, require('./routes/notificationRoutes'));
+app.use('/api/schedules', apiLimiter, require('./routes/scheduleRoutes'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });

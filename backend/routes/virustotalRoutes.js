@@ -1,3 +1,4 @@
+//virustotalRoutes.js
 const express = require('express');
 const crypto = require('crypto');
 const { getPageSpeedReport } = require('../services/pagespeedService');
@@ -11,6 +12,7 @@ const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pd
 const ScanResult = require('../models/ScanResult');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { handleScanComplete } = require('../services/notificationService');

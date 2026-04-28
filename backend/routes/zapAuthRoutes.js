@@ -4,10 +4,11 @@
  *
  * Base path: /api/zap-auth
  */
-
+//zapAuthRoutes.js
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 const { v4: uuidv4 } = require('uuid');
 const { detectLoginFields } = require('../services/loginDetectionService');

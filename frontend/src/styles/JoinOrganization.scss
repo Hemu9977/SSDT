@@ -1,0 +1,311 @@
+// JoinOrganization.scss — Invite acceptance page styling
+// Consistent with FORTEXA hacking-theme (orange + dark grey)
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;500;600&display=swap');
+
+// ── Layout ──────────────────────────────────────────────────────────────────
+.join-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #050a10;
+  position: relative;
+  padding: 1rem;
+}
+
+// ── Card ─────────────────────────────────────────────────────────────────────
+.join-card {
+  position: relative;
+  z-index: 10;
+  background: rgba(10, 15, 24, 0.92);
+  border: 1px solid #FF6B00;
+  border-radius: 14px;
+  padding: 2.5rem 2.5rem 2rem;
+  width: 100%;
+  max-width: 460px;
+  box-shadow:
+    0 0 40px rgba(255, 107, 0, 0.15),
+    0 20px 60px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(12px);
+  animation: cardIn 0.4s ease;
+
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(20px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+}
+
+// ── Logo ─────────────────────────────────────────────────────────────────────
+.join-logo {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 1.8rem;
+  font-weight: 900;
+  color: #FF6B00;
+  text-align: center;
+  letter-spacing: 5px;
+  margin-bottom: 1.5rem;
+  text-shadow: 0 0 20px rgba(255, 107, 0, 0.5);
+}
+
+// ── Invite Banner ─────────────────────────────────────────────────────────────
+.join-invite-banner {
+  text-align: center;
+  padding: 1.25rem;
+  background: rgba(255, 107, 0, 0.06);
+  border: 1px solid rgba(255, 107, 0, 0.25);
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+}
+
+.join-invite-label {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin: 0 0 0.3rem;
+}
+
+.join-org-name {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #FFA366;
+  margin: 0 0 0.6rem;
+}
+
+.join-role-badge {
+  display: inline-block;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #000;
+  background: #FF6B00;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+}
+
+// ── Loading ────────────────────────────────────────────────────────────────
+.join-loading {
+  text-align: center;
+  color: #888;
+  font-family: 'Inter', sans-serif;
+
+  p { margin-top: 1rem; }
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(255, 107, 0, 0.2);
+  border-top-color: #FF6B00;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto;
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+}
+
+// ── Error Box (invalid token) ─────────────────────────────────────────────────
+.join-error-box {
+  text-align: center;
+
+  .join-error-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: rgba(255, 107, 0, 0.15);
+    border: 2px solid #FF6B00;
+    font-size: 1.4rem;
+    color: #FF6B00;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 1rem;
+  }
+
+  h2 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 1.3rem;
+    color: #fff;
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    font-family: 'Inter', sans-serif;
+    color: #999;
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+    line-height: 1.5;
+  }
+}
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+.join-success {
+  background: rgba(255, 107, 0, 0.12);
+  border: 1px solid rgba(255, 107, 0, 0.4);
+  color: #FFA366;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+  text-align: center;
+}
+
+.join-error {
+  background: rgba(255, 80, 50, 0.1);
+  border: 1px solid rgba(255, 80, 50, 0.4);
+  color: #ff9980;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+  text-align: center;
+}
+
+// ── Choose mode ───────────────────────────────────────────────────────────────
+.join-choose {
+  text-align: center;
+
+  .join-subtitle {
+    font-family: 'Inter', sans-serif;
+    color: #999;
+    font-size: 0.9rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .join-btn { width: 100%; margin-bottom: 0.75rem; }
+}
+
+// ── Form ──────────────────────────────────────────────────────────────────────
+.join-form {
+  h3 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 1rem;
+    color: #FF6B00;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 0.25rem;
+  }
+}
+
+.join-email-notice {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  color: #888;
+  margin-bottom: 1.25rem;
+
+  strong { color: #FFA366; }
+}
+
+.join-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.85rem;
+  color: #888;
+  margin-bottom: 1.25rem;
+
+  strong { color: #FFA366; }
+}
+
+.join-field {
+  margin-bottom: 1rem;
+
+  label {
+    display: block;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #aaa;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 0.4rem;
+  }
+
+  input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 107, 0, 0.25);
+    border-radius: 7px;
+    padding: 0.7rem 0.9rem;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    color: #fff;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    box-sizing: border-box;
+
+    &::placeholder { color: #444; }
+
+    &:focus {
+      border-color: #FF6B00;
+      box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.12);
+    }
+  }
+}
+
+// ── Buttons ───────────────────────────────────────────────────────────────────
+.join-btn {
+  display: block;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border: none;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 0.75rem;
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  &--primary {
+    background: linear-gradient(135deg, #FF6B00, #FFA366);
+    color: #000;
+
+    &:hover:not(:disabled) {
+      background: linear-gradient(135deg, #FFA366, #FF6B00);
+      box-shadow: 0 4px 20px rgba(255, 107, 0, 0.45);
+      transform: translateY(-1px);
+    }
+  }
+
+  &--secondary {
+    background: transparent;
+    border: 1px solid rgba(255, 107, 0, 0.4);
+    color: #FFA366;
+
+    &:hover:not(:disabled) {
+      border-color: #FF6B00;
+      background: rgba(255, 107, 0, 0.08);
+      transform: translateY(-1px);
+    }
+  }
+}
+
+.join-btn--link {
+  background: none;
+  border: none;
+  color: #666;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0.3rem 0;
+  display: block;
+  margin: 0 auto;
+  text-align: center;
+  transition: color 0.2s;
+
+  &:hover { color: #FFA366; }
+}

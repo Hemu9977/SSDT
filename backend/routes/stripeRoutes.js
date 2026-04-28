@@ -17,6 +17,7 @@ const express = require('express');
 const router = express.Router();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const StripeEvent = require('../models/StripeEvent');

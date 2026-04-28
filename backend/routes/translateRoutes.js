@@ -1,7 +1,9 @@
+//translateRoutes.js
 const express = require('express');
 const { translateText } = require('../services/geminiService');
 const TranslationCache = require('../models/TranslationCache');
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 
 const router = express.Router();
 

@@ -3,10 +3,11 @@
  * CRUD API for scan scheduling management.
  * All routes require authentication.
  */
-
+//scheduleRoutes.js
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const ScheduledScan = require('../models/ScheduledScan');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
