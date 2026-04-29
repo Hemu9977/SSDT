@@ -15,6 +15,11 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Explicit OPTIONS handler — belt-and-suspenders in case the global preflight
+// handler in server.js is bypassed (e.g. a future middleware ordering change).
+// CORS headers are already set by app.use(cors(corsOptions)) upstream.
+router.options('/google', (req, res) => res.sendStatus(204));
+
 // @route   POST /auth/google
 // @desc    Login or Register with Google
 router.post('/google', async (req, res) => {

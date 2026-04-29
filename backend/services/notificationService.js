@@ -19,13 +19,21 @@ let io = null;
  * Each authenticated user joins a private room keyed by their userId.
  */
 function initializeSocket(httpServer) {
+  const socketOriginsSet = new Set(
+    (process.env.FRONTEND_URL || 'http://localhost:3000')
+      .split(',').map(o => o.trim()).filter(Boolean)
+  );
+  if (process.env.NODE_ENV !== 'production') {
+    ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:3002']
+      .forEach(o => socketOriginsSet.add(o));
+  }
+
   io = new Server(httpServer, {
     cors: {
-      origin: [
-        process.env.FRONTEND_URL || 'http://localhost:3000',
-        'http://localhost:3001',
-        'http://localhost:3002'
-      ],
+      origin(origin, callback) {
+        if (!origin || socketOriginsSet.has(origin)) return callback(null, true);
+        callback(new Error('Not allowed by CORS'));
+      },
       credentials: true
     }
   });
@@ -85,7 +93,7 @@ function emitScanCompleted(userId, payload) {
  */
 async function handleScanComplete(scanId, userId, scanType, targetUrl) {
   const completedAt = new Date().toISOString();
-  const clientUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const clientUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0].trim();
   let dashboardLink = `${clientUrl}/scan/${scanId}`;
 
   // 0. Fetch scan result to check triggerSource

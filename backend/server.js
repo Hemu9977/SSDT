@@ -28,14 +28,46 @@ if (missingVars.length > 0) {
 
 const app = express();
 
-app.use(helmet());
+app.use(helmet({
+  // Google OAuth popup needs window.closed access across origins;
+  // helmet's default "same-origin" blocks it → use allow-popups variant.
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+}));
 app.set('trust proxy', 1);
 
-const allowedOrigins = [process.env.FRONTEND_URL || 'http://localhost:3000'];
-if (process.env.NODE_ENV !== 'production') {
-  allowedOrigins.push('http://localhost:3002', 'http://localhost:3003');
+// Comma-separated list in FRONTEND_URL supports multiple production domains,
+// e.g. "https://fortexa.aevus.jp"
+const defaultFrontendOrigins = ['https://fortexa.aevus.jp'];
+const rawFrontendOrigins = process.env.FRONTEND_URL;
+if (!rawFrontendOrigins && process.env.NODE_ENV === 'production') {
+  console.warn('[CORS] FRONTEND_URL is not set in production; using safe defaults.');
 }
-app.use(cors({ origin: allowedOrigins, credentials: true }));
+const allowedOriginsSet = new Set(
+  (rawFrontendOrigins || defaultFrontendOrigins.join(','))
+    .split(',').map(o => o.trim()).filter(Boolean)
+);
+if (process.env.NODE_ENV !== 'production') {
+  ['http://localhost:3000', 'http://localhost:3002', 'http://localhost:3003']
+    .forEach(o => allowedOriginsSet.add(o));
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow server-to-server calls (no Origin header) and known origins
+    if (!origin || allowedOriginsSet.has(origin)) return callback(null, true);
+    console.warn(`[CORS] Blocked request from: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-auth-token', 'Authorization'],
+  maxAge: 86400, // cache preflight 24h
+};
+
+app.use(cors(corsOptions));
+// Explicit preflight handler — must come before rate limiters and routes so
+// OPTIONS requests never reach authLimiter or route handlers (which assume a body).
+app.options(/.*/, cors(corsOptions));
 app.use(express.json({ extended: false, limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
