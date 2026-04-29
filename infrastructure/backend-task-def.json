@@ -31,8 +31,9 @@
         { "name": "ECS_ZAP_TASK_DEF",       "value": "ssdt-zap-task" },
         { "name": "RATE_LIMIT_ENABLED",     "value": "true" },
         { "name": "GEMINI_MODEL",           "value": "gemini-2.0-flash" },
-        { "name": "SES_FROM_EMAIL",         "value": "noreply@yourdomain.com" },
-        { "name": "FRONTEND_URL",           "value": "https://yourdomain.com" }
+        { "name": "USE_AWS_SES",             "value": "true" },
+        { "name": "SES_FROM_EMAIL",         "value": "ssdt.nitte@gmail.com" },
+        { "name": "FRONTEND_URL",           "value": "https://fortexa.aevus.jp,https://d30r1phhqv8s7f.cloudfront.net" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

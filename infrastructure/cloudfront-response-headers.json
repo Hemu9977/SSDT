@@ -1,0 +1,138 @@
+{
+  "_comment": "CloudFront Response Headers Policy for SSDT frontend. Apply this policy to your CloudFront distribution's default cache behaviour.",
+  "_howto": "aws cloudfront create-response-headers-policy --response-headers-policy-config file://cloudfront-response-headers.json",
+
+  "Name": "ssdt-security-headers",
+  "Comment": "Security headers for SSDT React SPA",
+
+  "SecurityHeadersConfig": {
+    "StrictTransportSecurity": {
+      "Override": true,
+      "AccessControlMaxAgeSec": 63072000,
+      "IncludeSubdomains": true,
+      "Preload": true
+    },
+
+    "ContentTypeOptions": {
+      "Override": true
+    },
+
+    "FrameOptions": {
+      "FrameOption": "DENY",
+      "Override": true
+    },
+
+    "XSSProtection": {
+      "Protection": true,
+      "ModeBlock": true,
+      "Override": true
+    },
+
+    "ReferrerPolicy": {
+      "ReferrerPolicy": "strict-origin-when-cross-origin",
+      "Override": true
+    },
+
+    "ContentSecurityPolicy": {
+      "Override": true,
+      "ContentSecurityPolicy": "default-src 'self'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.fortexa.aevus.jp wss://api.fortexa.aevus.jp https://accounts.google.com; frame-src https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests;"
+    }
+  },
+
+  "CustomHeadersConfig": {
+    "Items": [
+      {
+        "Header": "Permissions-Policy",
+        "Value": "camera=(), microphone=(), geolocation=(), payment=()",
+        "Override": true
+      },
+      {
+        "Header": "Cache-Control",
+        "Value": "no-cache, no-store, must-revalidate",
+        "Override": false
+      }
+    ]
+  },
+
+  "_caching_strategy": {
+    "hashed_assets": {
+      "path_pattern": "/static/*",
+      "cache_control": "public, max-age=31536000, immutable",
+      "reason": "CRA names these files with content hashes. Old URLs never resolve after a new deploy so eternal caching is safe."
+    },
+    "html_and_root": {
+      "path_pattern": "/*",
+      "cache_control": "no-cache, no-store, must-revalidate",
+      "reason": "index.html must always be fresh so users immediately get the latest chunk hashes."
+    }
+  },
+
+  "_spa_routing": {
+    "custom_error_responses": [
+      {
+        "ErrorCode": 403,
+        "ResponsePagePath": "/index.html",
+        "ResponseCode": "200",
+        "ErrorCachingMinTTL": 0,
+        "reason": "S3 returns 403 for paths that don't exist as S3 keys. Returning index.html lets React Router handle the route."
+      },
+      {
+        "ErrorCode": 404,
+        "ResponsePagePath": "/index.html",
+        "ResponseCode": "200",
+        "ErrorCachingMinTTL": 0
+      }
+    ]
+  },
+
+  "_s3_bucket_policy": {
+    "note": "S3 bucket must block all public access. Grant CloudFront access via Origin Access Control (OAC), not a public bucket policy.",
+    "bucket_policy_template": {
+      "Statement": [
+        {
+          "Sid": "AllowCloudFrontServicePrincipal",
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "cloudfront.amazonaws.com"
+          },
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::REPLACE_WITH_YOUR_BUCKET_NAME/*",
+          "Condition": {
+            "StringEquals": {
+              "AWS:SourceArn": "arn:aws:cloudfront::REPLACE_WITH_ACCOUNT_ID:distribution/REPLACE_WITH_DISTRIBUTION_ID"
+            }
+          }
+        }
+      ]
+    }
+  },
+
+  "_iam_policy_for_deploy": {
+    "note": "Minimal IAM policy for the GitHub Actions deploy user. Attach to a dedicated IAM user or use OIDC federation (recommended).",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "S3SyncFrontend",
+        "Effect": "Allow",
+        "Action": [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::REPLACE_WITH_YOUR_BUCKET_NAME",
+          "arn:aws:s3:::REPLACE_WITH_YOUR_BUCKET_NAME/*"
+        ]
+      },
+      {
+        "Sid": "CloudFrontInvalidate",
+        "Effect": "Allow",
+        "Action": [
+          "cloudfront:CreateInvalidation"
+        ],
+        "Resource": "arn:aws:cloudfront::REPLACE_WITH_ACCOUNT_ID:distribution/REPLACE_WITH_DISTRIBUTION_ID"
+      }
+    ]
+  }
+}
