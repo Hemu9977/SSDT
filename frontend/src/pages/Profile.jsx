@@ -516,11 +516,11 @@ const Profile = () => {
             </div>
 
             {/* Usage Information Note */}
-            <div style={{ marginTop: '1.25rem', padding: '1rem', backgroundColor: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', borderLeft: '3px solid #4a5568' }}>
-              <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: '#e2e8f0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{ fontSize: '1.1rem' }}>ℹ️</span> Usage Information
+            <div className="usage-info-card">
+              <h4>
+                <span>ℹ️</span> Usage Information
               </h4>
-              <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.85rem', color: '#a0aec0', lineHeight: '1.6' }}>
+              <ul>
                 <li><strong>Scans Used:</strong> Total scans executed by your team this month.</li>
                 <li><strong>Targets Used:</strong> Total scan executions across your organization. Targets currently map 1:1 with scans.</li>
               </ul>
@@ -658,15 +658,15 @@ const Profile = () => {
                   const percent = hasLimit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
                   
                   return (
-                    <div style={{ marginTop: '1.25rem', marginBottom: '1rem' }}>
-                      <p style={{ marginBottom: '0.5rem', fontSize: '0.95rem', color: 'var(--text-secondary, #a0aec0)' }}>
-                        Scans used this month: <strong style={{ color: 'var(--text-primary, white)' }}>{used}</strong>
+                    <div className="limit-progress-container">
+                      <p className="limit-progress-text">
+                        Scans used this month: <strong>{used}</strong>
                         {' / '}
-                        <strong style={{ color: 'var(--text-primary, white)' }}>{hasLimit ? limit : '∞'}</strong>
+                        <strong>{hasLimit ? limit : '∞'}</strong>
                       </p>
                       {hasLimit && (
-                        <div style={{ width: '100%', height: '8px', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: '4px', overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: `${percent}%`, backgroundColor: 'var(--accent)', transition: 'width 0.4s ease' }}></div>
+                        <div className="limit-progress-track">
+                          <div className="limit-progress-fill" style={{ width: `${percent}%` }}></div>
                         </div>
                       )}
                     </div>
@@ -696,25 +696,25 @@ const Profile = () => {
 
                 {profile.user.organization.seatsAllowed > 1 ? (
                   <>
-                    <form onSubmit={handleSendInvite} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                    <form onSubmit={handleSendInvite} className="invite-form">
                       <input 
                         type="email" 
                         value={inviteEmail} 
                         onChange={(e) => setInviteEmail(e.target.value)} 
                         placeholder="Email address" 
                         required 
-                        style={{ flex: 1, padding: '0.75rem', borderRadius: '4px', border: '1px solid #4a5568', backgroundColor: '#2d3748', color: 'white' }}
+                        className="invite-input"
                       />
                       <button 
                         type="submit" 
                         disabled={inviteLoading || profile.user.organization.seatsUsed >= profile.user.organization.seatsAllowed}
-                        style={{ padding: '0.75rem 1.5rem', borderRadius: '4px', border: 'none', backgroundColor: 'var(--accent)', color: 'white', cursor: (inviteLoading || profile.user.organization.seatsUsed >= profile.user.organization.seatsAllowed) ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}
+                        className="btn-invite"
                       >
                         {inviteLoading ? 'Sending...' : 'Send Invite'}
                       </button>
                     </form>
                     {inviteMessage.text && (
-                      <div style={{ padding: '0.75rem', marginBottom: '1.5rem', borderRadius: '4px', backgroundColor: inviteMessage.type === 'error' ? 'rgba(245, 101, 101, 0.2)' : 'rgba(72, 187, 120, 0.2)', color: inviteMessage.type === 'error' ? '#fc8181' : '#68d391', border: `1px solid ${inviteMessage.type === 'error' ? '#fc8181' : '#68d391'}` }}>
+                      <div className={`invite-message ${inviteMessage.type}`}>
                         {inviteMessage.text}
                       </div>
                     )}
@@ -728,37 +728,37 @@ const Profile = () => {
                 {/* Member List */}
                 <h3 style={{ fontSize: '1.1rem', marginTop: '1rem', marginBottom: '0.5rem' }}>Active Members</h3>
                 {profile.user.organization.members?.length > 0 ? (
-                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  <ul className="member-list">
                     {profile.user.organization.members.map((m, i) => (
-                      <li key={i} style={{ padding: '0.75rem', backgroundColor: '#2d3748', borderRadius: '4px', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div>
-                          <strong>{m.name || 'User'}</strong> <span style={{ color: '#a0aec0', fontSize: '0.9rem' }}>({m.email})</span>
+                      <li key={i} className="member-item">
+                        <div className="member-info">
+                          <strong>{m.name || 'User'}</strong> <span className="member-email">({m.email})</span>
                         </div>
-                        <span style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', backgroundColor: '#4a5568', borderRadius: '4px', textTransform: 'uppercase' }}>{m.role}</span>
+                        <span className="member-role">{m.role}</span>
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <p style={{ color: '#a0aec0' }}>No active members found.</p>
+                  <p style={{ color: 'var(--foreground-darker)' }}>No active members found.</p>
                 )}
 
                 {/* Pending Invites */}
                 {profile.user.organization.pendingInvites?.length > 0 && (
                   <>
                     <h3 style={{ fontSize: '1.1rem', marginTop: '1.5rem', marginBottom: '0.5rem' }}>Pending Invites</h3>
-                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                    <ul className="member-list">
                       {profile.user.organization.pendingInvites.map((inv, i) => (
-                        <li key={i} style={{ padding: '0.75rem', backgroundColor: '#2d3748', borderRadius: '4px', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: 0.8 }}>
-                          <div>
-                            <span style={{ color: '#e2e8f0' }}>{inv.email}</span>
-                            <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: '#a0aec0' }}>({inv.role})</span>
+                        <li key={i} className="member-item invite-item">
+                          <div className="member-info">
+                            <span className="invite-email">{inv.email}</span>
+                            <span className="invite-role">({inv.role})</span>
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <span style={{ fontSize: '0.8rem', color: '#ecc94b' }}>Pending</span>
+                          <div className="invite-status-group">
+                            <span className="invite-status">Pending</span>
                             {['owner', 'admin'].includes(profile.user.organization.role) && (
                               <button
                                 onClick={() => handleCancelInvite(inv.token)}
-                                style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', borderRadius: '4px', border: '1px solid #ff9980', background: 'transparent', color: '#ff9980', cursor: 'pointer' }}
+                                className="btn-revoke"
                                 title="Cancel this invite"
                               >
                                 Revoke
