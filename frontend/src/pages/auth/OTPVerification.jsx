@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import '../../styles/Auth.scss';
+import { API_BASE } from '../../config/api';
 
 const OTPVerification = () => {
   const [otp, setOtp] = useState('');
@@ -29,8 +30,7 @@ const OTPVerification = () => {
     setError('');
 
     try {
-      // FIX: Use absolute URL http://localhost:3001
-      const response = await fetch('http://localhost:3001/auth/verify-otp', {
+      const response = await fetch(`${API_BASE}/auth/verify-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, otp }),
@@ -60,8 +60,7 @@ const OTPVerification = () => {
     setError('');
 
     try {
-      // FIX: Use absolute URL http://localhost:3001
-      const response = await fetch('http://localhost:3001/auth/resend-otp', {
+      const response = await fetch(`${API_BASE}/auth/resend-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),

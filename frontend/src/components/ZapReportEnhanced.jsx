@@ -5,7 +5,7 @@
 import React, { useState, useEffect } from 'react';
 import '../styles/ZapReportEnhanced.scss';
 
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
     const [expandedAlerts, setExpandedAlerts] = useState(new Set());

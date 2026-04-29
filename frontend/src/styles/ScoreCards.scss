@@ -141,6 +141,30 @@
     }
 }
 
+@media (max-width: 480px) {
+    .score-cards-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.65rem;
+    }
+
+    .score-card {
+        padding: 0.75rem;
+        min-height: 110px;
+    }
+
+    .score-card__title {
+        font-size: 0.75rem;
+    }
+
+    .score-card__value {
+        font-size: 1.25rem;
+    }
+
+    .score-card__label {
+        font-size: 0.75rem;
+    }
+}
+
 /* Dark Mode specific overrides if needed (though variables should handle most) */
 body.dark .score-card {
     /* Ensure backgrounds are deep enough in dark mode */

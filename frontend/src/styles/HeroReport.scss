@@ -320,12 +320,25 @@ body.light {
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
+  .report-container {
+    padding: 1rem;
+    overflow-x: auto;
+  }
+
+  .report-title {
+    font-size: 1.2rem;
+  }
+
   .report-table {
     font-size: 0.75rem;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 
     th,
     td {
-      padding: 0.5rem 0.25rem;
+      padding: 0.5rem 0.4rem;
+      white-space: nowrap;
     }
 
     thead th {
@@ -333,11 +346,15 @@ body.light {
     }
   }
 
-  .report-container {
-    padding: 1rem;
-  }
+  .markdown-content {
+    table {
+      display: block;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
 
-  .report-title {
-    font-size: 1.2rem;
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.2rem; }
+    h3 { font-size: 1.1rem; }
   }
 }

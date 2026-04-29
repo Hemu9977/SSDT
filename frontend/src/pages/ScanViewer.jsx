@@ -5,7 +5,7 @@ import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import '../styles/Hero.scss';
 
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 /**
  * ScanViewer - Loads a historical scan and displays it using the same UI as fresh scans.

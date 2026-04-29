@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../styles/ScanForm.scss';
 
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 const ScanForm = () => {
   const [url, setUrl] = useState('');

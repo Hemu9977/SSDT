@@ -717,11 +717,52 @@ body.light {
 @media (max-width: 640px) {
   .schedule-modal {
     max-width: 100%;
+
+    &__form {
+      padding: 16px;
+      max-height: 70vh;
+    }
+
+    &__header { padding: 16px; }
+    &__actions { padding: 16px; flex-wrap: wrap; }
   }
+
   .form-row {
     flex-direction: column;
+    gap: 0;
   }
+
+  .form-group.half {
+    min-width: unset;
+    width: 100%;
+  }
+
   .day-picker {
     grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+@media (max-width: 400px) {
+  .day-picker {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 5px;
+  }
+
+  .mode-selector {
+    flex-direction: column;
+  }
+
+  .mode-btn {
+    min-width: unset;
+    flex-direction: row;
+    justify-content: flex-start;
+    padding: 0.85rem 1rem;
+    gap: 1rem;
+  }
+
+  .btn-submit,
+  .btn-cancel {
+    width: 100%;
+    padding: 12px;
   }
 }

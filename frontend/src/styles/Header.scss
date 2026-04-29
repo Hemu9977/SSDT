@@ -6,7 +6,8 @@
   padding: 0 2rem;
   border-bottom: 1px solid var(--outline);
   background-color: var(--background);
-  position: relative;
+  position: sticky;
+  top: 0;
   z-index: 1000;
 
   .logo-container {
@@ -15,14 +16,15 @@
     gap: 0.75rem;
     text-decoration: none;
     cursor: pointer;
+    flex-shrink: 0;
 
     .logo {
-      height: 3.2rem;
+      height: 2.8rem;
       width: auto;
     }
 
     h1 {
-      font-size: 1.8rem;
+      font-size: clamp(1.1rem, 3vw, 1.8rem);
       font-family: var(--font-title);
       font-weight: 900;
       margin: 0;
@@ -35,7 +37,43 @@
   .header-controls {
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: 1rem;
+  }
+
+  // Hamburger — hidden on desktop
+  .hamburger {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0.4rem 0.55rem;
+    background: transparent;
+    border: 1px solid var(--outline);
+    border-radius: 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: border-color 0.2s;
+
+    span {
+      display: block;
+      height: 2px;
+      background: var(--accent);
+      border-radius: 2px;
+      transition: transform 0.3s ease, opacity 0.3s ease;
+      transform-origin: center;
+    }
+
+    &.open {
+      border-color: var(--accent);
+
+      span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+      span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+      span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+    }
+
+    &:hover { border-color: var(--accent); }
   }
 
   .signup-button {
@@ -51,6 +89,7 @@
     font-family: var(--font-sans);
     transition: background 0.2s;
     display: inline-block;
+    white-space: nowrap;
 
     &:hover {
       background: var(--accent-light);
@@ -75,6 +114,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
+    white-space: nowrap;
 
     &:hover {
       background-color: var(--accent);
@@ -95,18 +135,69 @@
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
     animation: badge-pulse 3s infinite;
   }
+
+  // Tablet: 768px – 900px — tighter spacing
+  @media (min-width: 768px) and (max-width: 900px) {
+    padding: 0 1.25rem;
+
+    .header-controls { gap: 0.5rem; }
+
+    .schedules-link,
+    .profile-button,
+    .logout-button {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
+    }
+
+    .signup-button {
+      padding: 0.5rem 0.9rem;
+      font-size: 0.85rem;
+    }
+  }
+
+  // Mobile: ≤ 767px — hamburger nav
+  @media (max-width: 767px) {
+    padding: 0 1rem;
+
+    .hamburger {
+      display: flex;
+    }
+
+    .header-controls {
+      // Off by default; becomes fixed dropdown when open
+      display: none;
+      position: fixed;
+      top: var(--header-height);
+      left: 0;
+      right: 0;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.75rem;
+      background: var(--background);
+      border-bottom: 2px solid var(--accent);
+      padding: 1.25rem 1.5rem;
+      z-index: 999;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+
+      &.open {
+        display: flex;
+      }
+
+      .signup-button,
+      .profile-button,
+      .logout-button,
+      .schedules-link {
+        text-align: center;
+        justify-content: center;
+        padding: 0.85rem 1rem;
+        font-size: 1rem;
+      }
+    }
+  }
 }
 
 @keyframes badge-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.4);
-  }
-
-  70% {
-    box-shadow: 0 0 0 6px rgba(168, 85, 247, 0);
-  }
-
-  100% {
-    box-shadow: 0 0 0 0 rgba(168, 85, 247, 0);
-  }
+  0%   { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.4); }
+  70%  { box-shadow: 0 0 0 6px rgba(168, 85, 247, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0); }
 }

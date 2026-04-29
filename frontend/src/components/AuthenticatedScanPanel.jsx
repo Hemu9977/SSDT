@@ -9,6 +9,8 @@ import '../styles/AuthenticatedScan.scss';
 import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 
+import { API_BASE } from '../config/api';
+
 // Loading placeholder for progressive loading (same as Hero.jsx)
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
   <div
@@ -16,8 +18,6 @@ const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) =
     style={{ height, width, minHeight: height, ...style }}
   />
 );
-
-const API_BASE = 'http://localhost:3001';
 
 const STEPS = [
   { id: 1, label: 'Configure' },

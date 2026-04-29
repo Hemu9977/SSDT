@@ -1,7 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
-// Define API Base URL - proxy doesn't work reliably in development
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 const UserContext = createContext();
 

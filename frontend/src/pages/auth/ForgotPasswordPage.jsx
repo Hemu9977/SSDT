@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
+import { API_BASE } from '../../config/api';
 
 const ForgotPasswordPage = () => {
   const [email, setEmail] = useState('');
@@ -16,8 +17,7 @@ const ForgotPasswordPage = () => {
     setError('');
 
     try {
-      // FIX: Use absolute URL http://localhost:3001
-      const response = await fetch('http://localhost:3001/auth/forgot-password', {
+      const response = await fetch(`${API_BASE}/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),

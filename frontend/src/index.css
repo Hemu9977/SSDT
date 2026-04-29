@@ -65,3 +65,33 @@ a {
 a:hover {
   text-decoration: underline;
 }
+
+/* ─── Responsive globals ─── */
+html {
+  overflow-x: hidden;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Fluid spacing tokens */
+@media (max-width: 768px) {
+  :root {
+    --section-padding: 1rem;
+    --card-padding: 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  :root {
+    --section-padding: 0.75rem;
+    --card-padding: 0.75rem;
+    --header-height: 3.5rem;
+  }
+}

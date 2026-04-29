@@ -9,8 +9,7 @@ import '../styles/Hero.scss';
 import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 
-// Define API Base URL to avoid port mismatch issues
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 // 🔄 Loading Placeholder Component for progressive loading
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (

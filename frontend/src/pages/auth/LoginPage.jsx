@@ -8,6 +8,7 @@ import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
 import '../../styles/Auth.scss';
+import { API_BASE } from '../../config/api';
 
 const LoginPage = () => {
   const [email, setEmail] = useState('');
@@ -18,14 +19,13 @@ const LoginPage = () => {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  // Google Login (Already correct)
   const googleLogin = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
       setLoading(true);
       setMessage('');
       setError('');
       try {
-        const response = await fetch('http://localhost:3001/auth/google', {
+        const response = await fetch(`${API_BASE}/auth/google`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ googleAccessToken: tokenResponse.access_token }),
@@ -50,7 +50,6 @@ const LoginPage = () => {
     onError: () => setError('Google Login Failed'),
   });
 
-  // Manual Login - FIXED URL
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -58,8 +57,7 @@ const LoginPage = () => {
     setError('');
 
     try {
-      // CHANGED: Use absolute URL to hit Backend directly (Bypasses Frontend Proxy 431 Error)
-      const response = await fetch('http://localhost:3001/auth/login', {
+      const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),

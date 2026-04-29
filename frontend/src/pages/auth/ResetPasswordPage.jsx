@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
+import { API_BASE } from '../../config/api';
 
 const ResetPasswordPage = () => {
   const { token } = useParams();
@@ -40,8 +41,7 @@ const ResetPasswordPage = () => {
     }
 
     try {
-      // FIX: Use absolute URL http://localhost:3001
-      const response = await fetch('http://localhost:3001/auth/reset-password', {
+      const response = await fetch(`${API_BASE}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token, password }),

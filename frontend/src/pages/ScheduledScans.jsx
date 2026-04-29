@@ -13,8 +13,7 @@ import ScheduleScanModal from '../components/ScheduleScanModal';
 import { useUser } from '../contexts/UserContext';
 import '../styles/LandingPage.scss';
 import '../styles/ScheduledScans.scss';
-
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 const STATUS_CONFIG = {
   scheduled: { label: 'Scheduled', color: '#00b8d4', icon: '' },

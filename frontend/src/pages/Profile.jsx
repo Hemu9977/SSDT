@@ -5,8 +5,7 @@ import ParticleBackground from '../components/ParticleBackground';
 import ConfirmDialog from '../components/ConfirmDialog';
 import '../styles/Profile.scss';
 
-// Define API Base URL - proxy doesn't work reliably in development
-const API_BASE = 'http://localhost:3001';
+import { API_BASE } from '../config/api';
 
 const Profile = () => {
   const [profile, setProfile] = useState(null);
