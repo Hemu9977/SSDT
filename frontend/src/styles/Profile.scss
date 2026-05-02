@@ -133,6 +133,7 @@
     padding: 1px;
     background: linear-gradient(135deg, rgba(255, 107, 0, 0.15), transparent);
     -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     -webkit-mask-composite: xor;
     mask-composite: exclude;
     opacity: 0.4;
@@ -283,6 +284,7 @@
       padding: 1px;
       background: linear-gradient(135deg, rgba(255, 107, 0, 0.12), transparent);
       -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
       -webkit-mask-composite: xor;
       mask-composite: exclude;
       opacity: 0.35;
@@ -336,6 +338,7 @@
       padding: 1px;
       background: linear-gradient(135deg, rgba(0, 176, 198, 0.08), transparent);
       -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
       -webkit-mask-composite: xor;
       mask-composite: exclude;
       opacity: 0.25;

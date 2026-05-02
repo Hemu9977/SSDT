@@ -26,12 +26,11 @@ if (missingVars.length > 0) {
 
 const app = express();
 
-// ─── STRIPE WEBHOOK — must come BEFORE express.json() —───────────────────────────
+// ─── STRIPE WEBHOOK — must come BEFORE express.json() ────────────────────────
 // Stripe requires the raw body (Buffer) to verify the webhook signature.
 // Mounting it here with express.raw() ensures json() middleware is NOT applied.
 if (process.env.STRIPE_SECRET_KEY) {
-  const stripeWebhookHandler = require('./routes/stripeRoutes');
-  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookHandler);
+  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
   console.log('✅ Stripe webhook endpoint mounted at /api/stripe/webhook');
 }
 
@@ -61,10 +60,11 @@ app.set('trust proxy', 1);
 
 app.use(cors({
   origin: [
-    process.env.CLIENT_URL || 'http://localhost:3000',
+    process.env.CLIENT_URL,
+    'http://localhost:3000',
     'http://localhost:3002',
     'http://localhost:3003'
-  ],
+  ].filter(Boolean),
   credentials: true
 }));
 app.use(express.json({ extended: false, limit: '10mb' }));

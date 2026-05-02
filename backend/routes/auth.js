@@ -18,7 +18,7 @@ router.post('/google', async (req, res) => {
   const { token, googleAccessToken } = req.body;
 
   try {
-    let email, googleId;
+    let email, googleId, name;
 
     if (googleAccessToken) {
       const response = await axios.get(
@@ -30,6 +30,7 @@ router.post('/google', async (req, res) => {
 
       email = response.data.email;
       googleId = response.data.sub;
+      name = response.data.name || email.split('@')[0];
 
     } else if (token) {
       const ticket = await client.verifyIdToken({
@@ -40,6 +41,7 @@ router.post('/google', async (req, res) => {
       const payload = ticket.getPayload();
       email = payload.email;
       googleId = payload.sub;
+      name = payload.name || email.split('@')[0];
 
     } else {
       return res.status(400).json({ message: 'No token provided' });
@@ -47,29 +49,22 @@ router.post('/google', async (req, res) => {
 
     let user = await User.findOne({ email: email.toLowerCase() });
 
-    // BLOCK NEW GOOGLE SIGNUPS
     if (!user) {
-      return res.status(403).json({
-        error: 'ORG_REQUIRED',
-        message: 'You must join an organization via invite or create one via payment.',
-        redirect: '/pricing'
+      user = new User({
+        name,
+        email: email.toLowerCase(),
+        googleId,
+        isVerified: true,
+        accountType: 'free'
       });
+      await user.save();
+    } else {
+      if (!user.googleId) {
+        user.googleId = googleId;
+      }
+      user.lastLoginAt = new Date();
+      await user.save();
     }
-
-    if (!user.organizationId) {
-      return res.status(403).json({
-        error: 'ORG_REQUIRED',
-        message: 'You must join an organization via invite or create one via payment.',
-        redirect: '/pricing'
-      });
-    }
-
-    if (!user.googleId) {
-      user.googleId = googleId;
-    }
-
-    user.lastLoginAt = new Date();
-    await user.save();
 
     const jwtToken = jwt.sign(
       { user: { id: user.id } },
@@ -95,13 +90,47 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// DISABLE DIRECT REGISTRATION
+// REGISTER
 router.post('/register', async (req, res) => {
-  return res.status(403).json({
-    error: 'ORG_REQUIRED',
-    message: 'You must join an organization via invite or create one via payment.',
-    redirect: '/pricing'
-  });
+  const { name, email, password } = req.body;
+
+  try {
+    let user = await User.findOne({ email: email.toLowerCase() });
+
+    if (user) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const otp = generateOTP();
+
+    user = new User({
+      name,
+      email: email.toLowerCase(),
+      password: hashedPassword,
+      accountType: 'free',
+      otp,
+      otpExpires: new Date(Date.now() + 600000)
+    });
+
+    await user.save();
+
+    try {
+      await sendOTPEmail(user.email, otp);
+    } catch (e) {
+      console.error('Failed to send OTP email during registration:', e);
+    }
+
+    res.status(201).json({
+      message: 'Registration successful. Check your email for the OTP.'
+    });
+
+  } catch (err) {
+    console.error('Registration error:', err);
+    res.status(500).json({ message: 'Server error during registration' });
+  }
 });
 
 // LOGIN

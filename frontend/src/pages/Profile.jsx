@@ -10,14 +10,14 @@ const API_BASE = 'http://localhost:3001';
 
 // Plan metadata for display
 const PLAN_META = {
-  light_monthly:  { label: 'Light',  cycle: 'Monthly',  price: '$9/mo',   scans: 3,  targets: 3 },
-  basic_monthly:  { label: 'Basic',  cycle: 'Monthly',  price: '$19/mo',  scans: 5,  targets: 5 },
-  pro_monthly:    { label: 'Pro',    cycle: 'Monthly',  price: '$39/mo',  scans: 10, targets: 10 },
-  light_annual:   { label: 'Light',  cycle: 'Annual',   price: '$89/yr',  scans: 3,  targets: 3 },
-  basic_annual:   { label: 'Basic',  cycle: 'Annual',   price: '$179/yr', scans: 5,  targets: 5 },
-  pro_annual:     { label: 'Pro',    cycle: 'Annual',   price: '$349/yr', scans: 10, targets: 10 },
-  trial1_onetime: { label: 'Trial 1',cycle: 'One-time', price: '$5',      scans: 1,  targets: 1 },
-  trial2_onetime: { label: 'Trial 2',cycle: 'One-time', price: '$9',      scans: 2,  targets: 1 },
+  light_monthly: { label: 'Light', cycle: 'Monthly', price: '$9/mo', scans: 3, targets: 3 },
+  basic_monthly: { label: 'Basic', cycle: 'Monthly', price: '$19/mo', scans: 5, targets: 5 },
+  pro_monthly: { label: 'Pro', cycle: 'Monthly', price: '$39/mo', scans: 10, targets: 10 },
+  light_annual: { label: 'Light', cycle: 'Annual', price: '$89/yr', scans: 3, targets: 3 },
+  basic_annual: { label: 'Basic', cycle: 'Annual', price: '$179/yr', scans: 5, targets: 5 },
+  pro_annual: { label: 'Pro', cycle: 'Annual', price: '$349/yr', scans: 10, targets: 10 },
+  trial1_onetime: { label: 'Trial 1', cycle: 'One-time', price: '$5', scans: 1, targets: 1 },
+  trial2_onetime: { label: 'Trial 2', cycle: 'One-time', price: '$9', scans: 2, targets: 1 },
 };
 
 const Profile = () => {
@@ -99,7 +99,7 @@ const Profile = () => {
     if (!isPaymentSuccess) return;
 
     let attempts = 0;
-    const maxAttempts = 15;
+    const maxAttempts = 30;
     let pollInterval;
 
     const checkPlanStatus = async () => {
@@ -126,7 +126,7 @@ const Profile = () => {
         }
 
         const data = await res.json();
-        
+
         // Check if plan is active
         const org = data.user?.organization;
         const planIsActive = (org && org.subscriptionStatus === 'active') || (data.user && data.user.planType);
@@ -134,13 +134,13 @@ const Profile = () => {
         if (planIsActive) {
           console.log('✅ Payment Activation Polling: Active plan detected!');
           clearInterval(pollInterval);
-          
+
           // Immediately update frontend state
           setProfile(data);
           setFormData({ name: data.user.name, bio: data.user.bio || '' });
 
           setSaveMessage('✅ Payment successful! Your plan is now active.');
-          
+
           // Remove ?payment=success from URL to prevent re-polling on refresh
           window.history.replaceState({}, document.title, window.location.pathname);
 
@@ -155,7 +155,7 @@ const Profile = () => {
             try {
               const pendingAction = JSON.parse(pendingActionRaw);
               const isRecent = (Date.now() - pendingAction.timestamp) < 30 * 60 * 1000; // 30 min window
-              
+
               if (isRecent && pendingAction.type === 'scan') {
                 localStorage.removeItem('pendingAction');
                 setSaveMessage('✅ Payment successful! Returning to scan in 2 seconds...');
@@ -174,7 +174,7 @@ const Profile = () => {
         } else {
           // Keep polling, notify user on first attempt
           if (attempts === 1) {
-             setSaveMessage('Processing payment and activating plan...');
+            setSaveMessage('Processing payment and activating plan...');
           }
         }
       } catch (err) {
@@ -266,7 +266,7 @@ const Profile = () => {
           'x-auth-token': token
         },
         body: JSON.stringify({
-          planType:     selectedPlan.planType,
+          planType: selectedPlan.planType,
           billingCycle: selectedPlan.billingCycle
         })
       });
@@ -656,7 +656,7 @@ const Profile = () => {
                   const limit = user.organization?.scanLimit || profile.limits.scansPerMonth;
                   const hasLimit = limit !== -1 && limit > 0;
                   const percent = hasLimit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-                  
+
                   return (
                     <div className="limit-progress-container">
                       <p className="limit-progress-text">
@@ -697,16 +697,16 @@ const Profile = () => {
                 {profile.user.organization.seatsAllowed > 1 ? (
                   <>
                     <form onSubmit={handleSendInvite} className="invite-form">
-                      <input 
-                        type="email" 
-                        value={inviteEmail} 
-                        onChange={(e) => setInviteEmail(e.target.value)} 
-                        placeholder="Email address" 
-                        required 
+                      <input
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="Email address"
+                        required
                         className="invite-input"
                       />
-                      <button 
-                        type="submit" 
+                      <button
+                        type="submit"
                         disabled={inviteLoading || profile.user.organization.seatsUsed >= profile.user.organization.seatsAllowed}
                         className="btn-invite"
                       >

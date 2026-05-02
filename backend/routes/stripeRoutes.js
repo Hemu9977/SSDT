@@ -26,14 +26,14 @@ const StripeEvent = require('../models/StripeEvent');
 // Create these products/prices in your Stripe dashboard and set the env vars.
 // Fallback values are placeholders — replace with real price IDs.
 const PRICE_IDS = {
-  light_monthly:  process.env.STRIPE_PRICE_LIGHT_MONTHLY  || 'price_light_monthly',
-  basic_monthly:  process.env.STRIPE_PRICE_BASIC_MONTHLY  || 'price_basic_monthly',
-  pro_monthly:    process.env.STRIPE_PRICE_PRO_MONTHLY    || 'price_pro_monthly',
-  light_annual:   process.env.STRIPE_PRICE_LIGHT_ANNUAL   || 'price_light_annual',
-  basic_annual:   process.env.STRIPE_PRICE_BASIC_ANNUAL   || 'price_basic_annual',
-  pro_annual:     process.env.STRIPE_PRICE_PRO_ANNUAL     || 'price_pro_annual',
-  trial1_onetime: process.env.STRIPE_PRICE_TRIAL1         || 'price_trial1',
-  trial2_onetime: process.env.STRIPE_PRICE_TRIAL2         || 'price_trial2',
+  light_monthly: process.env.STRIPE_PRICE_LIGHT_MONTHLY || 'price_light_monthly',
+  basic_monthly: process.env.STRIPE_PRICE_BASIC_MONTHLY || 'price_basic_monthly',
+  pro_monthly: process.env.STRIPE_PRICE_PRO_MONTHLY || 'price_pro_monthly',
+  light_annual: process.env.STRIPE_PRICE_LIGHT_ANNUAL || 'price_light_annual',
+  basic_annual: process.env.STRIPE_PRICE_BASIC_ANNUAL || 'price_basic_annual',
+  pro_annual: process.env.STRIPE_PRICE_PRO_ANNUAL || 'price_pro_annual',
+  trial1_onetime: process.env.STRIPE_PRICE_TRIAL1 || 'price_trial1',
+  trial2_onetime: process.env.STRIPE_PRICE_TRIAL2 || 'price_trial2',
 };
 
 // One-time plan scan allocations
@@ -98,10 +98,10 @@ router.post('/create-checkout-session', auth, async (req, res) => {
       line_items: [{ price: priceId, quantity: 1 }],
       mode: isOnetime ? 'payment' : 'subscription',
       success_url: `${frontendBase}/profile?payment=success&plan=${key}`,
-      cancel_url:  `${frontendBase}/profile?payment=cancelled`,
+      cancel_url: `${frontendBase}/profile?payment=cancelled`,
       metadata: {
-        userId:       user._id.toString(),
-        planType:     planType,
+        userId: user._id.toString(),
+        planType: planType,
         billingCycle: billingCycle
       }
     };
@@ -139,13 +139,13 @@ router.get('/subscription', auth, async (req, res) => {
     res.json({
       success: true,
       plan: {
-        planType:              user.planType,
-        billingCycle:          user.billingCycle,
-        subscriptionStatus:    user.subscriptionStatus,
-        stripeSubscriptionId:  user.stripeSubscriptionId,
+        planType: user.planType,
+        billingCycle: user.billingCycle,
+        subscriptionStatus: user.subscriptionStatus,
+        stripeSubscriptionId: user.stripeSubscriptionId,
         oneTimeRemainingScans: user.oneTimeRemainingScans,
-        monthlyScansUsed:      org ? org.scansUsed : 0,
-        proExpiresAt:          user.proExpiresAt
+        monthlyScansUsed: org ? org.scansUsed : 0,
+        proExpiresAt: user.proExpiresAt
       }
     });
   } catch (err) {
@@ -186,21 +186,31 @@ router.post('/cancel-subscription', auth, async (req, res) => {
 // IMPORTANT: This route is mounted with express.raw() — not express.json()
 // That mounting happens in server.js BEFORE the global express.json() middleware.
 router.post('/webhook', async (req, res) => {
+  console.log("🔥 Webhook hit");
+  console.log("Is Buffer:", req.body instanceof Buffer);
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
   let event;
   try {
     if (webhookSecret) {
+      if (!Buffer.isBuffer(req.body)) {
+        throw new Error('Webhook payload must be a Buffer for signature verification');
+      }
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
     } else {
-      // Dev mode: no webhook secret configured — parse raw body manually
-      console.warn('⚠️  STRIPE_WEBHOOK_SECRET not set — skipping signature verification (dev only)');
-      event = JSON.parse(req.body.toString());
+      console.warn('⚠️ STRIPE_WEBHOOK_SECRET not set — dev mode');
+
+      if (Buffer.isBuffer(req.body)) {
+        event = JSON.parse(req.body.toString());
+      } else {
+        event = req.body; // fallback if already parsed
+      }
     }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
-    return res.status(400).json({ error: `Webhook Error: ${err.message}` });
+    // FIX 1: Return 400 so Stripe knows signature verification failed and can retry
+    return res.status(400).json({ error: 'Webhook signature verification failed' });
   }
 
   try {
@@ -210,6 +220,7 @@ router.post('/webhook', async (req, res) => {
       return res.json({ received: true });
     }
 
+    console.log(`🔔 [webhook] Received event: ${event.type}`);
     switch (event.type) {
 
       // ── Checkout completed (both subscription and one-time) ──────────────────
@@ -253,8 +264,9 @@ router.post('/webhook', async (req, res) => {
 
     await StripeEvent.create({ eventId: event.id });
   } catch (err) {
-    console.error(`❌ Error processing webhook ${event.type}:`, err.message);
-    // Still return 200 so Stripe does not retry — log for manual review
+    console.error(`❌ Error processing webhook ${event?.type}:`, err.message, err.stack);
+    // FIX 2: Return 500 so Stripe retries delivery — DB update did NOT succeed
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
 
   res.json({ received: true });
@@ -263,14 +275,25 @@ router.post('/webhook', async (req, res) => {
 // ─── WEBHOOK HANDLERS ─────────────────────────────────────────────────────────
 
 async function handleCheckoutComplete(session) {
+  console.log(`🚀 [webhook] Starting checkout.session.completed for session ${session.id}`);
   const { userId, planType, billingCycle } = session.metadata || {};
-  if (!userId) { console.error('❌ [webhook] checkout.session.completed missing userId in metadata'); return; }
+
+  // FIX 3: Validate all required metadata fields up front before touching the DB
+  if (!userId) {
+    throw new Error('checkout.session.completed missing userId in metadata');
+  }
+  if (!planType || !billingCycle) {
+    throw new Error(`checkout.session.completed missing planType or billingCycle in metadata for session ${session.id}`);
+  }
+  const key = `${planType}_${billingCycle}`;
+  if (!PRICE_IDS[key]) {
+    throw new Error(`checkout.session.completed unknown plan key: ${key} for session ${session.id}`);
+  }
+
+  console.log(`✅ [webhook] Checkout complete for user ${userId}: plan=${key}`);
 
   const user = await User.findById(userId);
-  if (!user) { console.error(`❌ [webhook] User ${userId} not found`); return; }
-
-  const key = `${planType}_${billingCycle}`;
-  console.log(`✅ [webhook] Checkout complete for user ${userId}: plan=${key}`);
+  if (!user) { throw new Error(`User ${userId} not found`); }
 
   let org;
   if (user.organizationId) {
@@ -285,7 +308,8 @@ async function handleCheckoutComplete(session) {
     });
     user.organizationId = org._id;
     user.role = 'owner';
-    await user.save();
+    // FIX 5: Do NOT save user here — deferred to final Promise.all below
+    // so org is fully configured before anything is written to DB
   }
 
   org.planType = planType || null;
@@ -315,9 +339,8 @@ async function handleCheckoutComplete(session) {
 
   org.scansUsed = 0;
   org.lastScanReset = new Date();
-  await org.save();
 
-  // Legacy fallback for UI logic
+  // Legacy fallback for UI logic — set all user fields before saving
   user.planType = planType || null;
   user.billingCycle = billingCycle || null;
   user.subscriptionStatus = 'active';
@@ -329,12 +352,15 @@ async function handleCheckoutComplete(session) {
     const months = billingCycle === 'annual' ? 12 : 1;
     user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
   }
-    // Mark accountType as 'paid' for any active subscription plan (not just pro)
-    if (['pro', 'basic', 'light'].includes(planType)) {
-      user.accountType = 'paid';
-    }
-  await user.save();
-  console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}`);
+  // Mark accountType as 'paid' for any active subscription plan (not just pro)
+  if (['pro', 'basic', 'light'].includes(planType)) {
+    user.accountType = 'paid';
+  }
+
+  // FIX 4 + 5: Run both saves in parallel — eliminates sequential write latency
+  // and closes the partial-state window from the early user.save() that was here before
+  await Promise.all([org.save(), user.save()]);
+  console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}. DB update complete.`);
 }
 
 async function handleInvoicePaid(invoice) {
@@ -362,11 +388,11 @@ async function handleInvoicePaid(invoice) {
   }
 
   // Renew: reset monthly counters and extend expiry
-  user.subscriptionStatus  = 'active';
+  user.subscriptionStatus = 'active';
   user.stripeSubscriptionId = invoice.subscription;
-  user.totalTargetsUsed    = 0;
-  user.scanUsagePerTarget  = {};
-  user.lastResetDate       = new Date();
+  user.totalTargetsUsed = 0;
+  user.scanUsagePerTarget = {};
+  user.lastResetDate = new Date();
 
   const months = user.billingCycle === 'annual' ? 12 : 1;
   user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
@@ -393,12 +419,12 @@ async function handleSubscriptionDeleted(subscription) {
     await org.save();
   }
 
-  user.subscriptionStatus   = 'canceled';
-  user.planType             = null;
-  user.billingCycle         = null;
+  user.subscriptionStatus = 'canceled';
+  user.planType = null;
+  user.billingCycle = null;
   user.stripeSubscriptionId = null;
-  user.accountType          = 'free';
-  user.proExpiresAt         = null;
+  user.accountType = 'free';
+  user.proExpiresAt = null;
   await user.save();
   console.log(`🚫 [webhook] Subscription deleted — user ${user.id} downgraded to free`);
 }
