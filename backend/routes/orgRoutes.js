@@ -53,8 +53,12 @@ router.post('/invite', auth, async (req, res) => {
     const org = await Organization.findById(inviter.organizationId);
     if (!org) return res.status(404).json({ error: 'Organization not found' });
 
-    // Check seat availability
-    if (org.seatsUsed >= org.seatsAllowed) {
+    // Check seat availability including pending invites
+    const pendingInvitesCount = await Invite.countDocuments({ 
+      organizationId: org._id, 
+      status: 'pending' 
+    });
+    if (org.seatsUsed + pendingInvitesCount >= org.seatsAllowed) {
       return res.status(403).json({ error: 'Seat limit reached for this organization. Upgrade your plan to add more members.' });
     }
 
@@ -165,15 +169,14 @@ router.post('/accept-invite', async (req, res) => {
     const { token, name, password } = req.body;
     if (!token) return res.status(400).json({ error: 'Invite token is required' });
 
-    // ── Validate invite ──────────────────────────────────────────────────────
-    const invite = await Invite.findOne({ token });
-    if (!invite) return res.status(400).json({ error: 'Invalid invite token' });
-    if (invite.status === 'accepted') return res.status(400).json({ error: 'This invite has already been accepted' });
-
-    if (new Date() > invite.expiresAt) {
-      invite.status = 'expired';
-      await invite.save();
-      return res.status(400).json({ error: 'This invite has expired' });
+    // ── Validate and atomically accept invite ──────────────────────────────
+    const invite = await Invite.findOneAndUpdate(
+      { token, status: 'pending', expiresAt: { $gt: new Date() } },
+      { status: 'accepted' },
+      { new: true }
+    );
+    if (!invite) {
+      return res.status(400).json({ error: 'Invalid, expired, or already accepted invite token' });
     }
 
     const org = await Organization.findById(invite.organizationId);
@@ -249,8 +252,7 @@ router.post('/accept-invite', async (req, res) => {
     await user.save();
 
     // ── Mark invite accepted ──────────────────────────────────────────────
-    invite.status = 'accepted';
-    await invite.save();
+    // Invite is already marked accepted atomically above
 
     // ── Update seatsUsed (recount from DB for accuracy) ──────────────────
     const actualSeats = await User.countDocuments({ organizationId: org._id });

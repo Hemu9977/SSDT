@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const axios = require('axios');
+const crypto = require('crypto');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
@@ -243,11 +244,59 @@ router.post('/resend-otp', async (req, res) => {
 });
 
 router.post('/forgot-password', async (req, res) => {
-  res.json({ message: "Reset email sent" });
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: 'Email required' });
+
+  try {
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.json({ message: "If that email exists, a reset link has been sent." });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour
+    await user.save();
+
+    try {
+      await sendResetPasswordEmail(user.email, resetToken);
+    } catch (e) {
+      console.error('Failed to send reset email:', e);
+    }
+
+    res.json({ message: "If that email exists, a reset link has been sent." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 router.post('/reset-password', async (req, res) => {
-  res.json({ message: "Password reset" });
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) return res.status(400).json({ message: 'Token and new password required' });
+
+  try {
+    const user = await User.findOne({ 
+      resetPasswordToken: token,
+      resetPasswordExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired reset token' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    user.passwordResetAt = new Date();
+    await user.save();
+
+    res.json({ message: "Password successfully reset. You can now log in." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 router.get('/me', auth, async (req, res) => {

@@ -22,10 +22,11 @@ function initializeSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
       origin: [
+        process.env.CLIENT_URL,
         'http://localhost:3000',
         'http://localhost:3001',
         'http://localhost:3002'
-      ],
+      ].filter(Boolean),
       credentials: true
     }
   });

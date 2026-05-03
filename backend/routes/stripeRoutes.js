@@ -90,8 +90,10 @@ router.post('/create-checkout-session', auth, async (req, res) => {
       });
       customerId = customer.id;
       user.stripeCustomerId = customerId;
-      await user.save();
     }
+
+    user.stripePending = true;
+    await user.save();
 
     const sessionParams = {
       customer: customerId,
@@ -356,6 +358,8 @@ async function handleCheckoutComplete(session) {
   if (['pro', 'basic', 'light'].includes(planType)) {
     user.accountType = 'paid';
   }
+
+  user.stripePending = false;
 
   // FIX 4 + 5: Run both saves in parallel — eliminates sequential write latency
   // and closes the partial-state window from the early user.save() that was here before
