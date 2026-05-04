@@ -28,6 +28,7 @@ const { runUrlScan } = require('./urlscanService');
 const { startAsyncZapScan } = require('./zapService');
 const { startAsyncWebCheckScan } = require('./webCheckService');
 const { refineReport } = require('./geminiService');
+const { sanitizeScanForLLM } = require('./geminiSanitizer');
 
 const { consumeScan } = require('./planService');
 
@@ -420,15 +421,28 @@ async function finalizeRunningScans() {
           
           let aiReport = null;
           try {
+            const safeScan = sanitizeScanForLLM(scan);
             if (isAuthScan) {
-              aiReport = await refineReport(scan.target, scan.authScanResult || scan.zapResult);
-            } else {
+              // Auth scan: pass sanitized auth/zap result in the correct slot (zapReport)
               aiReport = await refineReport(
-                scan.target, 
-                scan.zapResult, 
-                scan.pagespeedResult, 
-                scan.observatoryResult, 
-                scan.urlscanResult
+                null,                                         // _unused
+                safeScan.pagespeedResult  || null,           // psiReport
+                safeScan.observatoryResult || null,           // observatoryReport
+                safeScan.target,                             // url (= "REDACTED")
+                safeScan.authScanResult || safeScan.zapResult, // zapReport
+                safeScan.urlscanResult  || null,             // urlscanReport
+                safeScan.webCheckResult || null              // webCheckReport
+              );
+            } else {
+              // Public scan: correct arg order
+              aiReport = await refineReport(
+                null,                          // _unused
+                safeScan.pagespeedResult,      // psiReport
+                safeScan.observatoryResult,    // observatoryReport
+                safeScan.target,               // url (= "REDACTED")
+                safeScan.zapResult,            // zapReport
+                safeScan.urlscanResult,        // urlscanReport
+                safeScan.webCheckResult        // webCheckReport
               );
             }
           } catch (aiErr) {

@@ -1,4 +1,10 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const {
+  sanitizeRefinedReportForLLM,
+  sanitizeHistoryRowsForLLM,
+  sanitizeTextsForLLM,
+  assertNoLeakage,
+} = require('./geminiSanitizer');
 
 // Model name is configurable via GEMINI_MODEL env var
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
@@ -113,7 +119,9 @@ async function refineReport(_unused, psiReport, observatoryReport, url, zapRepor
         const webCheckQuality = webCheckReport?.quality || {};
 
         // Build the prompt for Gemini
-        const prompt = `You are a cybersecurity and web performance expert. Analyze the following reports for the URL: ${url}
+        // NOTE: url is always "REDACTED" when called correctly via sanitizeScanForLLM().
+        // The prompt header deliberately omits the live URL to prevent identity leakage.
+        const prompt = `You are a cybersecurity and web performance expert. Analyze the following security scan reports for a web target.
 
 Performance Analysis Report:
 - Performance Score: ${performanceScore}/100
@@ -204,6 +212,7 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Ensure ALL scores (Performance, Accessibility, Best Practices, SEO, Security Grade, vulnerability counts, and web security configuration findings if available) are mentioned in the analysis`;
 
         // Generate the refined report
+        assertNoLeakage(prompt, 'refineReport');
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const refinedReport = response.text();
@@ -315,6 +324,7 @@ ${markdownReport}
 
 OUTPUT (clean plain text only):`;
 
+      assertNoLeakage(prompt, 'formatReportForPdf');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const formattedText = response.text().trim();
@@ -567,6 +577,7 @@ IMPORTANT RULES:
   - Do NOT invent rows that are not in the input
 `;
 
+      assertNoLeakage(scanDataText, 'formatScanDataForPdf');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let jsonText = response.text().trim();
@@ -640,10 +651,12 @@ async function formatScanHistoryForPdf(scanHistoryRows) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+      // Sanitize executor emails before sending to Gemini (M-01)
+      const safeRows = sanitizeHistoryRowsForLLM(rows);
       const prompt = `Generate the Scan History table content for a professional bilingual PDF report (English and Japanese).
 
 INPUT (JSON array):
-${JSON.stringify(rows, null, 2)}
+${JSON.stringify(safeRows, null, 2)}
 
 Return ONLY valid JSON with this EXACT structure:
 {
@@ -669,6 +682,7 @@ CRITICAL RULES:
    - cancelled/stopped -> Cancelled / 停止
 5. Do NOT add any text outside of the JSON.`;
 
+      assertNoLeakage(prompt, 'formatScanHistoryForPdf');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let jsonText = response.text().trim();
@@ -853,10 +867,13 @@ async function formatAiAnalysisForPdf(markdownReport) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+      // Strip any URLs / IPs that Gemini may have embedded in the stored report
+      // during the original refineReport() call — prevents a second-pass re-leak.
+      const cleanMarkdownReport = sanitizeRefinedReportForLLM(markdownReport);
       const prompt = `Convert this security analysis report into a structured JSON format for a professional PDF document.
 
 REPORT:
-${markdownReport}
+${cleanMarkdownReport}
 
 Return a JSON object with this EXACT structure:
 {
@@ -924,6 +941,7 @@ EXAMPLE OF COMPLETE VS INCOMPLETE:
 
 
 
+      assertNoLeakage(prompt, 'formatAiAnalysisForPdf');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let jsonText = response.text().trim();
@@ -978,10 +996,13 @@ async function translateAiAnalysisToJapanese(formattedAnalysis) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+      // Sanitize the formatted analysis to strip any embedded URLs/IPs before
+      // sending to Gemini for translation (C-07, C-08 — compound re-leakage).
+      const safeAnalysisText = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
       const prompt = `Translate this security analysis JSON from English to Japanese. Keep the exact same structure, only translate the text content.
 
 INPUT JSON:
-${JSON.stringify(formattedAnalysis, null, 2)}
+${safeAnalysisText}
 
 CRITICAL RULES - MUST FOLLOW STRICTLY:
 
@@ -1024,6 +1045,7 @@ EXAMPLE OF COMPLETE VS INCOMPLETE TRANSLATION:
 
 OUTPUT (Japanese JSON only):`;
 
+      assertNoLeakage(prompt, 'translateAiAnalysisToJapanese');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let jsonText = response.text().trim();
@@ -1079,6 +1101,11 @@ async function translateToJapanese(formattedAnalysis, vulnerabilities) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+      // Sanitize both inputs to strip embedded URLs/IPs before translation
+      // (C-07 / C-08 — AI report + vuln detail compound re-leakage).
+      const safeAnalysisJson = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
+      const safeVulnJson     = sanitizeRefinedReportForLLM(JSON.stringify(vulnerabilities, null, 2));
+
       const prompt = `You are translating a security report from English to Japanese. You need to translate TWO things in a SINGLE response:
 
 1. AI Security Analysis (JSON object)
@@ -1091,10 +1118,10 @@ Return a JSON object with this structure:
 }
 
 INPUT AI ANALYSIS:
-${JSON.stringify(formattedAnalysis, null, 2)}
+${safeAnalysisJson}
 
 INPUT VULNERABILITIES:
-${JSON.stringify(vulnerabilities, null, 2)}
+${safeVulnJson}
 
 CRITICAL RULES - MUST FOLLOW STRICTLY:
 
@@ -1129,6 +1156,7 @@ EXAMPLE OF COMPLETE VS INCOMPLETE TRANSLATION:
 
 OUTPUT (Japanese JSON object only):`;
 
+      assertNoLeakage(prompt, 'translateToJapanese');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let jsonText = response.text().trim();
@@ -1211,9 +1239,12 @@ async function translateText(texts, targetLang) {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+      // Sanitize texts to strip URLs / IPs before sending to Gemini (M-07)
+      const safeTexts = sanitizeTextsForLLM(texts);
+
       // Build input as JSON object with numeric keys
       const inputObj = {};
-      texts.forEach((text, idx) => {
+      safeTexts.forEach((text, idx) => {
         inputObj[idx] = text;
       });
 
@@ -1231,6 +1262,7 @@ CRITICAL RULES:
 
 OUTPUT (JSON object only):`;
 
+      assertNoLeakage(prompt, 'translateText');
       const result = await model.generateContent(prompt);
       const response = await result.response;
       let translatedText = response.text().trim();

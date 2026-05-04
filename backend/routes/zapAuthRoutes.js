@@ -31,6 +31,7 @@ const { startAsyncWebCheckScan, getFullResults } = require('../services/webCheck
 const { refineReport } = require('../services/geminiService');
 const User = require('../models/User');
 const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+const { sanitizeScanForLLM } = require('../services/geminiSanitizer');
 
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
@@ -459,30 +460,40 @@ router.get('/status/:scanId', auth, async (req, res) => {
         console.log('[ZAP-AUTH] All scans finished. Generating Gemini AI report...');
         try {
           const freshScan = await ScanResult.findOne({ analysisId: scanId, userId: req.user.id });
-          const psiReport = freshScan.pagespeedResult?.error ? null : freshScan.pagespeedResult;
-          const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
-          const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
+
+          // Sanitize freshScan before any data reaches Gemini — strips target URL,
+          // domain, IPs, DNS records from the object graph.
+          // Original freshScan is NOT mutated; DB writes still use freshScan.
+          const llmSafeScan = sanitizeScanForLLM(freshScan);
+
+          const psiReport = llmSafeScan.pagespeedResult?.error ? null : llmSafeScan.pagespeedResult;
+          const observatoryReport = llmSafeScan.observatoryResult?.error ? null : llmSafeScan.observatoryResult;
+          const urlscanReport = llmSafeScan.urlscanResult?.error ? null : llmSafeScan.urlscanResult;
 
           // Use auth ZAP data for the report — apply plan filter BEFORE sending to AI
           const authZapCompleted = freshScan.authScanResult?.status === 'completed';
           const aiAccessLevel = await resolveVulnAccessLevel(req.user.id);
           const zapReport = authZapCompleted
-            ? getSanitizedZapReport(freshScan.authScanResult, aiAccessLevel, freshScan.target)
+            ? getSanitizedZapReport(llmSafeScan.authScanResult, aiAccessLevel, llmSafeScan.target)
             : null;
 
-          // WebCheck data
+          // WebCheck data — retrieve then sanitize DNS/IPs
           let webCheckReport = null;
           const freshWebCheck = freshScan.webCheckResult;
           const wcCompleted = freshWebCheck?.status === 'completed' || freshWebCheck?.status === 'completed_partial' || freshWebCheck?.status === 'completed_with_errors';
           if (wcCompleted) {
-            webCheckReport = await getFullResults(freshWebCheck);
+            const rawWebCheck = await getFullResults(freshWebCheck);
+            if (rawWebCheck) {
+              const sanitizedWC = sanitizeScanForLLM({ webCheckResult: { fullResults: rawWebCheck } });
+              webCheckReport = sanitizedWC?.webCheckResult?.fullResults || rawWebCheck;
+            }
           }
 
           const aiReport = await refineReport(
             null,
             psiReport,
             observatoryReport,
-            freshScan.target,
+            llmSafeScan.target,   // "REDACTED"
             zapReport,
             urlscanReport,
             webCheckReport

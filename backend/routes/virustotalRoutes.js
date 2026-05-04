@@ -17,6 +17,7 @@ const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { handleScanComplete } = require('../services/notificationService');
 const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+const { sanitizeScanForLLM } = require('../services/geminiSanitizer');
 
 /**
  * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for req.user.
@@ -863,17 +864,24 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
         }
 
         try {
+          // Sanitize freshScan before any data reaches Gemini — strips target URL,
+          // domain, IPs, DNS records, user emails from the object graph.
+          // Original freshScan is NOT mutated; all DB writes still use freshScan.
+          const llmSafeScan = sanitizeScanForLLM(freshScan);
+
           // Prepare data for Gemini (with or without ZAP results depending on success)
-          const psiReport = freshScan.pagespeedResult?.error ? null : freshScan.pagespeedResult;
-          const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
-          const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
+          const psiReport = llmSafeScan.pagespeedResult?.error ? null : llmSafeScan.pagespeedResult;
+          const observatoryReport = llmSafeScan.observatoryResult?.error ? null : llmSafeScan.observatoryResult;
+          const urlscanReport = llmSafeScan.urlscanResult?.error ? null : llmSafeScan.urlscanResult;
 
           // Include ZAP data if scan completed — apply plan filter BEFORE sending to AI
+          // getSanitizedZapReport uses freshZapResult (raw) for plan-level filtering;
+          // sanitizeScanForLLM already stripped identity fields from llmSafeScan.zapResult.
           const freshZapStatus = freshZapResult?.status;
           const freshZapCompleted = freshZapStatus === 'completed' || freshZapStatus === 'completed_partial';
           const geminiAccessLevel = await resolveVulnAccessLevel(req.user.id);
           const zapReport = freshZapCompleted
-            ? getSanitizedZapReport(freshZapResult, geminiAccessLevel, freshScan.target)
+            ? getSanitizedZapReport(llmSafeScan.zapResult, geminiAccessLevel, llmSafeScan.target)
             : null;
 
           // Include WebCheck data if scan completed (fully or partially)
@@ -883,11 +891,15 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           // Use getFullResults to handle both inline and GridFS storage
           let webCheckReport = null;
           if (freshWebCheckCompleted) {
-            webCheckReport = await getFullResults(freshWebCheckResult);
-            if (!webCheckReport) {
+            // Retrieve from GridFS / inline, then sanitize DNS+IPs before passing to Gemini
+            const rawWebCheck = await getFullResults(freshWebCheckResult);
+            if (!rawWebCheck) {
               console.warn('⚠️ WebCheck marked complete but could not retrieve results');
             } else {
-              console.log(`📊 WebCheck results retrieved: ${Object.keys(webCheckReport).length} scan types`);
+              console.log(`📊 WebCheck results retrieved: ${Object.keys(rawWebCheck).length} scan types`);
+              // Wrap in a minimal object so sanitizeScanForLLM can reach dns.a etc.
+              const sanitizedWC = sanitizeScanForLLM({ webCheckResult: { fullResults: rawWebCheck } });
+              webCheckReport = sanitizedWC?.webCheckResult?.fullResults || rawWebCheck;
             }
           }
 
@@ -896,7 +908,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
             null,
             psiReport,
             observatoryReport,
-            freshScan.target,
+            llmSafeScan.target,   // "REDACTED"
             zapReport,
             urlscanReport,
             webCheckReport
