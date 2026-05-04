@@ -24,7 +24,6 @@ const JoinOrganization = () => {
 
   // Form fields
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
@@ -55,8 +54,7 @@ const JoinOrganization = () => {
           setValidationError(data.error || 'Invalid invite link');
         } else {
           setInviteInfo(data.invite);
-          // Pre-fill email for both forms
-          setEmail(data.invite.email);
+          // Pre-fill the login form's email (register form reads inviteInfo.email directly)
           setLoginEmail(data.invite.email);
         }
       } catch (_) {

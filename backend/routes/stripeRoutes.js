@@ -180,8 +180,8 @@ router.post('/cancel-subscription', auth, async (req, res) => {
       cancelAt: new Date(subscription.cancel_at * 1000)
     });
   } catch (err) {
-    console.error('❌ Cancel subscription error:', err.message);
-    res.status(500).json({ error: 'Failed to cancel subscription', details: err.message });
+    console.error('❌ Cancel subscription error:', err);
+    res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 });
 
