@@ -29,6 +29,17 @@ const { scanHost } = require('../services/observatoryService');
 const { runUrlScan } = require('../services/urlscanService');
 const { startAsyncWebCheckScan, getFullResults } = require('../services/webCheckService');
 const { refineReport } = require('../services/geminiService');
+const User = require('../models/User');
+const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+
+/** Resolve plan-based vulnerability access level; defaults to most restrictive. */
+async function resolveVulnAccessLevel(userId) {
+  try {
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt');
+    if (u) return u.getAccountLimits().vulnerabilityAccessLevel || 'critical-high';
+  } catch (_) { /* non-fatal */ }
+  return 'critical-high';
+}
 
 // In-memory lock to prevent parallel Gemini AI report calls for the same scan
 const geminiInProgress = new Set();
@@ -452,15 +463,12 @@ router.get('/status/:scanId', auth, async (req, res) => {
           const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
           const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
 
-          // Use auth ZAP data for the report
+          // Use auth ZAP data for the report — apply plan filter BEFORE sending to AI
           const authZapCompleted = freshScan.authScanResult?.status === 'completed';
-          const zapReport = authZapCompleted ? {
-            site: freshScan.target,
-            riskCounts: freshScan.authScanResult.riskCounts,
-            alerts: freshScan.authScanResult.alerts,
-            totalAlerts: freshScan.authScanResult.totalAlerts,
-            totalOccurrences: freshScan.authScanResult.totalOccurrences
-          } : null;
+          const aiAccessLevel = await resolveVulnAccessLevel(req.user.id);
+          const zapReport = authZapCompleted
+            ? getSanitizedZapReport(freshScan.authScanResult, aiAccessLevel, freshScan.target)
+            : null;
 
           // WebCheck data
           let webCheckReport = null;
@@ -538,12 +546,13 @@ router.get('/status/:scanId', auth, async (req, res) => {
       tests_quantity: scan.observatoryResult.tests_quantity
     } : null;
 
-    // Auth ZAP data (mapped to same format as normal zapData)
+    // Auth ZAP data (mapped to same format as normal zapData) — plan-filtered
+    const statusAccessLevel = await resolveVulnAccessLevel(req.user.id);
     let zapData = null;
     if (scan.authScanResult) {
       const s = scan.authScanResult.status;
       if (s === 'completed') {
-        zapData = {
+        const rawZapData = {
           status: 'completed',
           riskCounts: scan.authScanResult.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 },
           alerts: scan.authScanResult.alerts || [],
@@ -552,6 +561,7 @@ router.get('/status/:scanId', auth, async (req, res) => {
           reportFiles: scan.authScanResult.reportFiles || [],
           site: scan.target
         };
+        zapData = getSanitizedZapData(rawZapData, statusAccessLevel);
       } else if (s === 'running' || s === 'pending') {
         zapData = {
           status: s,
@@ -751,19 +761,15 @@ router.get('/detailed-report/:scanId', auth, async (req, res) => {
       return res.status(404).json({ error: 'Detailed report not found' });
     }
 
-    const stream = gridfsService.downloadFileStream(detailedFile.fileId, 'zap_auth_reports');
+    // Download raw buffer, apply plan filter, then send filtered JSON
+    const accessLevel = await resolveVulnAccessLevel(req.user.id);
+    const rawBuf = await gridfsService.downloadFile(detailedFile.fileId, 'zap_auth_reports');
+    const rawAlerts = JSON.parse(rawBuf.toString('utf-8'));
+    const filteredAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
 
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="${detailedFile.filename}"`);
-
-    stream.on('error', (streamError) => {
-      console.error('[ZAP-AUTH] GridFS stream error:', streamError);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to stream report file' });
-      }
-    });
-
-    stream.pipe(res);
+    res.json(filteredAlerts);
   } catch (error) {
     console.error('[ZAP-AUTH] Download error:', error);
     if (!res.headersSent) {
@@ -808,7 +814,8 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
 
     console.log(`[ZAP-AUTH] Generating PDF (${lang.toUpperCase()}) for scan: ${scanId}`);
 
-    const pdfBuffer = await generateZapPdf(scanResultForPdf, lang);
+    const pdfAccessLevel = await resolveVulnAccessLevel(req.user.id);
+    const pdfBuffer = await generateZapPdf(scanResultForPdf, lang, pdfAccessLevel);
 
     const filename = `zap_auth_vulnerability_report_${scanId}_${lang}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');

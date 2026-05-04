@@ -5,6 +5,17 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 const { scanLimiter } = require('../middleware/rateLimiter');
+const User = require('../models/User');
+const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
+
+/** Resolve plan-based vulnerability access level; defaults to most restrictive. */
+async function resolveVulnAccessLevel(userId) {
+  try {
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt');
+    if (u) return u.getAccountLimits().vulnerabilityAccessLevel || 'critical-high';
+  } catch (_) { /* non-fatal */ }
+  return 'critical-high';
+}
 const {
   checkZapHealth,
   runZapScanWithDB,
@@ -220,6 +231,7 @@ router.get('/scans', auth, async (req, res) => {
     const ScanResult = require('../models/ScanResult');
 
     // Find all scans with zapResult for this user
+    const accessLevel = await resolveVulnAccessLevel(req.user.id);
     const scans = await ScanResult.find({
       userId: req.user.id,
       zapResult: { $exists: true }
@@ -238,7 +250,7 @@ router.get('/scans', auth, async (req, res) => {
         zapStatus: scan.zapResult?.status,
         phase: scan.zapResult?.phase,
         urlsFound: scan.zapResult?.urlsFound,
-        alerts: scan.zapResult?.alerts,
+        alerts: getSanitizedAlerts(scan.zapResult?.alerts || [], accessLevel),
         progress: scan.zapResult?.progress,
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt
@@ -552,8 +564,9 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
 
     console.log(`📄 Generating ZAP PDF (${lang.toUpperCase()}) for scan: ${scanId}`);
 
+    const pdfAccessLevel = await resolveVulnAccessLevel(req.user.id);
     // Generate PDF
-    const pdfBuffer = await generateZapPdf(scanResult, lang);
+    const pdfBuffer = await generateZapPdf(scanResult, lang, pdfAccessLevel);
 
     // Send PDF response
     const filename = `zap_vulnerability_report_${scanId}_${lang}.pdf`;

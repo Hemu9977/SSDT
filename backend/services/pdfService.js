@@ -16,6 +16,7 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { getSanitizedAlerts } = require('../utils/vulnFilter');
 
 let puppeteer;
 try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
@@ -532,7 +533,7 @@ function buildTemplateStaticOverrides(base, { lang, scanData }) {
 
 // ─── GridFS helper ──────────────────────────────────────────────────────────────
 
-async function fetchFullAlertsFromGridFS(scanResult, zapSection) {
+async function fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel) {
   if (!zapSection || !scanResult.zapResult?.reportFiles?.length) return;
   const file = scanResult.zapResult.reportFiles.find(f => f.filename?.includes('detailed_alerts'));
   if (!file?.fileId) return;
@@ -540,7 +541,9 @@ async function fetchFullAlertsFromGridFS(scanResult, zapSection) {
     const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
     const buf    = await gridfsService.downloadFile(file.fileId, bucket);
     const full   = JSON.parse(buf.toString('utf-8'));
-    zapSection.detailedAlerts = full.map(a => ({
+    // Apply plan filter before building the alerts array for the PDF
+    const filtered = getSanitizedAlerts(full, accessLevel);
+    zapSection.detailedAlerts = filtered.map(a => ({
       name: a.alert, risk: a.risk, confidence: a.confidence,
       description: a.description || 'No description available',
       solution:    a.solution    || 'No solution provided',
@@ -548,7 +551,7 @@ async function fetchFullAlertsFromGridFS(scanResult, zapSection) {
       cweid: a.cweid, wascid: a.wascid,
       totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0
     }));
-    console.log(`✅ Loaded ${zapSection.detailedAlerts.length} full alerts from GridFS`);
+    console.log(`✅ Loaded ${zapSection.detailedAlerts.length} plan-filtered alerts from GridFS`);
   } catch (e) {
     console.warn(`⚠️ GridFS fetch failed: ${e.message}`);
   }
@@ -1238,7 +1241,7 @@ async function generatePdfReport(scanResult) {
 /**
  * Generate a single-language PDF (EN or JA).
  */
-async function generateSingleLanguagePdf(scanResult, lang = 'en') {
+async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 'critical-high') {
   console.log(`📄 Starting ${lang.toUpperCase()} PDF generation…`);
   const isJa = lang === 'ja';
 
@@ -1254,7 +1257,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en') {
   await ensureGeminiScanHistory(scanData, scanHistoryRows);
 
   const zapSection = scanData.sections?.find(s => s.id === 'zap');
-  await fetchFullAlertsFromGridFS(scanResult, zapSection);
+  await fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel);
 
   await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
 
@@ -1336,7 +1339,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en') {
 /**
  * Generate a ZAP-only vulnerability PDF.
  */
-async function generateZapPdf(scanResult, lang = 'en') {
+async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-high') {
   console.log(`📄 Starting ZAP ${lang.toUpperCase()} PDF generation…`);
   const isJa = lang === 'ja';
   let vulnerabilities = [];
@@ -1348,7 +1351,9 @@ async function generateZapPdf(scanResult, lang = 'en') {
         const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
         const buf    = await gridfsService.downloadFile(file.fileId, bucket);
         const full   = JSON.parse(buf.toString('utf-8'));
-        vulnerabilities = full.map(a => ({
+        // Apply plan filter before building the vulnerabilities list
+        const filtered = getSanitizedAlerts(full, accessLevel);
+        vulnerabilities = filtered.map(a => ({
           name: a.alert, risk: a.risk, confidence: a.confidence,
           description: a.description || 'No description available',
           solution:    a.solution    || 'No solution provided',
@@ -1362,7 +1367,8 @@ async function generateZapPdf(scanResult, lang = 'en') {
   }
 
   if (!vulnerabilities.length && scanResult.zapResult?.summaryAlerts) {
-    vulnerabilities = scanResult.zapResult.summaryAlerts.map(a => ({
+    const filtered = getSanitizedAlerts(scanResult.zapResult.summaryAlerts, accessLevel);
+    vulnerabilities = filtered.map(a => ({
       name: a.alert, risk: a.risk, confidence: a.confidence,
       description: a.description || 'No description available',
       solution:    a.solution    || 'No solution provided',

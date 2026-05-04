@@ -16,34 +16,18 @@ const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { handleScanComplete } = require('../services/notificationService');
+const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
 
 /**
- * filterZapAlertsByPlan — filters ZAP alerts in-memory based on plan vulnerability access level.
- * NEVER modifies stored data. Operates only on the response payload.
- * @param {object|null} zapData  — the zapData object built for the response
- * @param {string} accessLevel  — 'all' | 'critical-high'
- * @returns modified copy of zapData
+ * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for req.user.
+ * Falls back to 'critical-high' (most restrictive) on any error.
  */
-function filterZapAlertsByPlan(zapData, accessLevel) {
-  if (!zapData || accessLevel === 'all') return zapData;
-  // Only 'critical-high' requires filtering
-  const ALLOWED = ['High']; // ZAP does not have a 'Critical' label; High is the highest
-  const filtered = {
-    ...zapData,
-    alerts: (zapData.alerts || []).filter(a => ALLOWED.includes(a.risk)),
-    totalAlerts: undefined,  // recalculate below
-    riskCounts: zapData.riskCounts
-      ? {
-          High:          zapData.riskCounts.High          || 0,
-          Medium:        0,
-          Low:           0,
-          Informational: 0
-        }
-      : undefined,
-    _filtered: true  // flag so frontend can show a note
-  };
-  filtered.totalAlerts = filtered.alerts.length;
-  return filtered;
+async function resolveVulnAccessLevel(userId) {
+  try {
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt');
+    if (u) return u.getAccountLimits().vulnerabilityAccessLevel || 'critical-high';
+  } catch (_) { /* non-fatal */ }
+  return 'critical-high';
 }
 
 const router = express.Router();
@@ -166,9 +150,10 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       response.urlscanData = scan.urlscanResult;
     }
 
-    // Add ZAP results with GridFS data if available
+    // Add ZAP results with GridFS data if available — plan-filtered
     if (scan.zapResult) {
-      response.zapData = { ...scan.zapResult };
+      const accessLevel = await resolveVulnAccessLevel(req.user.id);
+      response.zapData = getSanitizedZapData({ ...scan.zapResult }, accessLevel);
 
       // Fetch detailed alerts from GridFS if available
       if (scan.zapResult.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
@@ -177,11 +162,12 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
         );
         if (detailedAlertsFile && detailedAlertsFile.fileId) {
           try {
-            // Auth scan files are stored in zap_auth_reports bucket, normal in zap_reports
             const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
               ? 'zap_auth_reports' : 'zap_reports';
             const buffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
-            response.zapData.detailedAlerts = JSON.parse(buffer.toString('utf-8'));
+            const rawAlerts = JSON.parse(buffer.toString('utf-8'));
+            // Apply plan filter to the full GridFS alert list
+            response.zapData.detailedAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
           } catch (gridfsErr) {
             console.warn(`[LoadScan] Could not fetch ZAP detailed alerts: ${gridfsErr.message}`);
           }
@@ -284,12 +270,13 @@ router.get('/active-scan', auth, async (req, res) => {
       tests_quantity: activeScan.observatoryResult.tests_quantity
     } : null;
 
-    // ZAP data handling - match structure with /combined-analysis endpoint
+    // ZAP data handling — plan-filtered
+    const activeScanAccessLevel = await resolveVulnAccessLevel(req.user.id);
     let zapData = null;
     if (activeScan.zapResult) {
       const zapStatus = activeScan.zapResult.status;
       if (zapStatus === 'completed') {
-        zapData = {
+        const rawZapData = {
           status: 'completed',
           riskCounts: activeScan.zapResult.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 },
           alerts: activeScan.zapResult.alerts || [],
@@ -299,6 +286,7 @@ router.get('/active-scan', auth, async (req, res) => {
           site: activeScan.zapResult.site || activeScan.target,
           urlsFound: activeScan.zapResult.urlsFound || 0
         };
+        zapData = getSanitizedZapData(rawZapData, activeScanAccessLevel);
       } else if (zapStatus === 'pending' || zapStatus === 'running') {
         zapData = {
           status: zapStatus,
@@ -880,16 +868,13 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
           const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
 
-          // Include ZAP data if scan completed (fully or partially)
+          // Include ZAP data if scan completed — apply plan filter BEFORE sending to AI
           const freshZapStatus = freshZapResult?.status;
           const freshZapCompleted = freshZapStatus === 'completed' || freshZapStatus === 'completed_partial';
-          const zapReport = freshZapCompleted ? {
-            site: freshScan.target,
-            riskCounts: freshZapResult.riskCounts,
-            alerts: freshZapResult.alerts,
-            totalAlerts: freshZapResult.totalAlerts,
-            totalOccurrences: freshZapResult.totalOccurrences
-          } : null;
+          const geminiAccessLevel = await resolveVulnAccessLevel(req.user.id);
+          const zapReport = freshZapCompleted
+            ? getSanitizedZapReport(freshZapResult, geminiAccessLevel, freshScan.target)
+            : null;
 
           // Include WebCheck data if scan completed (fully or partially)
           const freshWebCheckStatus = freshWebCheckResult?.status;
@@ -1119,18 +1104,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     }
 
     // ─── Vulnerability filtering based on user's plan ──────────────────────────
-    // Load user to check vulnerability access level (use req.user.id from auth middleware).
-    // This is a lightweight findById — only select planType + billingCycle.
-    let vulnAccessLevel = 'all';
-    try {
-      const scanUser = await User.findById(req.user.id).select('planType billingCycle accountType proExpiresAt');
-      if (scanUser) {
-        const scanLimits = scanUser.getAccountLimits();
-        vulnAccessLevel = scanLimits.vulnerabilityAccessLevel || 'all';
-      }
-    } catch (_) { /* non-fatal — default to 'all' */ }
+    const vulnAccessLevel = await resolveVulnAccessLevel(req.user.id);
 
-    // Always return all available data (progressive loading)
     console.log(`📤 Returning combined-analysis response:`);
     console.log(`   Status: ${scan.status}`);
     console.log(`   Vuln access level: ${vulnAccessLevel}`);
@@ -1139,8 +1114,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       console.log(`   refinedReport length: ${scan.refinedReport.length} chars`);
     }
 
-    // Apply filter (does nothing when accessLevel === 'all')
-    const filteredZapData = filterZapAlertsByPlan(zapData, vulnAccessLevel);
+    // Apply centralized plan filter
+    const filteredZapData = getSanitizedZapData(zapData, vulnAccessLevel);
 
     return res.json({
       success: true,
@@ -1204,7 +1179,8 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
       });
     }
 
-    // Fetch full ZAP detailed alerts from GridFS (not truncated)
+    // Fetch full ZAP detailed alerts from GridFS, then apply plan filter
+    const jsonExportAccessLevel = await resolveVulnAccessLevel(req.user.id);
     let fullZapAlerts = [];
     if (scan.zapResult?.reportFiles?.length > 0) {
       const detailedAlertsFile = scan.zapResult.reportFiles.find(
@@ -1217,18 +1193,18 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
             ? 'zap_auth_reports' : 'zap_reports';
           console.log(`📥 Fetching full ZAP alerts from GridFS (${zapBucket}) for JSON export: ${detailedAlertsFile.fileId}`);
           const detailedAlertsBuffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, zapBucket);
-          fullZapAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
-          console.log(`✅ Retrieved ${fullZapAlerts.length} full ZAP alerts from GridFS`);
+          const rawAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
+          fullZapAlerts = getSanitizedAlerts(rawAlerts, jsonExportAccessLevel);
+          console.log(`✅ Retrieved ${fullZapAlerts.length} plan-filtered ZAP alerts from GridFS`);
         } catch (gridfsError) {
           console.warn(`⚠️ Failed to fetch ZAP alerts from GridFS: ${gridfsError.message}`);
-          // Fallback to truncated alerts from MongoDB
-          fullZapAlerts = scan.zapResult?.alerts || [];
+          fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
         }
       } else {
-        fullZapAlerts = scan.zapResult?.alerts || [];
+        fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
       }
     } else {
-      fullZapAlerts = scan.zapResult?.alerts || [];
+      fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
     }
 
     // Prepare complete JSON data package with RAW OWASP ZAP structure
@@ -1405,8 +1381,9 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
     }
 
     // Always generate fresh PDF (no caching - data retention policy)
-    console.log(`📄 Generating ${lang.toUpperCase()} PDF report...`);
-    const pdfBuffer = await generateSingleLanguagePdf(scan, lang);
+    const pdfAccessLevel = await resolveVulnAccessLevel(req.user.id);
+    console.log(`📄 Generating ${lang.toUpperCase()} PDF report (vuln access: ${pdfAccessLevel})...`);
+    const pdfBuffer = await generateSingleLanguagePdf(scan, lang, pdfAccessLevel);
 
     // Set headers for PDF download (include language in filename)
     const langSuffix = lang.toUpperCase();
