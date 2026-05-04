@@ -242,6 +242,36 @@ const sendScheduleConfirmationEmail = async (email, userName, scheduleDetails) =
   }
 };
 
+// Send organization invite email
+const sendInviteEmail = async (toEmail, { orgName, inviterName, role, token }) => {
+  const joinUrl = `${process.env.CLIENT_URL || FRONTEND_URL}/join?token=${token}`;
+  const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+
+  const html = `
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0f18; padding: 40px; border-radius: 12px; border: 1px solid #FF6B00;">
+      <div style="text-align: center; margin-bottom: 30px;">
+        <h1 style="color: #FF6B00; margin: 0; font-size: 32px; letter-spacing: 4px; font-weight: 900;">FORTEXA</h1>
+        <p style="color: #888; font-size: 13px; margin: 6px 0 0 0; letter-spacing: 2px; text-transform: uppercase;">Security Intelligence Platform</p>
+      </div>
+      <div style="padding: 30px; background-color: #101827; border-radius: 8px; border-left: 3px solid #FF6B00;">
+        <h2 style="color: #ffffff; margin-top: 0; font-size: 22px;">You've Been Invited</h2>
+        <p style="font-size: 16px; line-height: 1.6; color: #d0d0d0;">
+          ${inviterName ? `<strong style="color: #FF6B00;">${inviterName}</strong> has invited you` : 'You have been invited'} to join the organization <strong style="color: #FFA366;">${orgName}</strong> on FORTEXA.
+        </p>
+        <div style="background-color: #000; border: 1px solid #2a3b5f; border-radius: 6px; padding: 16px; margin: 20px 0;">
+          <p style="margin: 0; color: #888; font-size: 13px; text-transform: uppercase; letter-spacing: 1px;">Your Role</p>
+          <p style="margin: 6px 0 0 0; color: #FF6B00; font-size: 18px; font-weight: bold;">${roleLabel}</p>
+        </div>
+        <p style="font-size: 15px; line-height: 1.6; color: #d0d0d0;">Click the button below to accept your invitation. This link expires in <strong>7 days</strong>.</p>
+        <div style="text-align: center; margin: 30px 0;"><a href="${joinUrl}" style="background: linear-gradient(135deg, #FF6B00, #FFA366); color: #000; padding: 14px 36px; text-decoration: none; border-radius: 6px; font-weight: 800; font-size: 16px; display: inline-block; letter-spacing: 1px;">JOIN TEAM →</a></div>
+      </div>
+    </div>
+  `;
+
+  await sendEmail(toEmail, `You've been invited to join ${orgName} on FORTEXA`, html);
+  console.log(`Invite email sent to ${toEmail} (org=${orgName}, role=${roleLabel})`);
+};
+
 module.exports = {
   generateOTP,
   sendOTPEmail,
@@ -250,4 +280,5 @@ module.exports = {
   sendScanTriggeredEmail,
   sendScanFailedEmail,
   sendScheduleConfirmationEmail,
+  sendInviteEmail,
 };

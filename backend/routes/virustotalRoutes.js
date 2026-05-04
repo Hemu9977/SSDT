@@ -1,3 +1,4 @@
+//virustotalRoutes.js
 const express = require('express');
 const crypto = require('crypto');
 const { getPageSpeedReport } = require('../services/pagespeedService');
@@ -9,9 +10,32 @@ const { startAsyncWebCheckScan, stopWebCheckScan, getFullResults } = require('..
 const gridfsService = require('../services/gridfsService');
 const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
+const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { handleScanComplete } = require('../services/notificationService');
+const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+const { sanitizeScanForLLM } = require('../services/geminiSanitizer');
+
+/**
+ * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for req.user.
+ * Falls back to 'critical-high' (most restrictive) on any error.
+ */
+async function resolveVulnAccessLevel(userId) {
+  try {
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    if (!u) return 'critical-high';
+    let org = null;
+    if (u.organizationId) {
+      const Organization = require('../models/Organization');
+      org = await Organization.findById(u.organizationId);
+    }
+    return u.getAccountLimits(org).vulnerabilityAccessLevel || 'critical-high';
+  } catch (_) { /* non-fatal */ }
+  return 'critical-high';
+}
 
 const router = express.Router();
 
@@ -149,9 +173,10 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       response.urlscanData = scan.urlscanResult;
     }
 
-    // Add ZAP results with GridFS data if available
+    // Add ZAP results with GridFS data if available — plan-filtered
     if (scan.zapResult) {
-      response.zapData = { ...scan.zapResult };
+      const accessLevel = await resolveVulnAccessLevel(req.user.id);
+      response.zapData = getSanitizedZapData({ ...scan.zapResult }, accessLevel);
 
       // Fetch detailed alerts from GridFS if available
       if (scan.zapResult.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
@@ -160,11 +185,12 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
         );
         if (detailedAlertsFile && detailedAlertsFile.fileId) {
           try {
-            // Auth scan files are stored in zap_auth_reports bucket, normal in zap_reports
             const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
               ? 'zap_auth_reports' : 'zap_reports';
             const buffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
-            response.zapData.detailedAlerts = JSON.parse(buffer.toString('utf-8'));
+            const rawAlerts = JSON.parse(buffer.toString('utf-8'));
+            // Apply plan filter to the full GridFS alert list
+            response.zapData.detailedAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
           } catch (gridfsErr) {
             console.warn(`[LoadScan] Could not fetch ZAP detailed alerts: ${gridfsErr.message}`);
           }
@@ -267,12 +293,13 @@ router.get('/active-scan', auth, async (req, res) => {
       tests_quantity: activeScan.observatoryResult.tests_quantity
     } : null;
 
-    // ZAP data handling - match structure with /combined-analysis endpoint
+    // ZAP data handling — plan-filtered
+    const activeScanAccessLevel = await resolveVulnAccessLevel(req.user.id);
     let zapData = null;
     if (activeScan.zapResult) {
       const zapStatus = activeScan.zapResult.status;
       if (zapStatus === 'completed') {
-        zapData = {
+        const rawZapData = {
           status: 'completed',
           riskCounts: activeScan.zapResult.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 },
           alerts: activeScan.zapResult.alerts || [],
@@ -282,6 +309,7 @@ router.get('/active-scan', auth, async (req, res) => {
           site: activeScan.zapResult.site || activeScan.target,
           urlsFound: activeScan.zapResult.urlsFound || 0
         };
+        zapData = getSanitizedZapData(rawZapData, activeScanAccessLevel);
       } else if (zapStatus === 'pending' || zapStatus === 'running') {
         zapData = {
           status: zapStatus,
@@ -415,8 +443,9 @@ router.get('/active-scan', auth, async (req, res) => {
   }
 });
 
-// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
-router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
+// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini)
+// Auth → Plan enforcement → Rate limiting → Handler
+router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (req, res) => {
   try {
     const { url } = req.body;
 
@@ -857,21 +886,25 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
         }
 
         try {
-          // Prepare data for Gemini (with or without ZAP results depending on success)
-          const psiReport = freshScan.pagespeedResult?.error ? null : freshScan.pagespeedResult;
-          const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
-          const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
+          // Sanitize freshScan before any data reaches Gemini — strips target URL,
+          // domain, IPs, DNS records, user emails from the object graph.
+          // Original freshScan is NOT mutated; all DB writes still use freshScan.
+          const llmSafeScan = sanitizeScanForLLM(freshScan);
 
-          // Include ZAP data if scan completed (fully or partially)
+          // Prepare data for Gemini (with or without ZAP results depending on success)
+          const psiReport = llmSafeScan.pagespeedResult?.error ? null : llmSafeScan.pagespeedResult;
+          const observatoryReport = llmSafeScan.observatoryResult?.error ? null : llmSafeScan.observatoryResult;
+          const urlscanReport = llmSafeScan.urlscanResult?.error ? null : llmSafeScan.urlscanResult;
+
+          // Include ZAP data if scan completed — apply plan filter BEFORE sending to AI
+          // getSanitizedZapReport uses freshZapResult (raw) for plan-level filtering;
+          // sanitizeScanForLLM already stripped identity fields from llmSafeScan.zapResult.
           const freshZapStatus = freshZapResult?.status;
           const freshZapCompleted = freshZapStatus === 'completed' || freshZapStatus === 'completed_partial';
-          const zapReport = freshZapCompleted ? {
-            site: freshScan.target,
-            riskCounts: freshZapResult.riskCounts,
-            alerts: freshZapResult.alerts,
-            totalAlerts: freshZapResult.totalAlerts,
-            totalOccurrences: freshZapResult.totalOccurrences
-          } : null;
+          const geminiAccessLevel = await resolveVulnAccessLevel(req.user.id);
+          const zapReport = freshZapCompleted
+            ? getSanitizedZapReport(llmSafeScan.zapResult, geminiAccessLevel, llmSafeScan.target)
+            : null;
 
           // Include WebCheck data if scan completed (fully or partially)
           const freshWebCheckStatus = freshWebCheckResult?.status;
@@ -880,11 +913,15 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
           // Use getFullResults to handle both inline and GridFS storage
           let webCheckReport = null;
           if (freshWebCheckCompleted) {
-            webCheckReport = await getFullResults(freshWebCheckResult);
-            if (!webCheckReport) {
+            // Retrieve from GridFS / inline, then sanitize DNS+IPs before passing to Gemini
+            const rawWebCheck = await getFullResults(freshWebCheckResult);
+            if (!rawWebCheck) {
               console.warn('⚠️ WebCheck marked complete but could not retrieve results');
             } else {
-              console.log(`📊 WebCheck results retrieved: ${Object.keys(webCheckReport).length} scan types`);
+              console.log(`📊 WebCheck results retrieved: ${Object.keys(rawWebCheck).length} scan types`);
+              // Wrap in a minimal object so sanitizeScanForLLM can reach dns.a etc.
+              const sanitizedWC = sanitizeScanForLLM({ webCheckResult: { fullResults: rawWebCheck } });
+              webCheckReport = sanitizedWC?.webCheckResult?.fullResults || rawWebCheck;
             }
           }
 
@@ -893,7 +930,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
             null,
             psiReport,
             observatoryReport,
-            freshScan.target,
+            llmSafeScan.target,   // "REDACTED"
             zapReport,
             urlscanReport,
             webCheckReport
@@ -1100,13 +1137,19 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       }
     }
 
-    // Always return all available data (progressive loading)
+    // ─── Vulnerability filtering based on user's plan ──────────────────────────
+    const vulnAccessLevel = await resolveVulnAccessLevel(req.user.id);
+
     console.log(`📤 Returning combined-analysis response:`);
     console.log(`   Status: ${scan.status}`);
+    console.log(`   Vuln access level: ${vulnAccessLevel}`);
     console.log(`   Has refinedReport: ${!!scan.refinedReport}`);
     if (scan.refinedReport) {
       console.log(`   refinedReport length: ${scan.refinedReport.length} chars`);
     }
+
+    // Apply centralized plan filter
+    const filteredZapData = getSanitizedZapData(zapData, vulnAccessLevel);
 
     return res.json({
       success: true,
@@ -1125,7 +1168,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       // Actual data (null if not yet available)
       psiScores: psiScores,
       observatoryData: observatoryData,
-      zapData: zapData,
+      zapData: filteredZapData,          // plan-filtered
+      vulnAccessLevel: vulnAccessLevel,  // inform frontend of restriction
       urlscanData: urlscanData,
       webCheckData: webCheckData,
       refinedReport: scan.refinedReport || null,
@@ -1169,7 +1213,8 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
       });
     }
 
-    // Fetch full ZAP detailed alerts from GridFS (not truncated)
+    // Fetch full ZAP detailed alerts from GridFS, then apply plan filter
+    const jsonExportAccessLevel = await resolveVulnAccessLevel(req.user.id);
     let fullZapAlerts = [];
     if (scan.zapResult?.reportFiles?.length > 0) {
       const detailedAlertsFile = scan.zapResult.reportFiles.find(
@@ -1182,18 +1227,18 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
             ? 'zap_auth_reports' : 'zap_reports';
           console.log(`📥 Fetching full ZAP alerts from GridFS (${zapBucket}) for JSON export: ${detailedAlertsFile.fileId}`);
           const detailedAlertsBuffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, zapBucket);
-          fullZapAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
-          console.log(`✅ Retrieved ${fullZapAlerts.length} full ZAP alerts from GridFS`);
+          const rawAlerts = JSON.parse(detailedAlertsBuffer.toString('utf-8'));
+          fullZapAlerts = getSanitizedAlerts(rawAlerts, jsonExportAccessLevel);
+          console.log(`✅ Retrieved ${fullZapAlerts.length} plan-filtered ZAP alerts from GridFS`);
         } catch (gridfsError) {
           console.warn(`⚠️ Failed to fetch ZAP alerts from GridFS: ${gridfsError.message}`);
-          // Fallback to truncated alerts from MongoDB
-          fullZapAlerts = scan.zapResult?.alerts || [];
+          fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
         }
       } else {
-        fullZapAlerts = scan.zapResult?.alerts || [];
+        fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
       }
     } else {
-      fullZapAlerts = scan.zapResult?.alerts || [];
+      fullZapAlerts = getSanitizedAlerts(scan.zapResult?.alerts || [], jsonExportAccessLevel);
     }
 
     // Prepare complete JSON data package with RAW OWASP ZAP structure
@@ -1370,8 +1415,9 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
     }
 
     // Always generate fresh PDF (no caching - data retention policy)
-    console.log(`📄 Generating ${lang.toUpperCase()} PDF report...`);
-    const pdfBuffer = await generateSingleLanguagePdf(scan, lang);
+    const pdfAccessLevel = await resolveVulnAccessLevel(req.user.id);
+    console.log(`📄 Generating ${lang.toUpperCase()} PDF report (vuln access: ${pdfAccessLevel})...`);
+    const pdfBuffer = await generateSingleLanguagePdf(scan, lang, pdfAccessLevel);
 
     // Set headers for PDF download (include language in filename)
     const langSuffix = lang.toUpperCase();

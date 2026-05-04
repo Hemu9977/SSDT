@@ -57,3 +57,7 @@ backend/coverage/
 *.pid
 *.seed
 backend/uploads/
+
+# Local CLI binaries (should never be committed)
+stripe.exe
+*.exe

@@ -1,6 +1,8 @@
+//notificationRoutes.js
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const ScanResult = require('../models/ScanResult');
 
 /**

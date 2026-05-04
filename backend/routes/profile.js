@@ -1,8 +1,12 @@
+//profile.js
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
+const Organization = require('../models/Organization');
+const Invite = require('../models/Invite');
 
 const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
 
@@ -40,8 +44,21 @@ router.get('/', auth, async (req, res) => {
       await user.save();
     }
 
-    // Get account limits
-    const limits = user.getAccountLimits();
+    // Fetch organization if user has one
+    let org = null;
+    let members = [];
+    let pendingInvites = [];
+
+    if (user.organizationId) {
+      org = await Organization.findById(user.organizationId);
+      if (org) {
+        members = await User.find({ organizationId: org._id }).select('name email role');
+        pendingInvites = await Invite.find({ organizationId: org._id, status: 'pending' }).select('email role token createdAt expiresAt');
+      }
+    }
+
+    // Get account limits (org-aware)
+    const limits = user.getAccountLimits(org);
 
     res.json({
       success: true,
@@ -54,10 +71,39 @@ router.get('/', auth, async (req, res) => {
         isVerified: user.isVerified,
         totalScans: totalScans,
         scansThisMonth: scansThisMonth,
+        monthlyScansUsed: org ? org.scansUsed : 0,
         createdAt: user.createdAt,
         lastLoginAt: user.lastLoginAt,
-        isPro: user.isPro(),
-        proExpiresAt: user.proExpiresAt
+        // isPro: true for ANY active paid plan (light, basic, pro) — org-first, then user fallback
+        isPro: user.isPro(org),
+        proExpiresAt: org ? org.expiresAt : user.proExpiresAt,
+        // ── Service plan fields ──────────────────────────────────────────────
+        organization: org ? {
+          id: org._id,
+          name: org.name,
+          role: user.role,
+          planType: org.planType,
+          billingCycle: org.billingCycle,
+          subscriptionStatus: org.subscriptionStatus,
+          seatsAllowed: org.seatsAllowed,
+          seatsUsed: org.seatsUsed,
+          scanLimit: org.scanLimit,
+          scansUsed: org.scansUsed,
+          targetsUsed: org.targetsUsed,
+          oneTimeRemainingScans: org.oneTimeRemainingScans,
+          expiresAt: org.expiresAt,
+          members: members,
+          pendingInvites: pendingInvites
+        } : null,
+        planType: org ? org.planType : user.planType,
+        billingCycle: org ? org.billingCycle : user.billingCycle,
+        subscriptionStatus: org ? org.subscriptionStatus : user.subscriptionStatus,
+        oneTimeRemainingScans: org ? (org.oneTimeRemainingScans || 0) : (user.oneTimeRemainingScans || 0),
+        totalTargetsUsed: org ? (org.targetsUsed || 0) : (user.totalTargetsUsed || 0),
+        // Convert Mongoose Map to plain object for JSON serialisation
+        scanUsagePerTarget: user.scanUsagePerTarget
+          ? Object.fromEntries(user.scanUsagePerTarget)
+          : {}
       },
       limits: limits,
       recentScans: recentScans

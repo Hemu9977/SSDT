@@ -162,7 +162,7 @@ scheduledScanSchema.statics.getDueSchedules = function () {
     enabled: true,
     status: 'scheduled',
     nextRun: { $lte: now }
-  }).populate('userId', 'name email accountType monthlyScansUsed monthlyScansResetAt targetsUsed');
+  }).populate('userId', 'name email accountType targetsUsed organizationId');
 };
 
 /**

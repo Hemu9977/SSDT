@@ -1,6 +1,9 @@
+//translateRoutes.js
 const express = require('express');
 const { translateText } = require('../services/geminiService');
 const TranslationCache = require('../models/TranslationCache');
+const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
 
 const router = express.Router();
 
@@ -11,7 +14,7 @@ console.log('✅ Translation service initialized (Gemini AI - powered by your AP
  * Translates an array of texts to the target language using free Google Translate API
  * Uses MongoDB caching to improve performance and reduce requests
  */
-router.post('/', async (req, res) => {
+router.post('/', auth, async (req, res) => {
   try {
     const { texts, targetLang } = req.body;
 
@@ -118,7 +121,7 @@ router.post('/', async (req, res) => {
  * GET /api/translate/stats
  * Get translation cache statistics
  */
-router.get('/stats', async (req, res) => {
+router.get('/stats', auth, async (req, res) => {
   try {
     const totalCached = await TranslationCache.countDocuments();
     const enCached = await TranslationCache.countDocuments({ targetLang: 'en' });
@@ -151,7 +154,7 @@ router.get('/stats', async (req, res) => {
  * DELETE /api/translate/cache
  * Clear translation cache (admin only - you can add auth middleware here)
  */
-router.delete('/cache', async (req, res) => {
+router.delete('/cache', auth, async (req, res) => {
   try {
     const result = await TranslationCache.deleteMany({});
 

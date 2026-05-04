@@ -65,6 +65,11 @@ const scanResultSchema = new mongoose.Schema({
   containerTaskArn:    { type: String, default: null },
   containerStartedAt:  { type: Date,   default: null },
   containerStoppedAt:  { type: Date,   default: null },
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    index: true
+  },
   triggerSource: {
     type: String,
     enum: ['manual', 'scheduled'],

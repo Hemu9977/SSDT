@@ -10,6 +10,7 @@ const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimit
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
 const { initializeSocket } = require('./services/notificationService');
+const { startScheduler } = require('./services/schedulerService'); // Scan scheduler
 
 // IMPORT ZAP ROUTES
 const zapRoutes = require('./routes/zapRoutes');
@@ -68,6 +69,14 @@ app.use(cors(corsOptions));
 // Explicit preflight handler — must come before rate limiters and routes so
 // OPTIONS requests never reach authLimiter or route handlers (which assume a body).
 app.options(/.*/, cors(corsOptions));
+
+// ─── STRIPE WEBHOOK — must come BEFORE express.json() ────────────────────────
+// Stripe requires the raw body (Buffer) to verify the webhook signature.
+// Mounting it here with express.raw() ensures json() middleware is NOT applied.
+if (process.env.STRIPE_SECRET_KEY) {
+  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
+  console.log('✅ Stripe webhook endpoint mounted at /api/stripe/webhook');
+}
 app.use(express.json({ extended: false, limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
@@ -77,11 +86,17 @@ app.use((req, res, next) => {
 });
 
 app.use('/auth', authLimiter, require('./routes/auth'));
-app.use('/api/vt', apiLimiter, scanLimiter, require('./routes/virustotalRoutes'));
+app.use('/api/scan', apiLimiter, scanLimiter, require('./routes/virustotalRoutes'));
 app.use('/api/pagespeed', apiLimiter, require('./routes/pageSpeedRoutes'));
 
 // 👇 REGISTER PROFILE ROUTE
 app.use('/api/profile', apiLimiter, require('./routes/profile'));
+
+// 👇 REGISTER STRIPE ROUTES (authenticated plan/checkout endpoints)
+if (process.env.STRIPE_SECRET_KEY) {
+  app.use('/api/stripe', apiLimiter, require('./routes/stripeRoutes'));
+  console.log('✅ Stripe API routes mounted at /api/stripe');
+}
 
 // 👇 REGISTER ZAP ROUTE
 app.use('/api/zap', apiLimiter, scanLimiter, zapRoutes);
@@ -97,6 +112,12 @@ app.use('/api/translate', apiLimiter, require('./routes/translateRoutes'));
 
 // 👇 REGISTER URLSCAN ROUTES
 app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
+
+// 👇 REGISTER ORGANIZATION ROUTES
+app.use('/api/org', apiLimiter, require('./routes/orgRoutes'));
+// After the /api/org line:
+app.use('/api/notifications', apiLimiter, require('./routes/notificationRoutes'));
+app.use('/api/schedules', apiLimiter, require('./routes/scheduleRoutes'));
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });

@@ -1,12 +1,15 @@
+//webCheckRoutes.js
 const express = require('express');
 const router = express.Router();
 const webCheckService = require('../services/webCheckService');
 const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
+const requireOrg = require('../middleware/requireOrg');
+const planCheck = require('../middleware/planCheck');
 
 // POST /api/webcheck/scan
 // Body: { url: "example.com", type: "ssl" }
-router.post('/scan', async (req, res) => {
+router.post('/scan', auth, planCheck, async (req, res) => {
     const { url, type } = req.body;
 
     if (!url) {
