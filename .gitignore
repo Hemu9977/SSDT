@@ -42,3 +42,7 @@ backend/zap-report-*.html
 backend/zap-report-*.json
 backend/zap-report-*.xml
 .claude/settings.local.json
+
+# Local CLI binaries (should never be committed)
+stripe.exe
+*.exe

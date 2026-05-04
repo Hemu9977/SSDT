@@ -168,7 +168,7 @@ UserSchema.methods.checkAndResetMonthlyScans = function () {
   const now = new Date();
   const lastReset = new Date(this.lastResetDate);
 
-  if (now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()) {
+  if (now.getUTCMonth() !== lastReset.getUTCMonth() || now.getUTCFullYear() !== lastReset.getUTCFullYear()) {
     this.totalTargetsUsed = 0;
     this.scanUsagePerTarget = new Map();
     this.lastResetDate = now;

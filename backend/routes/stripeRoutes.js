@@ -120,8 +120,7 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     res.json({ url: session.url, sessionId: session.id });
   } catch (err) {
     console.error('❌ Stripe checkout error:', err);
-    // Send the exact Stripe error to the frontend so the user can see what's wrong
-    res.status(500).json({ error: err.message, details: err.stack });
+    res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
 
@@ -138,16 +137,18 @@ router.get('/subscription', auth, async (req, res) => {
       org = await Organization.findById(user.organizationId);
     }
 
+    // Org is the source of truth; User fields are a legacy fallback for
+    // pre-migration accounts that still have plan data on the User document.
     res.json({
       success: true,
       plan: {
-        planType: user.planType,
-        billingCycle: user.billingCycle,
-        subscriptionStatus: user.subscriptionStatus,
-        stripeSubscriptionId: user.stripeSubscriptionId,
-        oneTimeRemainingScans: user.oneTimeRemainingScans,
+        planType: org ? org.planType : user.planType,
+        billingCycle: org ? org.billingCycle : user.billingCycle,
+        subscriptionStatus: org ? org.subscriptionStatus : user.subscriptionStatus,
+        stripeSubscriptionId: org ? org.stripeSubscriptionId : user.stripeSubscriptionId,
+        oneTimeRemainingScans: org ? (org.oneTimeRemainingScans || 0) : (user.oneTimeRemainingScans || 0),
         monthlyScansUsed: org ? org.scansUsed : 0,
-        proExpiresAt: user.proExpiresAt
+        proExpiresAt: org ? org.expiresAt : user.proExpiresAt
       }
     });
   } catch (err) {
@@ -201,6 +202,13 @@ router.post('/webhook', async (req, res) => {
       }
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
     } else {
+      // Hard-fail in production: an unsigned webhook is a critical misconfig
+      // that would let anyone push fake billing events.
+      if (process.env.NODE_ENV === 'production') {
+        console.error('❌ STRIPE_WEBHOOK_SECRET not set in production — refusing unsigned webhook');
+        return res.status(500).json({ error: 'Webhook misconfigured' });
+      }
+
       console.warn('⚠️ STRIPE_WEBHOOK_SECRET not set — dev mode');
 
       if (Buffer.isBuffer(req.body)) {
@@ -229,6 +237,14 @@ router.post('/webhook', async (req, res) => {
       case 'checkout.session.completed': {
         const session = event.data.object;
         await handleCheckoutComplete(session);
+        break;
+      }
+
+      // ── Checkout abandoned / expired (clears stripePending so the user
+      //    isn't stuck behind ORG_CREATING on their next scan) ────────────────
+      case 'checkout.session.expired': {
+        const session = event.data.object;
+        await handleCheckoutExpired(session);
         break;
       }
 
@@ -342,29 +358,28 @@ async function handleCheckoutComplete(session) {
   org.scansUsed = 0;
   org.lastScanReset = new Date();
 
-  // Legacy fallback for UI logic — set all user fields before saving
-  user.planType = planType || null;
-  user.billingCycle = billingCycle || null;
-  user.subscriptionStatus = 'active';
-  if (billingCycle === 'onetime') {
-    user.oneTimeRemainingScans = ONETIME_SCANS[key] || 1;
-    user.proExpiresAt = null;
-  } else {
-    user.stripeSubscriptionId = session.subscription || null;
-    const months = billingCycle === 'annual' ? 12 : 1;
-    user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
-  }
-  // Mark accountType as 'paid' for any active subscription plan (not just pro)
+  // Organization is the source of truth for plan state.
+  // User retains only `accountType` as a coarse legacy flag still consulted
+  // by isPro() when no org is loaded.
   if (['pro', 'basic', 'light'].includes(planType)) {
     user.accountType = 'paid';
   }
-
   user.stripePending = false;
 
   // FIX 4 + 5: Run both saves in parallel — eliminates sequential write latency
   // and closes the partial-state window from the early user.save() that was here before
   await Promise.all([org.save(), user.save()]);
   console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}. DB update complete.`);
+}
+
+async function handleCheckoutExpired(session) {
+  const userId = session.metadata?.userId;
+  if (!userId) {
+    console.warn(`⚠️  [webhook] checkout.session.expired missing userId metadata (session ${session.id})`);
+    return;
+  }
+  await User.updateOne({ _id: userId }, { $set: { stripePending: false } });
+  console.log(`⌛ [webhook] Checkout session ${session.id} expired — cleared stripePending for user ${userId}`);
 }
 
 async function handleInvoicePaid(invoice) {
@@ -391,18 +406,7 @@ async function handleInvoicePaid(invoice) {
     await org.save();
   }
 
-  // Renew: reset monthly counters and extend expiry
-  user.subscriptionStatus = 'active';
-  user.stripeSubscriptionId = invoice.subscription;
-  user.totalTargetsUsed = 0;
-  user.scanUsagePerTarget = {};
-  user.lastResetDate = new Date();
-
-  const months = user.billingCycle === 'annual' ? 12 : 1;
-  user.proExpiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
-
-  await user.save();
-  console.log(`♻️  [webhook] Invoice paid — user ${user.id} plan renewed`);
+  console.log(`♻️  [webhook] Invoice paid — user ${user.id} plan renewed (org=${org?._id || 'none'})`);
 }
 
 async function handleSubscriptionDeleted(subscription) {
@@ -423,12 +427,8 @@ async function handleSubscriptionDeleted(subscription) {
     await org.save();
   }
 
-  user.subscriptionStatus = 'canceled';
-  user.planType = null;
-  user.billingCycle = null;
-  user.stripeSubscriptionId = null;
+  // Keep accountType in sync — isPro() falls back to it when no org is loaded.
   user.accountType = 'free';
-  user.proExpiresAt = null;
   await user.save();
   console.log(`🚫 [webhook] Subscription deleted — user ${user.id} downgraded to free`);
 }
@@ -451,12 +451,6 @@ async function handleSubscriptionUpdated(subscription) {
     await org.save();
   }
 
-  user.subscriptionStatus = subscription.status; // active | past_due | canceled | trialing
-  if (subscription.status === 'active' || subscription.status === 'trialing') {
-    const periodEnd = subscription.current_period_end;
-    if (periodEnd) user.proExpiresAt = new Date(periodEnd * 1000);
-  }
-  await user.save();
   console.log(`🔄 [webhook] Subscription updated — user ${user.id} status=${subscription.status}`);
 }
 
@@ -474,8 +468,6 @@ async function handlePaymentFailed(invoice) {
     await org.save();
   }
 
-  user.subscriptionStatus = 'past_due';
-  await user.save();
   console.warn(`⚠️  [webhook] Payment failed — user ${user.id} marked past_due`);
 }
 

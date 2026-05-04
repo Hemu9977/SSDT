@@ -11,8 +11,14 @@ const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt');
-    if (u) return u.getAccountLimits().vulnerabilityAccessLevel || 'critical-high';
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    if (!u) return 'critical-high';
+    let org = null;
+    if (u.organizationId) {
+      const Organization = require('../models/Organization');
+      org = await Organization.findById(u.organizationId);
+    }
+    return u.getAccountLimits(org).vulnerabilityAccessLevel || 'critical-high';
   } catch (_) { /* non-fatal */ }
   return 'critical-high';
 }

@@ -9,11 +9,11 @@ async function consumeScan(orgId) {
 
   const now = new Date();
 
-  // 🔁 Monthly reset FIRST
+  // 🔁 Monthly reset FIRST — UTC, so the cycle is timezone-independent
   const lastReset = org.lastScanReset || new Date(0);
   const isNewMonth =
-    now.getMonth() !== lastReset.getMonth() ||
-    now.getFullYear() !== lastReset.getFullYear();
+    now.getUTCMonth() !== lastReset.getUTCMonth() ||
+    now.getUTCFullYear() !== lastReset.getUTCFullYear();
 
   if (isNewMonth && org.billingCycle !== "onetime") {
     await Organization.updateOne(

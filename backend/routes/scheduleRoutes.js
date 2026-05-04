@@ -10,6 +10,7 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const ScheduledScan = require('../models/ScheduledScan');
 const User = require('../models/User');
+const Organization = require('../models/Organization');
 const ScanResult = require('../models/ScanResult');
 const { validatePlanLimits } = require('../services/schedulerService');
 const { handleScheduleCreated } = require('../services/notificationService');
@@ -90,7 +91,8 @@ router.post('/', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
-    const limits = user.getAccountLimits();
+    const org = user.organizationId ? await Organization.findById(user.organizationId) : null;
+    const limits = user.getAccountLimits(org);
 
     // TEMPORARY: Bypass plan limits for testing
     /*
@@ -210,7 +212,8 @@ router.get('/', auth, async (req, res) => {
 
     // Get user plan limits for frontend display
     const user = await User.findById(req.user.id);
-    const limits = user ? user.getAccountLimits() : {};
+    const org = user && user.organizationId ? await Organization.findById(user.organizationId) : null;
+    const limits = user ? user.getAccountLimits(org) : {};
     const activeCount = await ScheduledScan.countActiveForUser(req.user.id);
 
     // Calculate true scans this month directly from ScanResult collection
