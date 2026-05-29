@@ -16,7 +16,7 @@
 
 const User = require('../models/User');
 const Organization = require('../models/Organization');
-const { consumeScan } = require('../services/planService');
+const { consumeScan, refundScan } = require('../services/planService');
 
 module.exports = async function planCheck(req, res, next) {
   try {
@@ -46,7 +46,19 @@ module.exports = async function planCheck(req, res, next) {
       });
     }
 
-    const result = await consumeScan(user.organizationId);
+    // Resolve plan limits from the org (target caps come from the plan matrix).
+    const org = await Organization.findById(user.organizationId);
+    const limits = user.getAccountLimits(org);
+
+    // Scan target — routes use either `url` (normal/zap/webcheck/pagespeed) or
+    // `targetUrl` (authenticated scan).
+    const target = (req.body && (req.body.url || req.body.targetUrl)) || null;
+
+    const result = await consumeScan(user.organizationId, {
+      target,
+      scansPerTarget: limits.scansPerTarget,
+      targetsPerMonth: limits.targetsPerMonth
+    });
 
     if (!result) {
       return res.status(403).json({
@@ -54,12 +66,22 @@ module.exports = async function planCheck(req, res, next) {
         code: 'PLAN_LIMIT_EXCEEDED',
         error: 'PLAN_LIMIT_EXCEEDED',
         message: 'Scan limit reached or subscription inactive. Please upgrade your plan.',
-        limitType: 'monthly_scans_or_inactive'
+        limitType: 'monthly_scans_targets_or_inactive'
       });
     }
 
     req.organization = result;
     req.planUser = user;
+
+    // Expose a one-shot refund so route handlers can give the scan slot back if
+    // the scan fails to start (invalid input, duplicate, pre-scan error). Idempotent:
+    // calling it more than once per request is a no-op after the first call.
+    let refunded = false;
+    req.refundScan = async () => {
+      if (refunded) return;
+      refunded = true;
+      await refundScan(result._id, result.billingCycle, target);
+    };
 
     next();
   } catch (err) {

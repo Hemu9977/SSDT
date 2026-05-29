@@ -196,29 +196,56 @@ function sanitizeRefinedReportForLLM(reportText) {
 }
 
 /**
+ * Resolve the guardrail mode from the environment.
+ *   'throw' — GEMINI_STRICT_GUARDRAIL='true': hard-fail on a hit (CI / controlled tests)
+ *   'warn'  — unset AND non-production: log a warning on a hit (dev visibility, never breaks)
+ *   'off'   — GEMINI_STRICT_GUARDRAIL='false', or unset in production
+ *
+ * Why not 'throw' by default outside production? Legitimate URLs legitimately
+ * appear in prompts (ZAP `reference` OWASP doc links, CSP/Location header values
+ * fed to refineReport). A hard throw on those would break report generation, so
+ * the default is the non-fatal 'warn' mode in dev/test and silent in prod.
+ *
+ * @returns {'throw'|'warn'|'off'}
+ */
+function _guardrailMode() {
+  const flag = process.env.GEMINI_STRICT_GUARDRAIL;
+  if (flag === 'true') return 'throw';
+  if (flag === 'false') return 'off';
+  return process.env.NODE_ENV === 'production' ? 'off' : 'warn';
+}
+
+/**
  * Pre-flight guardrail validator.
- * Throws if a prompt string contains what appears to be a live URL or IP address.
- * Only active when GEMINI_STRICT_GUARDRAIL=true in environment.
- * ~0 performance overhead in production (env check exits immediately).
+ * Detects whether a prompt string still contains a live URL or IP after
+ * sanitization. Behaviour depends on the resolved mode (see _guardrailMode()).
+ * ~0 performance overhead when 'off' (env check exits immediately).
  *
  * @param {string} prompt    The full prompt string about to be sent to Gemini
  * @param {string} context   Human-readable label for error messages (function name)
  */
 function assertNoLeakage(prompt, context = '') {
-  if (process.env.GEMINI_STRICT_GUARDRAIL !== 'true') return;
+  const mode = _guardrailMode();
+  if (mode === 'off') return;
 
   // Match URLs that are NOT the literal string "REDACTED"
   const urlHit = /https?:\/\/(?!REDACTED[^a-z])[^\s"'<>]{4,}/i.test(prompt);
   // Match IPv4 that are NOT preceded by "REDACTED"
   const ipHit  = /(?<!REDACTED\s*)\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(prompt);
 
-  if (urlHit || ipHit) {
-    const snippet = prompt.slice(0, 400);
-    throw new Error(
-      `[GEMINI GUARDRAIL] Potential identity leakage detected in Gemini prompt (context: ${context}).\n` +
-      `Snippet (first 400 chars): ${snippet}`
-    );
+  if (!urlHit && !ipHit) return;
+
+  const snippet = prompt.slice(0, 400);
+  const msg =
+    `[GEMINI GUARDRAIL] Potential identity leakage detected in Gemini prompt (context: ${context}).\n` +
+    `Snippet (first 400 chars): ${snippet}`;
+
+  if (mode === 'throw') {
+    throw new Error(msg);
   }
+  // 'warn' — surface in dev/test logs without breaking the request. Note: URLs from
+  // reference/CSP fields are expected here and are not necessarily identity leakage.
+  console.warn(`⚠️  ${msg}`);
 }
 
 module.exports = {

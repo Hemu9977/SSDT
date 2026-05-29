@@ -15,6 +15,7 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
   const { url, strategy } = req.body;
 
   if (!url) {
+    if (req.refundScan) await req.refundScan();
     return res.status(400).json({ msg: 'URL is required' });
   }
 

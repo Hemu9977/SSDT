@@ -210,6 +210,7 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     const { targetUrl, loginUrl, tempSessionId, triggerSource, lang } = req.body;
 
     if (!targetUrl || !tempSessionId) {
+      if (req.refundScan) await req.refundScan();
       return res.status(400).json({ error: 'targetUrl and tempSessionId are required' });
     }
 
@@ -217,15 +218,18 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     try {
       const parsed = new URL(targetUrl);
       if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+        if (req.refundScan) await req.refundScan();
         return res.status(400).json({ error: 'Cannot scan localhost addresses' });
       }
     } catch {
+      if (req.refundScan) await req.refundScan();
       return res.status(400).json({ error: 'Invalid targetUrl format' });
     }
 
     // Retrieve stored session cookies
     const session = authSessions.get(tempSessionId);
     if (!session) {
+      if (req.refundScan) await req.refundScan();
       return res.status(400).json({
         error: 'Session expired or invalid. Please test login again.',
         code: 'SESSION_EXPIRED'
@@ -292,6 +296,8 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     })();
   } catch (error) {
     console.error('[ZAP-AUTH] Scan start error:', error.message);
+    // Synchronous start failed before the scan was handed off — refund the slot.
+    if (req.refundScan) await req.refundScan();
     res.status(500).json({ error: 'Failed to start authenticated scan', details: error.message });
   }
 });

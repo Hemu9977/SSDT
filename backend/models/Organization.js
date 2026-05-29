@@ -23,6 +23,11 @@ const OrganizationSchema = new mongoose.Schema({
   scanLimit: { type: Number, default: 0 },
   scansUsed: { type: Number, default: 0 },
   targetsUsed: { type: Number, default: 0 },
+  // Per-target scan counts for the current month. Keyed by a sha1 hash of the
+  // normalized target hostname (hashing avoids '.'/'$' which are illegal in
+  // MongoDB map keys / dotted update paths). Map size = distinct targets used;
+  // each value = scans against that target. Reset monthly alongside scansUsed.
+  targetScanCounts: { type: Map, of: Number, default: {} },
   oneTimeRemainingScans: { type: Number, default: 0 },
   stripeSubscriptionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },

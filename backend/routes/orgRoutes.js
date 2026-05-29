@@ -233,6 +233,22 @@ router.post('/accept-invite', async (req, res) => {
       await user.save();
     }
 
+    // ── Guard: invite is scoped to one email ──────────────────────────────
+    // The new-user path creates the account with invite.email so it always
+    // matches; this primarily protects the logged-in path, where a different
+    // authenticated user must not be able to consume an invite (and its seat)
+    // that was addressed to someone else.
+    if ((user.email || '').toLowerCase() !== invite.email.toLowerCase()) {
+      // The invite was atomically flipped to 'accepted' above; since this caller
+      // is not the intended recipient, release it back to 'pending' so the real
+      // invitee can still use it.
+      await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
+      return res.status(403).json({
+        error: 'This invite was sent to a different email address. Log in with the invited email to accept it.',
+        invitedEmail: invite.email
+      });
+    }
+
     // ── Guard: user already in an org ─────────────────────────────────────
     if (user.organizationId && user.organizationId.toString() === org._id.toString()) {
       return res.status(400).json({ error: 'You are already a member of this organization' });

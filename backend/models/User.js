@@ -190,8 +190,11 @@ const PLAN_LIMITS = {
   // One-time / trial
   trial1_onetime: { scansPerMonth: 1, targetsPerMonth: 1, scansPerTarget: 1, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 0 },
   trial2_onetime: { scansPerMonth: 2, targetsPerMonth: 1, scansPerTarget: 2, vulnerabilityAccessLevel: 'all', maxSchedules: 0 },
-  // Free / no plan
-  free: { scansPerMonth: 20, targetsPerMonth: -1, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 2 },
+  // Free / no plan — also the fallback for an org whose paid plan was nulled on
+  // cancellation. Vulnerability access defaults to the MOST RESTRICTIVE level
+  // (matches vulnFilter.DEFAULT_LEVEL) so a downgraded/expired account never sees
+  // more severities than the lowest paid tier (Light).
+  free: { scansPerMonth: 20, targetsPerMonth: -1, scansPerTarget: null, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 2 },
 };
 
 // ─── METHOD: Get account limits (SINGLE SOURCE OF TRUTH) ─────────────────────

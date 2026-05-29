@@ -450,12 +450,15 @@ router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (r
     const { url } = req.body;
 
     if (!url || typeof url !== 'string') {
+      // Scan never starts — give the gated quota slot back.
+      if (req.refundScan) await req.refundScan();
       return res.status(400).json({ error: 'URL is required' });
     }
 
     // Validate URL format and security
     const validation = isValidUrl(url);
     if (!validation.valid) {
+      if (req.refundScan) await req.refundScan();
       return res.status(400).json({ error: validation.error });
     }
 
@@ -483,6 +486,8 @@ router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (r
     });
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
+    // Scan failed to initiate — refund the gated quota slot.
+    if (req.refundScan) await req.refundScan();
     // Graceful error handling for duplicates if race condition occurs
     if (err.code === 11000) {
       return res.status(409).json({ error: "Scan already in progress. Please wait a moment and try again." });

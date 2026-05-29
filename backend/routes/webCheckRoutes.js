@@ -13,10 +13,12 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     const { url, type } = req.body;
 
     if (!url) {
+        if (req.refundScan) await req.refundScan();
         return res.status(400).json({ error: 'URL is required' });
     }
 
     if (!type) {
+        if (req.refundScan) await req.refundScan();
         return res.status(400).json({
             error: 'Scan type is required',
             availableTypes: webCheckService.getAvailableScans()
@@ -24,6 +26,7 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     }
 
     if (!webCheckService.ALLOWED_SCANS.includes(type)) {
+        if (req.refundScan) await req.refundScan();
         return res.status(400).json({
             error: `Invalid scan type: ${type}`,
             availableTypes: webCheckService.getAvailableScans()

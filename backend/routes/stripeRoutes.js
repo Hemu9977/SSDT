@@ -163,12 +163,21 @@ router.post('/cancel-subscription', auth, async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    if (!user.stripeSubscriptionId) {
+    // Plan state (including the subscription ID) lives on the Organization for the
+    // org-based flow. Fall back to the User field only for legacy pre-migration
+    // accounts that still carry stripeSubscriptionId on the user document.
+    let org = null;
+    if (user.organizationId) {
+      org = await Organization.findById(user.organizationId);
+    }
+    const subscriptionId = (org && org.stripeSubscriptionId) || user.stripeSubscriptionId;
+
+    if (!subscriptionId) {
       return res.status(400).json({ error: 'No active subscription found' });
     }
 
     // Cancel at period end (user keeps access until expiry)
-    const subscription = await stripe.subscriptions.update(user.stripeSubscriptionId, {
+    const subscription = await stripe.subscriptions.update(subscriptionId, {
       cancel_at_period_end: true
     });
 
@@ -223,13 +232,23 @@ router.post('/webhook', async (req, res) => {
     return res.status(400).json({ error: 'Webhook signature verification failed' });
   }
 
+  // ── Idempotency: claim the event BEFORE processing ──────────────────────────
+  // The unique index on eventId makes this an atomic claim. Two concurrent
+  // deliveries of the same event can't both win the insert, so processing runs
+  // at most once. If processing later fails, we delete the claim (below) so
+  // Stripe's retry can reprocess.
   try {
-    const existingEvent = await StripeEvent.findOne({ eventId: event.id });
-    if (existingEvent) {
-      console.log(`♻️  [webhook] Event ${event.id} already processed. Skipping.`);
+    await StripeEvent.create({ eventId: event.id });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      console.log(`♻️  [webhook] Event ${event.id} already claimed/processed. Skipping.`);
       return res.json({ received: true });
     }
+    console.error('❌ [webhook] Failed to record event for idempotency:', err.message);
+    return res.status(500).json({ error: 'Webhook idempotency store failed' });
+  }
 
+  try {
     console.log(`🔔 [webhook] Received event: ${event.type}`);
     switch (event.type) {
 
@@ -279,11 +298,16 @@ router.post('/webhook', async (req, res) => {
       default:
         console.log(`ℹ️  Unhandled Stripe event: ${event.type}`);
     }
-
-    await StripeEvent.create({ eventId: event.id });
   } catch (err) {
     console.error(`❌ Error processing webhook ${event?.type}:`, err.message, err.stack);
-    // FIX 2: Return 500 so Stripe retries delivery — DB update did NOT succeed
+    // Processing failed — release the idempotency claim so Stripe's retry can
+    // reprocess this event (otherwise the claim would block it forever).
+    try {
+      await StripeEvent.deleteOne({ eventId: event.id });
+    } catch (cleanupErr) {
+      console.error('⚠️  [webhook] Failed to release idempotency claim:', cleanupErr.message);
+    }
+    // Return 500 so Stripe retries delivery — DB update did NOT succeed
     return res.status(500).json({ error: 'Webhook processing failed' });
   }
 
@@ -356,6 +380,7 @@ async function handleCheckoutComplete(session) {
   }
 
   org.scansUsed = 0;
+  org.targetScanCounts = {};
   org.lastScanReset = new Date();
 
   // Organization is the source of truth for plan state.
@@ -400,6 +425,7 @@ async function handleInvoicePaid(invoice) {
     org.subscriptionStatus = 'active';
     org.stripeSubscriptionId = invoice.subscription;
     org.scansUsed = 0;
+    org.targetScanCounts = {};
     org.lastScanReset = new Date();
     const months = org.billingCycle === 'annual' ? 12 : 1;
     org.expiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
