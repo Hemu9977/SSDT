@@ -19,8 +19,6 @@ import { TranslationProvider } from './contexts/TranslationContext';
 import { UserProvider, useUser } from './contexts/UserContext';
 // Notification imports
 import { NotificationProvider } from './contexts/NotificationContext';
-import ScanCompletionPopup from './components/ScanCompletionPopup';
-
 function AppContent() {
   const [showSplash, setShowSplash] = useState(true);
   const { isPro, loading } = useUser();
@@ -41,7 +39,6 @@ function AppContent() {
     <div className={isPro ? 'pro-theme' : ''}>
       <TranslationProvider>
         <BrowserRouter>
-          <ScanCompletionPopup />
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />

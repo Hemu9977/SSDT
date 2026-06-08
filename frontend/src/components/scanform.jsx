@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScanForm.scss';
 
 import { API_BASE } from '../config/api';
@@ -12,6 +13,7 @@ const ScanForm = () => {
   const [scanStage, setScanStage] = useState('');
   const [error, setError] = useState(null);
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   // Poll scan status - defined with useCallback to avoid hoisting issues
   const pollScanStatus = useCallback(async (currentScanId) => {
@@ -47,10 +49,10 @@ const ScanForm = () => {
 
         setScanProgress(zapProgress);
       } else if (data.status === 'queued' || data.status === 'pending') {
-        setScanStage('Initializing scan...');
+        setScanStage(t('initializingScan'));
         setScanProgress(5);
       } else if (data.status === 'combining') {
-        setScanStage('Running security scans...');
+        setScanStage(t('runningSecurityScans'));
         setScanProgress(10);
       }
 
@@ -62,9 +64,9 @@ const ScanForm = () => {
         window.dispatchEvent(new CustomEvent('scanCompleted', { detail: data }));
       } else if (data.status === 'failed' || data.status === 'stopped') {
         if (data.status === 'stopped') {
-          setError('Scan was stopped');
+          setError(t('scanStoppedByUser'));
         } else {
-          setError('Scan failed: ' + (data.error || 'Unknown error'));
+          setError(`${t('scanFailed')}: ${data.error || t('unknownError')}`);
         }
         setLoading(false);
         setScanId(null);
@@ -133,7 +135,7 @@ const ScanForm = () => {
         setScanId(persistedScanId);
         setUrl(persistedUrl);
         setLoading(true);
-        setScanStage('Resuming scan...');
+        setScanStage(t('resumingScan'));
         pollScanStatus(persistedScanId);
 
       } catch (err) {
@@ -156,7 +158,7 @@ const ScanForm = () => {
 
     setLoading(true);
     setScanProgress(0);
-    setScanStage('Initializing scan...');
+    setScanStage(t('initializingScan'));
     setError(null);
 
     try {
@@ -178,7 +180,7 @@ const ScanForm = () => {
       const analysisId = data.analysisId || data.data?.id;
 
       if (!analysisId) {
-        throw new Error("No analysisId in response");
+        throw new Error(t('noAnalysisId'));
       }
 
       setScanId(analysisId);
@@ -209,7 +211,7 @@ const ScanForm = () => {
       return;
     }
 
-    setScanStage('Stopping scan and restarting containers...');
+    setScanStage(t('stoppingScanRestarting'));
 
     try {
       // Call combined scan stop endpoint - stops ZAP & WebCheck, restarts both containers
@@ -223,7 +225,7 @@ const ScanForm = () => {
       const data = await response.json();
 
       if (data.success) {
-        setScanStage('Scan stopped - containers restarting for fresh environment');
+        setScanStage(t('scanStoppedRestarting'));
       }
 
       // Short delay to show the message before clearing
@@ -237,7 +239,7 @@ const ScanForm = () => {
 
     } catch (err) {
       console.error('Stop error:', err);
-      setError('Failed to stop scan');
+      setError(t('failedStopScan'));
       setLoading(false);
     }
   };
@@ -250,18 +252,18 @@ const ScanForm = () => {
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="Enter URL to scan (e.g., https://example.com)"
+            placeholder={t('enterUrlToScan')}
             required
             disabled={loading}
             className="url-input"
           />
           {!loading ? (
             <button type="submit" className="scan-button">
-              Start Scan
+              {t('startScan')}
             </button>
           ) : (
             <button type="button" onClick={handleStop} className="stop-button">
-              Stop Scan
+              {t('stopScan')}
             </button>
           )}
         </div>

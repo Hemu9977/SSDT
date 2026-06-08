@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/Profile.scss';
 
 import { API_BASE } from '../config/api';
@@ -17,6 +18,7 @@ const Profile = () => {
   const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false);
   const [downgradeDialogOpen, setDowngradeDialogOpen] = useState(false);
   const navigate = useNavigate();
+  const { t, currentLang } = useTranslation();
 
   const fetchProfile = async () => {
     const token = localStorage.getItem('token');
@@ -46,13 +48,13 @@ const Profile = () => {
           // Token is invalid or expired - clear it and redirect to login
           console.log('🔑 Profile: Token invalid/expired, clearing and redirecting...');
           localStorage.removeItem('token');
-          setError('Session expired. Please log in again.');
+          setError(t('sessionExpiredLoginAgain'));
           setTimeout(() => navigate('/login'), 2000);
           setLoading(false);
           return;
         }
 
-        throw new Error(errorData.message || 'Failed to fetch profile');
+        throw new Error(errorData.message || t('failedFetchProfile'));
       }
 
       const data = await res.json();
@@ -62,7 +64,7 @@ const Profile = () => {
       setLoading(false);
     } catch (err) {
       console.error('❌ Profile fetch error:', err);
-      setError(err.message || 'Failed to load profile. Check console for details.');
+      setError(err.message || t('failedLoadProfile'));
       setLoading(false);
     }
   };
@@ -97,7 +99,7 @@ const Profile = () => {
       });
 
       if (!res.ok) {
-        throw new Error('Failed to update profile');
+        throw new Error(t('failedUpdateProfile'));
       }
 
       const data = await res.json();
@@ -109,13 +111,13 @@ const Profile = () => {
       }));
 
       setEditing(false);
-      setSaveMessage('Profile updated successfully!');
+      setSaveMessage(t('profileUpdated'));
 
       // Clear success message after 3 seconds
       setTimeout(() => setSaveMessage(''), 3000);
     } catch (err) {
       console.error('Profile update error:', err);
-      setSaveMessage('Failed to update profile');
+      setSaveMessage(t('failedUpdateProfile'));
     }
   };
 
@@ -180,7 +182,7 @@ const Profile = () => {
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
+    return new Date(dateString).toLocaleDateString(currentLang === 'ja' ? 'ja-JP' : 'en-US', {
       year: 'numeric',
       month: 'long',
       day: 'numeric'
@@ -194,7 +196,7 @@ const Profile = () => {
         <Header />
         <main>
           <div className="profile-container">
-            <div className="loading">Loading profile...</div>
+            <div className="loading">{t('loadingProfile')}</div>
           </div>
         </main>
       </div>
@@ -224,9 +226,9 @@ const Profile = () => {
       <main>
         <div className="profile-container">
           <div className="profile-header">
-            <h1>My Profile</h1>
+            <h1>{t('myProfile')}</h1>
             {user.isPro && (
-              <span className="pro-badge">PRO</span>
+              <span className="pro-badge">{t('pro')}</span>
             )}
           </div>
 
@@ -239,20 +241,20 @@ const Profile = () => {
           {/* Account Information */}
           <div className="profile-section">
             <div className="section-header">
-              <h2>Account Information</h2>
+              <h2>{t('accountInformation')}</h2>
               {!editing ? (
-                <button onClick={handleEdit} className="btn-edit">Edit Profile</button>
+                <button onClick={handleEdit} className="btn-edit">{t('editProfile')}</button>
               ) : (
                 <div className="edit-buttons">
-                  <button onClick={handleSave} className="btn-save">Save</button>
-                  <button onClick={handleCancel} className="btn-cancel">Cancel</button>
+                  <button onClick={handleSave} className="btn-save">{t('save')}</button>
+                  <button onClick={handleCancel} className="btn-cancel">{t('cancel')}</button>
                 </div>
               )}
             </div>
 
             <div className="profile-info">
               <div className="info-row">
-                <label>Name:</label>
+                <label>{t('name')}:</label>
                 {editing ? (
                   <input
                     type="text"
@@ -266,39 +268,39 @@ const Profile = () => {
               </div>
 
               <div className="info-row">
-                <label>Email:</label>
+                <label>{t('email')}:</label>
                 <span>{user.email}</span>
               </div>
 
               <div className="info-row">
-                <label>Bio:</label>
+                <label>{t('bio')}:</label>
                 {editing ? (
                   <textarea
                     value={formData.bio}
                     onChange={(e) => setFormData({ ...formData, bio: e.target.value })}
                     className="edit-textarea"
-                    placeholder="Tell us about yourself (max 500 characters)"
+                    placeholder={t('bioPlaceholder')}
                     maxLength={500}
                   />
                 ) : (
-                  <span>{user.bio || 'No bio added yet'}</span>
+                  <span>{user.bio || t('noBioAdded')}</span>
                 )}
               </div>
 
               <div className="info-row">
-                <label>Account Type:</label>
+                <label>{t('accountType')}:</label>
                 <span className={`account-type ${user.accountType}`}>
                   {user.accountType.toUpperCase()}
                 </span>
               </div>
 
               <div className="info-row">
-                <label>Member Since:</label>
+                <label>{t('memberSince')}:</label>
                 <span>{formatDate(user.createdAt)}</span>
               </div>
 
               <div className="info-row">
-                <label>Last Login:</label>
+                <label>{t('lastLogin')}:</label>
                 <span>{formatDate(user.lastLoginAt)}</span>
               </div>
             </div>
@@ -306,30 +308,30 @@ const Profile = () => {
 
           {/* Statistics */}
           <div className="profile-section">
-            <h2>Statistics</h2>
+            <h2>{t('statistics')}</h2>
             <div className="stats-grid">
               <div className="stat-card">
                 <div className="stat-value">{user.totalScans}</div>
-                <div className="stat-label">Total Scans</div>
+                <div className="stat-label">{t('totalScans')}</div>
               </div>
               <div className="stat-card">
                 <div className="stat-value">{user.scansThisMonth}</div>
-                <div className="stat-label">This Month</div>
+                <div className="stat-label">{t('thisMonth')}</div>
               </div>
               <div className="stat-card">
                 <div className="stat-value">{limits.scansPerDay === -1 ? '∞' : limits.scansPerDay}</div>
-                <div className="stat-label">Daily Limit</div>
+                <div className="stat-label">{t('dailyLimit')}</div>
               </div>
               <div className="stat-card">
                 <div className="stat-value">{(limits.maxFileSize / (1024 * 1024)).toFixed(0)}MB</div>
-                <div className="stat-label">Max File Size</div>
+                <div className="stat-label">{t('maxFileSize')}</div>
               </div>
             </div>
           </div>
 
           {/* Recent Scans */}
           <div className="profile-section">
-            <h2>Recent Scans</h2>
+            <h2>{t('recentScans')}</h2>
             {recentScans.length > 0 ? (
               <div className="recent-scans">
                 {recentScans.map((scan) => (
@@ -341,12 +343,12 @@ const Profile = () => {
                       cursor: 'pointer',
                       transition: 'all 0.2s ease'
                     }}
-                    title={`Click to view scan results (Status: ${scan.status})`}
+                    title={t('clickViewScanResults', { status: scan.status })}
                   >
                     <div className="scan-target">{scan.target}</div>
                     <div className="scan-details">
                       {scan.triggerSource === 'scheduled' && (
-                        <span className="scan-tag scheduled">Scheduled Scan</span>
+                        <span className="scan-tag scheduled">{t('scheduledScan')}</span>
                       )}
                       <span className={`scan-status ${scan.status}`}>
                         {scan.status.charAt(0).toUpperCase() + scan.status.slice(1)}
@@ -358,28 +360,28 @@ const Profile = () => {
                 ))}
               </div>
             ) : (
-              <p className="no-scans">No scans yet. Start by analyzing a URL!</p>
+              <p className="no-scans">{t('noScansYet')}</p>
             )}
           </div>
 
           {/* Upgrade to Pro (only for free users) */}
           {!user.isPro && (
             <div className="profile-section pro-upgrade-section">
-              <h2>Upgrade to Pro</h2>
+              <h2>{t('upgradeToPro')}</h2>
               <div className="pro-features">
-                <p>Unlock premium features:</p>
+                <p>{t('unlockPremiumFeatures')}</p>
                 <ul>
-                  <li>✨ Unlimited scans per day</li>
-                  <li>📦 Larger file size limit (100MB)</li>
-                  <li>⚡ Priority scanning queue</li>
-                  <li>📊 Advanced analytics reports</li>
-                  <li>🔌 API access (coming soon)</li>
+                  <li>{t('unlimitedScans')}</li>
+                  <li>{t('largerFileLimit')}</li>
+                  <li>{t('priorityQueue')}</li>
+                  <li>{t('advancedAnalyticsReports')}</li>
+                  <li>{t('apiAccessComingSoon')}</li>
                 </ul>
                 <button onClick={handleUpgradeToPro} className="btn-upgrade">
-                  Upgrade to Pro - $9.99/month
+                  {t('upgradePrice')}
                 </button>
                 <p className="upgrade-note">
-                  Note: Payment integration coming soon. This is a preview of Pro features.
+                  {t('paymentComingSoon')}
                 </p>
               </div>
             </div>
@@ -388,15 +390,15 @@ const Profile = () => {
           {/* Pro Account Info (only for pro users) */}
           {user.isPro && user.proExpiresAt && (
             <div className="profile-section pro-info-section">
-              <h2>Pro Subscription</h2>
+              <h2>{t('proSubscription')}</h2>
               <div className="pro-info">
-                <p>Your Pro subscription is active until:</p>
+                <p>{t('proActiveUntil')}</p>
                 <p className="expiry-date">{formatDate(user.proExpiresAt)}</p>
                 <button onClick={handleDowngradeToFree} className="btn-downgrade">
-                  Cancel Pro & Return to Free
+                  {t('cancelProReturnFree')}
                 </button>
                 <p className="downgrade-note">
-                  Note: This is a prototype build for testing purposes.
+                  {t('prototypeNote')}
                 </p>
               </div>
             </div>
@@ -409,10 +411,10 @@ const Profile = () => {
         isOpen={upgradeDialogOpen}
         onConfirm={confirmUpgrade}
         onCancel={() => setUpgradeDialogOpen(false)}
-        title="Upgrade to Pro"
-        message="Are you sure you want to upgrade to Pro for $9.99/month? You'll unlock unlimited scans, larger file uploads (100MB), priority scanning queue, and advanced analytics reports."
-        confirmText="Upgrade Now"
-        cancelText="Cancel"
+        title={t('upgradeToPro')}
+        message={t('upgradeConfirmMessage')}
+        confirmText={t('upgradeNow')}
+        cancelText={t('cancel')}
         type="upgrade"
       />
 
@@ -421,10 +423,10 @@ const Profile = () => {
         isOpen={downgradeDialogOpen}
         onConfirm={confirmDowngrade}
         onCancel={() => setDowngradeDialogOpen(false)}
-        title="Cancel Pro Subscription"
-        message="Are you sure you want to cancel your Pro subscription? You'll lose access to Pro features immediately, including unlimited scans, larger file uploads, and advanced analytics."
-        confirmText="Cancel Subscription"
-        cancelText="Keep Pro"
+        title={t('cancelProSubscription')}
+        message={t('downgradeConfirmMessage')}
+        confirmText={t('cancelSubscription')}
+        cancelText={t('keepPro')}
         type="downgrade"
       />
     </div>

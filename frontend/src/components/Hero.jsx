@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from '../contexts/TranslationContext';
 import { useTheme } from '../context/ThemeContext';
+import { useNotifications } from '../contexts/NotificationContext';
 import ReactMarkdown from 'react-markdown';
 import ZapReportEnhanced from './ZapReportEnhanced';
 import WebCheckDetails from './WebCheckDetails';
@@ -36,18 +37,24 @@ const Hero = ({ historicalScan }) => {
   // 🔄 Active scan tracking for stop/resume functionality
   const [activeScanId, setActiveScanId] = useState(null);
   const [scanUrl, setScanUrl] = useState('');
-  const stopPollingRef = useRef(false); // Flag to stop polling when scan is stopped
-  const isPollingRef = useRef(false); // Flag to prevent duplicate polling instances
-  const abortControllerRef = useRef(null); // AbortController for cancelling in-flight requests
+  const stopPollingRef = useRef(false);
+  // Legacy: kept only to guard against accidental duplicate polling calls in older code paths.
+  // Polling fallback is effectively disabled (no watchdog triggers it).
+  const isPollingRef = useRef(false);
+  const abortControllerRef = useRef(null);
 
-  // ⚡ ZAP is now handled by backend combined scan - keeping zapReport for backward compatibility with useEffect
+  // ⚡ WebSocket-first scan progress path with HTTP polling fallback.
+  const wsListeningRef   = useRef(false); // prevents duplicate WS listener registration
+  const activeScanIdRef  = useRef(null);  // mirror of activeScanId for use inside closures
+  const wsWatchdogRef    = useRef(null);  // timer: activates polling if WS is silent for 15s
+  const pollRef          = useRef(null);  // stable ref to latest pollAnalysis closure
+
+  // ⚡ ZAP is handled by backend; kept for backward compat with useEffect
   const [zapReport] = useState(null);
 
-  // 🔍 WebCheck now runs in backend and results come from database via polling
-  // No more frontend WebCheck API calls - backend handles everything
-
   const navigate = useNavigate();
-  const { currentLang, setHasReport } = useTranslation();
+  const { currentLang, setHasReport, t } = useTranslation();
+  const { addScanListener, removeScanListener } = useNotifications();
   const { theme } = useTheme();
 
   // 🌐 Report Translation State
@@ -68,6 +75,36 @@ const Hero = ({ historicalScan }) => {
     document.addEventListener('click', handleClickOutside);
     return () => document.removeEventListener('click', handleClickOutside);
   }, [pdfDropdownOpen]);
+
+  // Reset AI report translation when a new scan begins
+  useEffect(() => {
+    setTranslatedReport(null);
+    setIsTranslatingReport(false);
+  }, [report?.analysisId]);
+
+  // Translate the AI-generated security report when the user switches to Japanese.
+  // Uses Gemini via POST /api/translate because the report is dynamic markdown content.
+  useEffect(() => {
+    if (currentLang !== 'ja') return;
+    if (!report?.refinedReport) return;
+    if (translatedReport !== null) return; // already translated for this scan
+
+    const controller = new AbortController();
+    setIsTranslatingReport(true);
+
+    fetch(`${API_BASE}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: [report.refinedReport], targetLang: 'ja' }),
+      signal: controller.signal,
+    })
+      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+      .then(data => { if (data.translated?.[0]) setTranslatedReport(data.translated[0]); })
+      .catch(err => { if (err.name !== 'AbortError') console.error('[AI Report] Translation failed:', err.message); })
+      .finally(() => setIsTranslatingReport(false));
+
+    return () => controller.abort();
+  }, [currentLang, report?.refinedReport, translatedReport]);
 
   // Handle historical scan data passed as prop
   useEffect(() => {
@@ -143,18 +180,30 @@ const Hero = ({ historicalScan }) => {
       
       // If scan is still in progress, resume polling
       if (!['completed', 'failed', 'stopped'].includes(historicalScan.status)) {
-        console.log(`🔄 Historical scan ${historicalScan.analysisId} is still ${historicalScan.status} - resuming polling`);
+        console.log(`🔄 Historical scan ${historicalScan.analysisId} is still ${historicalScan.status} - resuming`);
         setLoading(true);
-        setLoadingStage('Resuming scan...');
+        setLoadingStage(t('resumingScan'));
         stopPollingRef.current = false;
-        
+
         const token = localStorage.getItem('token');
-        pollAnalysis(historicalScan.analysisId, token);
+        activeScanIdRef.current = historicalScan.analysisId;
+        // eslint-disable-next-line no-use-before-define
+        startWebSocketListener(historicalScan.analysisId, token);
       } else {
         setLoading(false);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historicalScan]);
+
+  // Cleanup WS listener on unmount
+  useEffect(() => {
+    return () => {
+      if (activeScanIdRef.current) {
+        removeScanListener(activeScanIdRef.current);
+      }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Check for pending schedule on mount
   useEffect(() => {
@@ -270,9 +319,9 @@ const Hero = ({ historicalScan }) => {
           isPartial: true
         });
 
-        // Start polling for updates (scan still in progress)
-        // WebCheck progress will be included in poll responses
-        pollAnalysis(data.analysisId, token);
+        // Resume with WebSocket-first (polling fallback activates after WS_FALLBACK_MS silence)
+        activeScanIdRef.current = data.analysisId;
+        startWebSocketListener(data.analysisId, token);
 
       } catch (err) {
         console.error('Error checking for active scan:', err);
@@ -284,69 +333,32 @@ const Hero = ({ historicalScan }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historicalScan]);
 
-  // Translate the report when language changes to Japanese
-  useEffect(() => {
-    const translateReport = async () => {
-      const refinedReport = report?.refinedReport;
-
-      // 🌐 Force English if lang=en is in URL (Scheduled Scan requirement)
-      const urlParams = new URLSearchParams(window.location.search);
-      const forceEn = urlParams.get('lang') === 'en';
-
-      // Don't translate if no report or already translated
-      if (!refinedReport) return;
-      if (forceEn) {
-        console.log('🌐 Language forced to English via URL parameter');
-        return;
-      }
-      if (currentLang !== 'ja') return; // Just don't translate, but keep the cached version
-      if (translatedReport) return; // Already have translation cached
-
-      setIsTranslatingReport(true);
-      try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(`${API_BASE}/api/translate`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-auth-token': token
-          },
-          body: JSON.stringify({
-            texts: [refinedReport],
-            targetLang: 'ja'
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          if (data.translated && data.translated[0]) {
-            setTranslatedReport(data.translated[0]);
-            console.log('✅ Report translated to Japanese (cached for future use)');
-          }
-        }
-      } catch (err) {
-        console.error('❌ Report translation failed:', err);
-      } finally {
-        setIsTranslatingReport(false);
-      }
-    };
-
-    translateReport();
-  }, [report?.refinedReport, currentLang, translatedReport]);
+  // Report prose is rendered exactly as provided by the backend. Frontend UI
+  // localization uses only static local dictionaries and makes no translation calls.
 
   // ⚡ ZAP scan is now integrated in the backend combined scan
   // No need for independent frontend ZAP call
 
   // 🛑 Stop scan handler
   const handleStopScan = async () => {
-    // IMMEDIATELY set stop flag to prevent any new polling
+    // IMMEDIATELY set stop flag to prevent any new updates/fetches
     stopPollingRef.current = true;
-    console.log('🛑 Stop button clicked - stopping polling');
+    console.log('🛑 Stop button clicked - stopping scan updates');
 
-    // Abort any in-flight fetch requests immediately
+    // Unregister WebSocket scan listener and cancel watchdog
+    if (activeScanIdRef.current) {
+      removeScanListener(activeScanIdRef.current);
+      wsListeningRef.current = false;
+    }
+    if (wsWatchdogRef.current) {
+      clearTimeout(wsWatchdogRef.current);
+      wsWatchdogRef.current = null;
+    }
+
+    // Abort any in-flight fetch requests immediately (one-off fetches, etc.)
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
-      console.log('🛑 Aborted in-flight polling requests');
+      console.log('🛑 Aborted in-flight requests');
     }
 
     // Get scanId from state or localStorage as fallback
@@ -366,10 +378,10 @@ const Hero = ({ historicalScan }) => {
     }
 
     if (!scanIdToStop) {
-      console.log('⏳ No scan ID yet - scan still initializing, stopping polling only');
+      console.log('⏳ No scan ID yet - scan still initializing, stopping UI only');
       // Stop polling and clear UI even if we don't have a scan ID yet
       stopPollingRef.current = true;
-      setLoadingStage('Stopping scan...');
+      setLoadingStage(t('stoppingScan'));
       setTimeout(() => {
         setLoading(false);
         setActiveScanId(null);
@@ -388,7 +400,7 @@ const Hero = ({ historicalScan }) => {
     }
 
     console.log('🛑 Stopping scan:', scanIdToStop);
-    setLoadingStage('Stopping scan and restarting containers...');
+    setLoadingStage(t('stoppingScanAndRestartingContainers'));
 
     try {
       const response = await fetch(`${API_BASE}/api/vt/stop-scan/${scanIdToStop}`, {
@@ -402,10 +414,10 @@ const Hero = ({ historicalScan }) => {
       console.log('🛑 Stop response:', data);
 
       if (data.success) {
-        setLoadingStage('Scan stopped - containers restarting for fresh environment');
+        setLoadingStage(t('scanStoppedContainersRestartingForFreshEnvironment'));
       } else {
         console.error('Stop failed:', data);
-        setLoadingStage('Stop request sent...');
+        setLoadingStage(t('stopRequestSent'));
       }
 
       // Short delay to show the message before clearing
@@ -420,12 +432,110 @@ const Hero = ({ historicalScan }) => {
 
     } catch (err) {
       console.error('Stop error:', err);
-      setError('Failed to stop scan: ' + err.message);
+      setError(t('failedToStopScanWithReason', { reason: err.message }));
       setLoading(false);
     }
   };
 
-  // 🔄 Reusable polling function
+  // ──────────────────────────────────────────────────────────────────────────
+  // applyUpdateData — merges a scan:update payload (from WS or poll) into state
+  // ──────────────────────────────────────────────────────────────────────────
+  const applyUpdateData = useCallback((data) => {
+    const status = data.status;
+
+    if (status === 'completed') {
+      // WS sends `aiReport`; component reads `report.refinedReport` — normalize the key
+      const normalized = { ...data };
+      if (normalized.aiReport && !normalized.refinedReport) {
+        normalized.refinedReport = normalized.aiReport;
+      }
+      setReport(prev => ({ ...prev, ...normalized, isPartial: false }));
+      setHasReport(true);
+      setLoading(false);
+      setLoadingProgress(100);
+      setLoadingStage('');
+      localStorage.removeItem('activeScan');
+      setActiveScanId(null);
+      activeScanIdRef.current = null;
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) { clearTimeout(wsWatchdogRef.current); wsWatchdogRef.current = null; }
+
+      // WS events carry raw fields only; fetch processed score-card summaries
+      // (psiScores, observatoryData, zapData, webCheckData, urlscanData, analysisId)
+      const token = localStorage.getItem('token');
+      if (token) {
+        fetch(`${API_BASE}/api/vt/active-scan`, { headers: { 'x-auth-token': token } })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.hasActiveScan) setReport(prev => ({ ...prev, ...d, isPartial: false })); })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    if (status === 'failed') {
+      setLoading(false);
+      setLoadingProgress(0);
+      setLoadingStage('');
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) { clearTimeout(wsWatchdogRef.current); wsWatchdogRef.current = null; }
+      setError(t('analysisFailed', { reason: data.error || t('unknownError') }));
+      localStorage.removeItem('activeScan');
+      setActiveScanId(null);
+      activeScanIdRef.current = null;
+      return;
+    }
+
+    if (status === 'stopped') {
+      setLoading(false);
+      setLoadingStage(t('scanWasStopped'));
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) { clearTimeout(wsWatchdogRef.current); wsWatchdogRef.current = null; }
+      localStorage.removeItem('activeScan');
+      setActiveScanId(null);
+      activeScanIdRef.current = null;
+      return;
+    }
+
+    // Partial update — merge in whatever data arrived
+    setReport(prev => ({ ...(prev || {}), ...data, isPartial: true }));
+    if (data.progress != null) setLoadingProgress(data.progress);
+    if (data.message)           setLoadingStage(data.message);
+  }, [setHasReport, t]);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // startWebSocketListener — primary real-time path
+  // ──────────────────────────────────────────────────────────────────────────
+  const startWebSocketListener = useCallback((analysisId, token) => {
+    if (wsListeningRef.current) return;
+    wsListeningRef.current = true;
+
+    console.log('⚡ WebSocket listener registered for scan:', analysisId);
+
+    addScanListener(analysisId, (data) => {
+      if (stopPollingRef.current) return;
+      // First WS event cancels the polling watchdog — WebSocket is alive
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      console.log('⚡ scan:update via WebSocket:', data.status, data.progress);
+      applyUpdateData(data);
+    });
+
+    // Watchdog: if no WS event arrives within 15s, fall back to HTTP polling
+    wsWatchdogRef.current = setTimeout(() => {
+      wsWatchdogRef.current = null;
+      if (!stopPollingRef.current && wsListeningRef.current) {
+        console.warn('⚠️ No WS event in 15s — activating HTTP polling fallback');
+        pollRef.current?.(analysisId, token);
+      }
+    }, 15000);
+  }, [addScanListener, applyUpdateData]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // pollAnalysis — HTTP fallback (unchanged shape, used when WS is silent)
+  // ──────────────────────────────────────────────────────────────────────────
+  // 🔄 Polling fallback — triggered by watchdog in startWebSocketListener when WS is silent
   const pollAnalysis = async (analysisId, token) => {
     // Prevent duplicate polling instances (React StrictMode / double useEffect)
     if (isPollingRef.current) {
@@ -433,6 +543,8 @@ const Hero = ({ historicalScan }) => {
       return;
     }
     isPollingRef.current = true;
+    // Polling is now the primary path; WS listener guard is no longer needed
+    wsListeningRef.current = false;
 
     let attempts = 0;
     // Increased from 60 to 450 attempts (15 minutes at 2-second intervals)
@@ -480,7 +592,7 @@ const Hero = ({ historicalScan }) => {
 
         if (status === 'completed') {
           setLoadingProgress(100);
-          setLoadingStage('Analysis complete!');
+          setLoadingStage(t('analysisComplete'));
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
           setScanUrl('');
@@ -499,7 +611,7 @@ const Hero = ({ historicalScan }) => {
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
           setLoading(false);
-          setLoadingStage('Scan was stopped');
+          setLoadingStage(t('scanWasStopped'));
           isPollingRef.current = false; // Reset polling flag
         } else if (attempts >= maxAttempts) {
           setLoading(false);
@@ -509,22 +621,22 @@ const Hero = ({ historicalScan }) => {
           console.log('Max attempts reached, showing partial results');
         } else {
           // Show progress indicators based on what we have
-          let statusMessage = 'Analyzing...';
+          let statusMessage = t('analyzing');
           const hasPsi = analysisData.hasPsiResult;
           const hasObs = analysisData.hasObservatoryResult;
           const hasZap = analysisData.hasZapResult;
           const zapPending = analysisData.zapPending;
           const hasAi = analysisData.hasRefinedReport;
 
-          if (!hasPsi || !hasObs) statusMessage = '📊 Fetching performance & security metadata...';
+          if (!hasPsi || !hasObs) statusMessage = `📊 ${t('fetchingPerformanceAndSecurityMetadata')}`;
           else if (zapPending && analysisData.zapData) {
             const zapPhase = analysisData.zapData.phase || 'scanning';
             const zapProgress = analysisData.zapData.progress || 0;
-            statusMessage = `⚡ Vulnerability Analysis: ${zapPhase} (${zapProgress}%)...`;
+            statusMessage = `⚡ ${t('vulnerabilityAnalysisInProgress', { phase: zapPhase, progress: zapProgress })}`;
           }
-          else if (!hasZap && !zapPending) statusMessage = '⚡ Starting comprehensive vulnerability scan...';
-          else if (!hasAi) statusMessage = '🤖 Generating AI-powered security insights...';
-          else statusMessage = '✅ Finalizing results...';
+          else if (!hasZap && !zapPending) statusMessage = `⚡ ${t('startingComprehensiveVulnerabilityScan')}`;
+          else if (!hasAi) statusMessage = `🤖 ${t('generatingAiPoweredSecurityInsights')}`;
+          else statusMessage = `✅ ${t('finalizingResults')}`;
 
           setLoadingStage(statusMessage);
           setTimeout(poll, 2000);
@@ -550,6 +662,9 @@ const Hero = ({ historicalScan }) => {
 
     await poll();
   };
+  // Keep pollRef pointed at the latest closure so the WS watchdog can invoke it without
+  // needing pollAnalysis as a stable useCallback dep.
+  pollRef.current = pollAnalysis;
 
   // 🔍 WebCheck scans now run entirely in backend - no frontend API calls needed
   // Results come via the combined-analysis polling endpoint along with ZAP and other scans
@@ -564,7 +679,7 @@ const Hero = ({ historicalScan }) => {
     }
 
     setLoading(true);
-    setLoadingStage('Saving schedule...');
+    setLoadingStage(t('savingSchedule'));
     setError(null);
 
     try {
@@ -585,11 +700,11 @@ const Hero = ({ historicalScan }) => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create schedule');
+      if (!res.ok) throw new Error(data.error || t('failedSaveSchedule'));
 
       sessionStorage.removeItem('pendingScheduleConfig');
       setPendingSchedule(null);
-      alert('Schedule created successfully!');
+      alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
       setError(err.message);
@@ -614,7 +729,7 @@ const Hero = ({ historicalScan }) => {
 
     setLoading(true);
     setLoadingProgress(0);
-    setLoadingStage('Initializing scan...');
+    setLoadingStage(t('initializingScan'));
     setError(null);
     setReport(null);
     setScanUrl(url);
@@ -628,7 +743,7 @@ const Hero = ({ historicalScan }) => {
     try {
       console.log('🔍 Submitting URL for scan:', url);
       setLoadingProgress(10);
-      setLoadingStage('Analyzing target environment...');
+      setLoadingStage(t('analyzingTargetEnvironment'));
 
       const res = await fetch(`${API_BASE}/api/vt/combined-url-scan`, {
         method: 'POST',
@@ -650,7 +765,7 @@ const Hero = ({ historicalScan }) => {
 
       const data = await res.json();
       setLoadingProgress(20);
-      setLoadingStage('Scan request accepted...');
+      setLoadingStage(t('scanRequestAccepted'));
 
       const analysisId = data.analysisId || data.data?.id;
       if (!analysisId) throw new Error("No analysisId in response");
@@ -664,7 +779,7 @@ const Hero = ({ historicalScan }) => {
       }));
 
       setLoadingProgress(30);
-      setLoadingStage('Performing comprehensive site analysis...');
+      setLoadingStage(t('performingComprehensiveSiteAnalysis'));
 
       // Check if stop was clicked during the initial API call
       if (stopPollingRef.current) {
@@ -674,12 +789,23 @@ const Hero = ({ historicalScan }) => {
         return;
       }
 
-      // Use the reusable polling function
-      await pollAnalysis(analysisId, token);
+      // ⚡ WebSocket-first: register listener immediately so we don't miss early events.
+      // Always reset wsListeningRef so a second scan on the same page gets a fresh listener,
+      // and remove any stale listener left from the previous scan.
+      if (activeScanIdRef.current) {
+        removeScanListener(activeScanIdRef.current);
+      }
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      wsListeningRef.current = false;
+      activeScanIdRef.current = analysisId;
+      startWebSocketListener(analysisId, token);
 
     } catch (err) {
       console.error('Analysis error:', err);
-      let errorMessage = "Analysis failed: ";
+      let errorMessage = t('analysisFailed', { reason: '' });
       if (err.message.includes('429')) errorMessage = err.message;
       else errorMessage += err.message;
 
@@ -768,7 +894,7 @@ const Hero = ({ historicalScan }) => {
           </div>
         )}
 
-        <h3 className="report-title">📊 Combined Scan Report {report?.target ? `for ${report.target}` : ''}</h3>
+        <h3 className="report-title">📊 {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
         {report?.status && <p>Status: <b>{report.status}</b></p>}
 
         {/* AI Summary - Shows loading placeholder or content */}
@@ -781,7 +907,7 @@ const Hero = ({ historicalScan }) => {
           lineHeight: '1.6',
           fontSize: '0.95rem'
         }}>
-          <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>🤖 AI-Generated Analysis Summary</h4>
+          <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>{t('aiGeneratedAnalysisSummary')}</h4>
           {refinedReport ? (
             isTranslatingReport ? (
               <div style={{ textAlign: 'center', padding: '1rem' }}>
@@ -822,13 +948,13 @@ const Hero = ({ historicalScan }) => {
                 {zapPendingMessage ? (
                   <p className="score-card__label" style={{ color: '#ffb900' }}>{zapPendingMessage}</p>
                 ) : backendZapData.status === 'completed' ? (
-                  <p className="score-card__label">{backendZapData.alerts ? backendZapData.alerts.length : 0} Alerts</p>
+                  <p className="score-card__label">{t('alertsCount', { count: backendZapData.alerts ? backendZapData.alerts.length : 0 })}</p>
                 ) : backendZapData.status === 'completed_partial' ? (
-                  <p className="score-card__label" style={{ color: '#ffb900' }}>{backendZapData.alerts ? backendZapData.alerts.length : 0} Alerts (Partial)</p>
+                  <p className="score-card__label" style={{ color: '#ffb900' }}>{t('alertsCountPartial', { count: backendZapData.alerts ? backendZapData.alerts.length : 0 })}</p>
                 ) : null}
               </>
             ) : report?.zapResult?.error || (report?.status === 'completed' && !report?.hasZapResult) ? (
-              <div style={{ color: '#ffb900', marginTop: '10px' }}>Unavailable</div>
+              <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
             ) : (
               <div className="score-card__loading loading-pulse">
                 <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
@@ -840,11 +966,11 @@ const Hero = ({ historicalScan }) => {
           {/* Performance (PSI) */}
           {/* Performance (PSI) */}
           <div className="score-card">
-            <h4 className="score-card__title">⚡ Performance</h4>
+            <h4 className="score-card__title">⚡ {t('performance')}</h4>
             {psiScores?.performance != null ? (
               <>
                 <span className={`score-card__value ${getScoreClass(psiScores.performance)}`}>{psiScores.performance}</span>
-                <p className="score-card__label">out of 100</p>
+                <p className="score-card__label">{t('outOf100')}</p>
               </>
             ) : (
               <div className="score-card__loading loading-pulse">
@@ -859,7 +985,7 @@ const Hero = ({ historicalScan }) => {
           {/* Security Config (Observatory) */}
           {/* Security Config (Observatory) */}
           <div className="score-card">
-            <h4 className="score-card__title">🔒 Security Config</h4>
+            <h4 className="score-card__title">🔒 {t('securityConfig')}</h4>
             {observatoryData?.grade ? (
               <>
                 <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
@@ -885,11 +1011,11 @@ const Hero = ({ historicalScan }) => {
                   {report.urlscanData.verdicts?.overall?.malicious ? 'Malicious' : 'Clean'}
                 </span>
                 <p className="score-card__label">
-                  {report.urlscanData.verdicts?.overall?.score || 0} threat score
+                  {report.urlscanData.verdicts?.overall?.score || 0} {t('threatScore')}
                 </p>
               </>
             ) : report?.urlscanResult?.error || (report?.status === 'completed' && !report?.hasUrlscanResult) ? (
-              <div style={{ color: '#ffb900', marginTop: '10px' }}>Unavailable</div>
+              <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
             ) : (
               <div className="score-card__loading loading-pulse">
                 <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
@@ -901,25 +1027,25 @@ const Hero = ({ historicalScan }) => {
           {/* 🔍 WebCheck: SSL Certificate */}
           {/* 🔍 WebCheck: SSL Certificate */}
           <div className="score-card">
-            <h4 className="score-card__title">🔐 SSL Certificate</h4>
+            <h4 className="score-card__title">🔐 {t('sslCertificate')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.ssl && !webCheckReport.ssl.error ? (
               <>
                 <span className="score-card__value score-card__value--safe">Valid</span>
-                <p className="score-card__label">{webCheckReport.ssl.issuer?.O || 'Unknown Issuer'}</p>
+                <p className="score-card__label">{webCheckReport.ssl.issuer?.O || t('unknownIssuer')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{webCheckError ? 'Failed' : 'Pending'}</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{webCheckError ? t('scanFailed') : t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Security Headers */}
           {/* 🔍 WebCheck: Security Headers */}
           <div className="score-card">
-            <h4 className="score-card__title">🛡️ Security Headers</h4>
+            <h4 className="score-card__title">🛡️ {t('securityHeaders')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['http-security'] && !webCheckReport['http-security'].error ? (
               <>
                 {(() => {
@@ -928,19 +1054,19 @@ const Hero = ({ historicalScan }) => {
                   const color = passed >= 4 ? '#00d084' : passed >= 2 ? '#ffb900' : '#e81123';
                   return <span className="score-card__value" style={{ color }}>{passed}/5</span>;
                 })()}
-                <p className="score-card__label">Headers Present</p>
+                <p className="score-card__label">{t('headersPresent')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Tech Stack */}
           {/* 🔍 WebCheck: Tech Stack */}
           <div className="score-card">
-            <h4 className="score-card__title">🛠️ Tech Stack</h4>
+            <h4 className="score-card__title">🛠️ {t('techStack')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : (() => {
               // Handle various response formats from tech-stack scan
               const techData = webCheckReport?.['tech-stack'];
@@ -952,13 +1078,13 @@ const Hero = ({ historicalScan }) => {
                 return (
                   <>
                     <span className="score-card__value score-card__value--safe">{techArray.length}</span>
-                    <p className="score-card__label">Technologies Detected</p>
+                    <p className="score-card__label">{t('technologiesDetected')}</p>
                   </>
                 );
               } else if (techData && !techData.error) {
-                return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>No technologies detected</div>;
+                return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('noTechnologiesDetected')}</div>;
               } else {
-                return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{techData?.error ? 'Scan Failed' : 'Pending'}</div>;
+                return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{techData?.error ? t('scanFailed') : t('pending')}</div>;
               }
             })()}
           </div>
@@ -966,45 +1092,45 @@ const Hero = ({ historicalScan }) => {
           {/* 🔍 WebCheck: Firewall/WAF */}
           {/* 🔍 WebCheck: Firewall/WAF */}
           <div className="score-card">
-            <h4 className="score-card__title">🔥 Firewall</h4>
+            <h4 className="score-card__title">🔥 {t('firewall')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.firewall && !webCheckReport.firewall.error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport.firewall.hasWaf ? 'safe' : 'medium'}`}>
                   {webCheckReport.firewall.hasWaf ? webCheckReport.firewall.waf : 'None Detected'}
                 </span>
-                <p className="score-card__label">WAF Status</p>
+                <p className="score-card__label">{t('wafStatus')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: TLS Grade */}
           {/* 🔍 WebCheck: TLS Grade */}
           <div className="score-card">
-            <h4 className="score-card__title">🔒 TLS Grade</h4>
+            <h4 className="score-card__title">🔒 {t('tlsGrade')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.tls && !webCheckReport.tls.error ? (
               <>
                 <span className="score-card__value" style={{ color: getObservatoryGradeColor(webCheckReport.tls.tlsInfo?.grade) }}>
                   {webCheckReport.tls.tlsInfo?.grade || 'N/A'}
                 </span>
-                <p className="score-card__label">Score: {webCheckReport.tls.tlsInfo?.score || 0}/100</p>
+                <p className="score-card__label">{t('scoreOf100', { score: webCheckReport.tls.tlsInfo?.score || 0 })}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Quality (PageSpeed) */}
           {/* 🔍 WebCheck: Quality (PageSpeed) */}
           <div className="score-card">
-            <h4 className="score-card__title">📊 Quality</h4>
+            <h4 className="score-card__title">📊 {t('quality')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.quality && !webCheckReport.quality.error ? (
               (() => {
                 const perfScore = Math.round((webCheckReport.quality.lighthouseResult?.categories?.performance?.score || 0) * 100);
@@ -1013,32 +1139,32 @@ const Hero = ({ historicalScan }) => {
                     <span className={`score-card__value score-card__value--${perfScore >= 90 ? 'safe' : perfScore >= 50 ? 'medium' : 'high'}`}>
                       {perfScore}
                     </span>
-                    <p className="score-card__label">Optimization Score</p>
+                    <p className="score-card__label">{t('optimizationScore')}</p>
                   </>
                 );
               })()
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Mail Config */}
           {/* 🔍 WebCheck: Mail Config */}
           <div className="score-card">
-            <h4 className="score-card__title">📧 Mail Config</h4>
+            <h4 className="score-card__title">📧 {t('mailConfig')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['mail-config'] && !webCheckReport['mail-config'].error && !webCheckReport['mail-config'].skipped ? (
               <>
                 <span className="score-card__value score-card__value--safe">
                   {webCheckReport['mail-config'].mxRecords?.length || 0}
                 </span>
-                <p className="score-card__label">MX Records Found</p>
+                <p className="score-card__label">{t('mxRecordsFound')}</p>
               </>
             ) : webCheckReport?.['mail-config']?.skipped ? (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>No Mail Server</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('noMailServer')}</div>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
@@ -1047,16 +1173,16 @@ const Hero = ({ historicalScan }) => {
           <div className="score-card">
             <h4 className="score-card__title">📋 WHOIS</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.whois && !webCheckReport.whois.error ? (
               <>
                 <span className="score-card__value score-card__value--safe" style={{ fontSize: '0.9rem' }}>
                   {webCheckReport.whois.registrar?.substring(0, 20) || 'Found'}
                 </span>
-                <p className="score-card__label">Domain Registered</p>
+                <p className="score-card__label">{t('domainRegistered')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
@@ -1065,25 +1191,25 @@ const Hero = ({ historicalScan }) => {
           <div className="score-card">
             <h4 className="score-card__title">🔐 HSTS</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.hsts && !webCheckReport.hsts.error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport.hsts.hstsEnabled ? 'safe' : 'high'}`}>
                   {webCheckReport.hsts.hstsEnabled ? 'Enabled' : 'Disabled'}
                 </span>
-                <p className="score-card__label">{webCheckReport.hsts.hstsPreloaded ? 'Preloaded' : 'Not Preloaded'}</p>
+                <p className="score-card__label">{webCheckReport.hsts.hstsPreloaded ? t('preloaded') : t('notPreloaded')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Block Lists */}
           {/* 🔍 WebCheck: Block Lists */}
           <div className="score-card">
-            <h4 className="score-card__title">🚫 Security Blacklist</h4>
+            <h4 className="score-card__title">🚫 {t('securityBlacklist')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['block-lists'] && !webCheckReport['block-lists'].error ? (
               (() => {
                 const blocklists = webCheckReport['block-lists'].blocklists || [];
@@ -1093,83 +1219,83 @@ const Hero = ({ historicalScan }) => {
                     <span className={`score-card__value score-card__value--${blockedCount === 0 ? 'safe' : 'high'}`}>
                       {blockedCount === 0 ? 'Clean' : `${blockedCount} Found`}
                     </span>
-                    <p className="score-card__label">{blocklists.length} Lists Checked</p>
+                    <p className="score-card__label">{t('listsChecked', { count: blocklists.length })}</p>
                   </>
                 );
               })()
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Carbon Footprint */}
           {/* 🔍 WebCheck: Carbon Footprint */}
           <div className="score-card">
-            <h4 className="score-card__title">🌱 Carbon</h4>
+            <h4 className="score-card__title">🌱 {t('carbon')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.carbon && !webCheckReport.carbon.error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport.carbon.isGreen ? 'safe' : 'medium'}`}>
                   {webCheckReport.carbon.isGreen ? 'Green' : 'Standard'}
                 </span>
-                <p className="score-card__label">{webCheckReport.carbon.co2?.grid?.grams ? `${webCheckReport.carbon.co2.grid.grams.toFixed(2)}g CO2` : 'Hosting'}</p>
+                <p className="score-card__label">{webCheckReport.carbon.co2?.grid?.grams ? `${webCheckReport.carbon.co2.grid.grams.toFixed(2)}g CO2` : t('hosting')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Archives */}
           {/* 🔍 WebCheck: Archives */}
           <div className="score-card">
-            <h4 className="score-card__title">📚 Archives</h4>
+            <h4 className="score-card__title">📚 {t('archives')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.archives?.skipped ? (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Not Archived</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('notArchived')}</div>
             ) : webCheckReport?.archives?.totalScans ? (
               <>
                 <span className="score-card__value score-card__value--safe">
                   {webCheckReport.archives.totalScans}
                 </span>
-                <p className="score-card__label">Historical Snapshots</p>
+                <p className="score-card__label">{t('historicalSnapshots')}</p>
               </>
             ) : webCheckReport?.archives?.error ? (
-              <div className="score-card__label" style={{ color: '#ffb900', marginTop: '10px' }}>Timeout</div>
+              <div className="score-card__label" style={{ color: '#ffb900', marginTop: '10px' }}>{t('timeout')}</div>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Sitemap */}
           {/* 🔍 WebCheck: Sitemap */}
           <div className="score-card">
-            <h4 className="score-card__title">🗺️ Sitemap</h4>
+            <h4 className="score-card__title">🗺️ {t('sitemap')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.sitemap?.skipped || webCheckReport?.sitemap?.error ? (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Not Found</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('notFound')}</div>
             ) : webCheckReport?.sitemap?.urlset ? (
               <>
                 <span className="score-card__value score-card__value--safe">
                   {webCheckReport.sitemap.urlset?.url?.length || 'Found'}
                 </span>
-                <p className="score-card__label">URLs in Sitemap</p>
+                <p className="score-card__label">{t('urlsInSitemap')}</p>
               </>
             ) : webCheckReport?.sitemap ? (
               <div className="score-card__value score-card__value--safe" style={{ fontSize: '1.2rem' }}>Found</div>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Social Tags */}
           {/* 🔍 WebCheck: Social Tags */}
           <div className="score-card">
-            <h4 className="score-card__title">📱 Social Tags</h4>
+            <h4 className="score-card__title">📱 {t('socialTags')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['social-tags'] && !webCheckReport['social-tags'].error ? (
               (() => {
                 const tags = webCheckReport['social-tags'];
@@ -1185,58 +1311,58 @@ const Hero = ({ historicalScan }) => {
                 );
               })()
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Linked Pages */}
           <div className="score-card">
-            <h4 className="score-card__title">🔗 Links</h4>
+            <h4 className="score-card__title">🔗 {t('links')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['linked-pages'] && !webCheckReport['linked-pages'].error ? (
               <>
                 <span className="score-card__value score-card__value--safe">
                   {webCheckReport['linked-pages'].internal?.length || webCheckReport['linked-pages'].links?.length || 0}
                 </span>
-                <p className="score-card__label">Links Found</p>
+                <p className="score-card__label">{t('linksFound')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Redirects */}
           <div className="score-card">
-            <h4 className="score-card__title">↪️ Redirects</h4>
+            <h4 className="score-card__title">↪️ {t('redirects')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.redirects && !webCheckReport.redirects.error ? (
               <>
                 <span className={`score-card__value score-card__value--${(webCheckReport.redirects.redirects?.length || 0) <= 2 ? 'safe' : 'medium'}`}>
                   {webCheckReport.redirects.redirects?.length || 0}
                 </span>
-                <p className="score-card__label">Redirect Hops</p>
+                <p className="score-card__label">{t('redirectHops')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: DNS Server */}
           <div className="score-card">
-            <h4 className="score-card__title">🌐 DNS Server</h4>
+            <h4 className="score-card__title">🌐 {t('dnsServer')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['dns-server'] && !webCheckReport['dns-server'].error ? (
               <>
                 <span className="score-card__value score-card__value--safe" style={{ fontSize: '1.2rem' }}>
                   {webCheckReport['dns-server'].dns?.length || 1}
                 </span>
-                <p className="score-card__label">Servers Found</p>
+                <p className="score-card__label">{t('serversFound')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
@@ -1244,16 +1370,16 @@ const Hero = ({ historicalScan }) => {
           <div className="score-card">
             <h4 className="score-card__title">🔑 DNSSEC</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.dnssec && !webCheckReport.dnssec.error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>
                   {webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'Valid' : 'Not Set'}
                 </span>
-                <p className="score-card__label">DNSSEC Status</p>
+                <p className="score-card__label">{t('dnssecStatus')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
@@ -1261,67 +1387,67 @@ const Hero = ({ historicalScan }) => {
           <div className="score-card">
             <h4 className="score-card__title">📄 Security.txt</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['security-txt'] && !webCheckReport['security-txt'].error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport['security-txt'].isPresent || webCheckReport['security-txt'].found ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>
                   {webCheckReport['security-txt'].isPresent || webCheckReport['security-txt'].found ? 'Found' : 'Missing'}
                 </span>
-                <p className="score-card__label">Security Policy</p>
+                <p className="score-card__label">{t('securityPolicy')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Robots.txt */}
           <div className="score-card">
-            <h4 className="score-card__title">🤖 Robots.txt</h4>
+            <h4 className="score-card__title">🤖 {t('robotsTxt')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['robots-txt'] && !webCheckReport['robots-txt'].error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport['robots-txt'].exists || webCheckReport['robots-txt'].isPresent ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>
                   {webCheckReport['robots-txt'].exists || webCheckReport['robots-txt'].isPresent ? 'Found' : 'Missing'}
                 </span>
-                <p className="score-card__label">Crawler Rules</p>
+                <p className="score-card__label">{t('crawlerRules')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Status */}
           <div className="score-card">
-            <h4 className="score-card__title">🟢 Status</h4>
+            <h4 className="score-card__title">🟢 {t('status')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.status && !webCheckReport.status.error ? (
               <>
                 <span className={`score-card__value score-card__value--${webCheckReport.status.isUp || webCheckReport.status.statusCode === 200 ? 'safe' : 'high'}`}>
                   {webCheckReport.status.statusCode || (webCheckReport.status.isUp ? '200' : 'Down')}
                 </span>
-                <p className="score-card__label">{webCheckReport.status.responseTime ? `${webCheckReport.status.responseTime}ms` : 'HTTP Status'}</p>
+                <p className="score-card__label">{webCheckReport.status.responseTime ? `${webCheckReport.status.responseTime}ms` : t('httpStatus')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
 
           {/* 🔍 WebCheck: Legacy Rank */}
           <div className="score-card">
-            <h4 className="score-card__title">📈 Rank</h4>
+            <h4 className="score-card__title">📈 {t('rank')}</h4>
             {webCheckLoading ? (
-              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+              <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
             ) : webCheckReport?.['legacy-rank'] && !webCheckReport['legacy-rank'].error ? (
               <>
                 <span className="score-card__value score-card__value--safe" style={{ fontSize: '1rem' }}>
                   #{webCheckReport['legacy-rank'].rank || webCheckReport['legacy-rank'].globalRank || 'N/A'}
                 </span>
-                <p className="score-card__label">Global Rank</p>
+                <p className="score-card__label">{t('globalRank')}</p>
               </>
             ) : (
-              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+              <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
             )}
           </div>
         </div>
@@ -1340,10 +1466,10 @@ const Hero = ({ historicalScan }) => {
 
           return (
             <div className="screenshot-preview">
-              <h4>📸 Website Screenshot <span>({screenshotSource})</span></h4>
+              <h4>📸 {t('websiteScreenshot')} <span>({screenshotSource})</span></h4>
               <img
                 src={screenshotSrc}
-                alt="Website Screenshot"
+                alt={t('websiteScreenshot')}
               />
             </div>
           );
@@ -1385,7 +1511,7 @@ const Hero = ({ historicalScan }) => {
         {report?.hasUrlscanResult && report?.urlscanData && (
           <details style={{ marginBottom: '2rem' }}>
             <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px', border: '1px solid #00d084' }}>
-              🌐 View URLScan.io Analysis
+              🌐 {t('viewUrlscanAnalysis')}
             </summary>
             <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
 
@@ -1455,7 +1581,7 @@ const Hero = ({ historicalScan }) => {
         {/* Observatory Summary */}
         {observatoryData ? (
           <div className="report-summary" style={{ marginTop: '2rem' }}>
-            <h4>🔒 Mozilla Observatory Security Configuration</h4>
+            <h4>🔒 {t('mozillaObservatorySecurityConfiguration')}</h4>
             <p><b>Security Grade:</b> <span style={{ color: getObservatoryGradeColor(observatoryData.grade), fontWeight: 'bold', fontSize: '1.2rem' }}>{observatoryData.grade}</span></p>
             <p><b>Score:</b> {observatoryData.score}/100</p>
             <p><b>Tests Passed:</b> {observatoryData.tests_passed}/{observatoryData.tests_quantity}</p>
@@ -1469,7 +1595,7 @@ const Hero = ({ historicalScan }) => {
           </div>
         ) : (
           <div className="report-summary" style={{ marginTop: '2rem', opacity: 0.7 }}>
-            <h4>🔒 Mozilla Observatory Security Configuration</h4>
+            <h4>🔒 {t('mozillaObservatorySecurityConfiguration')}</h4>
             <p style={{ color: '#888' }}><i>Observatory scan data not available for this URL.</i></p>
             <p>
               <b>Manual Scan:</b>{" "}
@@ -1483,9 +1609,9 @@ const Hero = ({ historicalScan }) => {
         {/* Download Reports Section */}
         {report?.analysisId && report?.status === 'completed' && (
           <div className="download-section">
-            <h4>📥 Download Scan Reports</h4>
+            <h4>{t('downloadScanReports')}</h4>
             <p>
-              Download your complete security scan results in your preferred format
+              {t('downloadCompleteSecurityResults')}
             </p>
             <div className="download-buttons">
               {/* PDF Download Dropdown */}
@@ -1495,7 +1621,7 @@ const Hero = ({ historicalScan }) => {
                   disabled={pdfDownloading}
                   onClick={() => !pdfDownloading && setPdfDropdownOpen(!pdfDropdownOpen)}
                 >
-                  {pdfDownloading ? '⏳ Generating...' : '📄 Download PDF Report ▾'}
+                  {pdfDownloading ? t('generating') : t('downloadPdfReport')}
                 </button>
 
                 {pdfDropdownOpen && !pdfDownloading && (
@@ -1506,59 +1632,71 @@ const Hero = ({ historicalScan }) => {
                         try {
                           setPdfDownloading(true);
                           setPdfProgress(0);
-                          setPdfProgressMessage('Initializing English PDF...');
-
-                          // Progress steps for English (faster - no translation)
-                          const progressSteps = [
-                            { progress: 15, message: 'Formatting scan data...', delay: 2000 },
-                            { progress: 35, message: 'Waiting for API rate limit...', delay: 8000 },
-                            { progress: 55, message: 'Formatting AI analysis...', delay: 15000 },
-                            { progress: 80, message: 'Rendering PDF document...', delay: 5000 },
-                            { progress: 95, message: 'Finalizing...', delay: 3000 },
-                          ];
-
-                          let currentStep = 0;
-                          const progressInterval = setInterval(() => {
-                            if (currentStep < progressSteps.length) {
-                              setPdfProgress(progressSteps[currentStep].progress);
-                              setPdfProgressMessage(progressSteps[currentStep].message);
-                              currentStep++;
-                            }
-                          }, 6000);
+                          setPdfProgressMessage(t('initializingEnglishPdf'));
 
                           const token = localStorage.getItem('token');
-                          const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=en`, {
-                            headers: { 'x-auth-token': token }
+                          const startRes = await fetch(`${API_BASE}/api/vt/pdf-job`, {
+                            method: 'POST',
+                            headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'en' })
                           });
+                          if (!startRes.ok) {
+                            const e = await startRes.json().catch(() => ({}));
+                            throw new Error(e.error || 'Failed to start PDF generation');
+                          }
+                          const { jobId } = await startRes.json();
 
-                          clearInterval(progressInterval);
+                          const progressSteps = [
+                            { progress: 15, message: t('formattingScanData') },
+                            { progress: 35, message: t('waitingRateLimit') },
+                            { progress: 55, message: t('formattingAiAnalysis') },
+                            { progress: 75, message: t('renderingPdfDocument') },
+                            { progress: 90, message: t('finalizing') },
+                          ];
+                          let pollCount = 0;
 
-                          if (!response.ok) {
-                            const errorData = await response.json().catch(() => ({}));
-                            if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                              alert('Gemini key is exhausted');
+                          while (true) {
+                            await new Promise(r => setTimeout(r, 5000));
+                            pollCount++;
+                            if (pollCount > 120) throw new Error('PDF generation timed out');
+
+                            const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
+                            setPdfProgress(progressSteps[stepIdx].progress);
+                            setPdfProgressMessage(progressSteps[stepIdx].message);
+
+                            const pollRes = await fetch(`${API_BASE}/api/vt/pdf-job/${jobId}`, {
+                              headers: { 'x-auth-token': token }
+                            });
+
+                            if (pollRes.status === 202) continue;
+
+                            if (pollRes.status === 200) {
+                              setPdfProgress(100);
+                              setPdfProgressMessage(t('downloadComplete'));
+                              const blob = await pollRes.blob();
+                              const url = window.URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `security_report_EN_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+                              document.body.appendChild(a);
+                              a.click();
+                              window.URL.revokeObjectURL(url);
+                              document.body.removeChild(a);
+                              console.log('✅ English PDF report downloaded');
+                              break;
+                            }
+
+                            const errorData = await pollRes.json().catch(() => ({}));
+                            if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                              alert(t('geminiKeyExhausted'));
                               throw new Error('Gemini key is exhausted');
                             }
-                            if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
-                              alert('English PDF must contain English only');
+                            if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
+                              alert(t('englishPdfOnly'));
                               throw new Error(errorData.error || 'English-only validation failed');
                             }
-                            throw new Error(errorData.error || 'PDF download failed');
+                            throw new Error(errorData.error || 'PDF generation failed');
                           }
-
-                          setPdfProgress(100);
-                          setPdfProgressMessage('Download complete!');
-
-                          const blob = await response.blob();
-                          const url = window.URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `security_report_EN_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                          document.body.appendChild(a);
-                          a.click();
-                          window.URL.revokeObjectURL(url);
-                          document.body.removeChild(a);
-                          console.log('✅ English PDF report downloaded');
 
                           setTimeout(() => {
                             setPdfDownloading(false);
@@ -1576,7 +1714,7 @@ const Hero = ({ historicalScan }) => {
                         }
                       }}
                     >
-                      English Version
+                      {t('englishVersion')}
                     </button>
                     <button
                       onClick={async () => {
@@ -1584,61 +1722,73 @@ const Hero = ({ historicalScan }) => {
                         try {
                           setPdfDownloading(true);
                           setPdfProgress(0);
-                          setPdfProgressMessage('Initializing Japanese PDF...');
-
-                          // Progress steps for Japanese (includes translation)
-                          const progressSteps = [
-                            { progress: 10, message: 'Formatting scan data...', delay: 2000 },
-                            { progress: 25, message: 'Waiting for API rate limit...', delay: 8000 },
-                            { progress: 40, message: 'Formatting AI analysis...', delay: 15000 },
-                            { progress: 55, message: 'Waiting for API rate limit...', delay: 8000 },
-                            { progress: 70, message: 'Translating to Japanese...', delay: 15000 },
-                            { progress: 85, message: 'Rendering PDF document...', delay: 5000 },
-                            { progress: 95, message: 'Finalizing...', delay: 3000 },
-                          ];
-
-                          let currentStep = 0;
-                          const progressInterval = setInterval(() => {
-                            if (currentStep < progressSteps.length) {
-                              setPdfProgress(progressSteps[currentStep].progress);
-                              setPdfProgressMessage(progressSteps[currentStep].message);
-                              currentStep++;
-                            }
-                          }, 8000);
+                          setPdfProgressMessage(t('initializingJapanesePdf'));
 
                           const token = localStorage.getItem('token');
-                          const response = await fetch(`${API_BASE}/api/vt/download-pdf/${report.analysisId}?lang=ja`, {
-                            headers: { 'x-auth-token': token }
+                          const startRes = await fetch(`${API_BASE}/api/vt/pdf-job`, {
+                            method: 'POST',
+                            headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'ja' })
                           });
+                          if (!startRes.ok) {
+                            const e = await startRes.json().catch(() => ({}));
+                            throw new Error(e.error || 'Failed to start PDF generation');
+                          }
+                          const { jobId } = await startRes.json();
 
-                          clearInterval(progressInterval);
+                          const progressSteps = [
+                            { progress: 10, message: t('formattingScanData') },
+                            { progress: 25, message: t('waitingRateLimit') },
+                            { progress: 40, message: t('formattingAiAnalysis') },
+                            { progress: 55, message: t('waitingRateLimit') },
+                            { progress: 70, message: t('translatingToJapanese') },
+                            { progress: 85, message: t('renderingPdfDocument') },
+                            { progress: 92, message: t('finalizing') },
+                          ];
+                          let pollCount = 0;
 
-                          if (!response.ok) {
-                            const errorData = await response.json().catch(() => ({}));
-                            if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                              alert('Gemini key is exhausted');
+                          while (true) {
+                            await new Promise(r => setTimeout(r, 5000));
+                            pollCount++;
+                            if (pollCount > 120) throw new Error('PDF generation timed out');
+
+                            const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
+                            setPdfProgress(progressSteps[stepIdx].progress);
+                            setPdfProgressMessage(progressSteps[stepIdx].message);
+
+                            const pollRes = await fetch(`${API_BASE}/api/vt/pdf-job/${jobId}`, {
+                              headers: { 'x-auth-token': token }
+                            });
+
+                            if (pollRes.status === 202) continue;
+
+                            if (pollRes.status === 200) {
+                              setPdfProgress(100);
+                              setPdfProgressMessage(t('downloadComplete'));
+                              const blob = await pollRes.blob();
+                              const url = window.URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `security_report_JA_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+                              document.body.appendChild(a);
+                              a.click();
+                              window.URL.revokeObjectURL(url);
+                              document.body.removeChild(a);
+                              console.log('✅ Japanese PDF report downloaded');
+                              break;
+                            }
+
+                            const errorData = await pollRes.json().catch(() => ({}));
+                            if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                              alert(t('geminiKeyExhausted'));
                               throw new Error('Gemini key is exhausted');
                             }
-                            if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
-                              alert('English PDF must contain English only');
+                            if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
+                              alert(t('englishPdfOnly'));
                               throw new Error(errorData.error || 'English-only validation failed');
                             }
-                            throw new Error(errorData.error || 'PDF download failed');
+                            throw new Error(errorData.error || 'PDF generation failed');
                           }
-
-                          setPdfProgress(100);
-                          setPdfProgressMessage('Download complete!');
-
-                          const blob = await response.blob();
-                          const url = window.URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `security_report_JA_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                          document.body.appendChild(a);
-                          a.click();
-                          window.URL.revokeObjectURL(url);
-                          document.body.removeChild(a);
-                          console.log('✅ Japanese PDF report downloaded');
 
                           setTimeout(() => {
                             setPdfDownloading(false);
@@ -1656,7 +1806,7 @@ const Hero = ({ historicalScan }) => {
                         }
                       }}
                     >
-                      Japanese Version
+                      {t('japaneseVersion')}
                     </button>
                   </div>
                 )}
@@ -1667,7 +1817,7 @@ const Hero = ({ historicalScan }) => {
                 onClick={async () => {
                   try {
                     const token = localStorage.getItem('token');
-                    const response = await fetch(`${API_BASE}/api/vt/download-complete-json/${report.analysisId}`, {
+                    const response = await fetch(`${API_BASE}/api/vt/download-complete-json/${report.analysisId || report.scanId || activeScanId}`, {
                       headers: { 'x-auth-token': token }
                     });
 
@@ -1687,11 +1837,11 @@ const Hero = ({ historicalScan }) => {
                     console.log('✅ Complete JSON report downloaded');
                   } catch (err) {
                     console.error('❌ Download failed:', err);
-                    alert('Failed to download report. Please try again.');
+                    alert(t('failedDownloadReportTryAgain'));
                   }
                 }}
               >
-                📥 Download JSON Data
+                {t('downloadJsonData')}
               </button>
             </div>
 
@@ -1706,13 +1856,13 @@ const Hero = ({ historicalScan }) => {
                 </div>
                 <p className="pdf-progress-message">{pdfProgressMessage}</p>
                 <p className="pdf-progress-note">
-                  PDF generation includes AI formatting and Japanese translation. This may take up to 2 minutes.
+                  {t('pdfProgressNote')}
                 </p>
               </div>
             )}
 
             <p className="download-note">
-              PDF: Professional bilingual report (EN + JA) | JSON: Raw data for analysis
+              {t('downloadNote')}
             </p>
           </div>
         )}
@@ -1732,47 +1882,51 @@ const Hero = ({ historicalScan }) => {
                 onClick={() => navigate('/profile')}
               >
                 <span className="btn-icon">←</span>
-                <span>Back to Profile</span>
+                <span>{t('backToProfile')}</span>
               </button>
               <h2 className="historical-title">
-                Historical Scan: <span className="highlight">{report?.target}</span>
+                {t('historicalScan')}: <span className="highlight">{report?.target}</span>
               </h2>
             </div>
             <p className="historical-meta">
-              Scanned on: {report?.createdAt ? new Date(report.createdAt).toLocaleString() : 'N/A'}
+              {t('scannedOn')}: {report?.createdAt ? new Date(report.createdAt).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US') : t('notAvailable')}
             </p>
           </>
         ) : (
           <>
-            <h1 className="hero-title">We give you <span className="highlight">X-Ray Vision</span> for your Website</h1>
-            <p className="hero-subtitle">In just 20 seconds, you can see what <span className="highlight">attackers already know</span></p>
+            <h1 className="hero-title">{t('heroTitle')}</h1>
             
             {pendingSchedule && (
               <div className="scheduling-mode-banner" style={{ background: 'rgba(0, 176, 198, 0.1)', border: '1px solid var(--accent)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', textAlign: 'center', color: 'var(--accent)' }}>
-                <strong>Scheduling Mode Active</strong><br/>
-                Setting up a public scan for {pendingSchedule.date} at {pendingSchedule.time}
+                <strong>{t('schedulingModeActive')}</strong><br/>
+                {t('settingUpPublicScan', { date: pendingSchedule.date, time: pendingSchedule.time })}
               </div>
             )}
             
             <form className="analyze-form" onSubmit={handleSubmit}>
-              <label htmlFor="url-input">Enter a URL to start</label>
+              <label htmlFor="url-input">{t('enterUrlToStart')}</label>
               <div className="input-wrapper">
-                <input id="url-input" name="url" type="text" placeholder="E.g. https://google.com" defaultValue={scanUrl || "https://google.com"} required disabled={loading} />
+                <input id="url-input" name="url" type="text" placeholder={t('urlExample')} defaultValue={scanUrl || "https://google.com"} required disabled={loading} />
                 {!loading ? (
                   <div className="action-buttons" style={{ flexDirection: 'row' }}>
                     <button type="submit" className="analyze-button">
                       <span className="button-text">
-                        {pendingSchedule ? "Save Scheduled Scan" : "Analyze URL"}
+                        {pendingSchedule ? t('saveScheduledScan') : t('analyzeUrl')}
                       </span>
                     </button>
                   </div>
                 ) : (
                   <button type="button" onClick={handleStopScan} className="stop-button">
-                    <span className="button-text">Stop Scan</span>
+                    <span className="button-text">{t('stopScan')}</span>
                   </button>
                 )}
               </div>
             </form>
+            {loading && (
+              <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>
+                ⚠ {t('scanNotice')}
+              </p>
+            )}
           </>
         )}
         {renderReport()}
@@ -1782,3 +1936,4 @@ const Hero = ({ historicalScan }) => {
 };
 
 export default Hero;
+
