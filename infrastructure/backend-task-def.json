@@ -17,24 +17,38 @@
       "secrets": [
         { "name": "MONGO_URI",        "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/MONGO_URI" },
         { "name": "JWT_SECRET",       "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/JWT_SECRET" },
-        { "name": "GEMINI_API_KEY",   "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GEMINI_API_KEY" },
         { "name": "PSI_API_KEY",      "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/PSI_API_KEY" },
         { "name": "URLSCAN_API_KEY",  "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/URLSCAN_API_KEY" },
         { "name": "GOOGLE_CLIENT_ID", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_ID" },
-        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_SECRET" }
+        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_SECRET" },
+        { "name": "REDIS_URL",        "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/REDIS_URL" }
       ],
       "environment": [
-        { "name": "NODE_ENV",               "value": "production" },
-        { "name": "PORT",                   "value": "3001" },
-        { "name": "AWS_REGION",             "value": "ap-south-1" },
-        { "name": "ECS_CLUSTER_NAME",       "value": "ssdt-cluster" },
-        { "name": "ECS_ZAP_TASK_DEF",       "value": "ssdt-zap-task" },
-        { "name": "RATE_LIMIT_ENABLED",     "value": "true" },
-        { "name": "GEMINI_MODEL",           "value": "gemini-2.0-flash" },
-        { "name": "USE_AWS_SES",             "value": "true" },
-        { "name": "SES_FROM_EMAIL",         "value": "ssdt.nitte@gmail.com" },
-        { "name": "FRONTEND_URL",           "value": "https://fortexa.aevus.jp,https://d30r1phhqv8s7f.cloudfront.net" }
+        { "name": "NODE_ENV",                        "value": "production" },
+        { "name": "PORT",                            "value": "3001" },
+        { "name": "DISABLE_WORKER",                  "value": "true" },
+        { "name": "AWS_REGION",                      "value": "ap-south-1" },
+        { "name": "AWS_EC2_METADATA_DISABLED",       "value": "true" },
+        { "name": "GOOGLE_APPLICATION_CREDENTIALS",  "value": "/app/config/gcp-wif.json" },
+        { "name": "VERTEX_PROJECT",                  "value": "fortexa-495604" },
+        { "name": "VERTEX_LOCATION",                 "value": "us-central1" },
+        { "name": "GEMINI_MODEL_PRO",                "value": "gemini-2.5-flash" },
+        { "name": "GEMINI_MODEL_FLASH",              "value": "gemini-2.5-flash" },
+        { "name": "ECS_CLUSTER_NAME",                "value": "ssdt-cluster" },
+        { "name": "ECS_ZAP_TASK_DEF",                "value": "ssdt-zap-task" },
+        { "name": "RATE_LIMIT_ENABLED",              "value": "true" },
+        { "name": "USE_AWS_SES",                     "value": "true" },
+        { "name": "SES_FROM_EMAIL",                  "value": "ssdt.nitte@gmail.com" },
+        { "name": "FRONTEND_URL",                    "value": "https://fortexa.aevus.jp,https://d30r1phhqv8s7f.cloudfront.net" },
+        { "name": "WEBCHECK_URI",                    "value": "http://webcheck:3002" }
       ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/ready', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {

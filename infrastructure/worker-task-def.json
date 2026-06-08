@@ -1,0 +1,72 @@
+{
+  "_comment": "Dedicated BullMQ worker task definition (scan + ZAP workers). Deploy this as a SEPARATE ECS service from the backend API so scan CPU/memory does not starve HTTP/WebSocket traffic.",
+  "family": "ssdt-worker-task",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsBackendTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "459181228792.dkr.ecr.ap-south-1.amazonaws.com/ssdt-backend:latest",
+      "essential": true,
+      "command": ["npm", "run", "worker"],
+      "secrets": [
+        { "name": "MONGO_URI",            "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/MONGO_URI" },
+        { "name": "JWT_SECRET",           "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/JWT_SECRET" },
+        { "name": "PSI_API_KEY",          "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/PSI_API_KEY" },
+        { "name": "URLSCAN_API_KEY",      "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/URLSCAN_API_KEY" },
+        { "name": "GOOGLE_CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_ID" },
+        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_SECRET" },
+        { "name": "REDIS_URL",            "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/REDIS_URL" },
+        { "name": "ZAP_API_KEY",          "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/ZAP_API_KEY" },
+        { "name": "ZAP_AUTH_API_KEY",     "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/ZAP_AUTH_API_KEY" }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",    "value": "production" },
+        { "name": "DISABLE_WORKER", "value": "false" },
+
+        { "name": "WORKER_CONCURRENCY",     "value": "2" },
+        { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" },
+
+        { "name": "WEBCHECK_CONCURRENCY",              "value": "3" },
+        { "name": "WEBCHECK_LIGHT_SCAN_CONCURRENCY",   "value": "3" },
+        { "name": "WEBCHECK_HEAVY_SCAN_CONCURRENCY",   "value": "1" },
+        { "name": "WEBCHECK_MAX_ACTIVE_SCANS",         "value": "2" },
+        { "name": "WEBCHECK_RETRY_ATTEMPTS",           "value": "2" },
+        { "name": "WEBCHECK_REQUEST_TIMEOUT_MS",       "value": "90000" },
+        { "name": "WEBCHECK_URI",                      "value": "http://webcheck:3002" },
+
+        { "name": "ZAP_API_URL",      "value": "http://127.0.0.1:8080" },
+        { "name": "ZAP_AUTH_API_URL", "value": "http://127.0.0.1:8081" },
+
+        { "name": "ECS_CLUSTER_NAME",  "value": "ssdt-cluster" },
+        { "name": "ECS_ZAP_TASK_DEF",  "value": "ssdt-zap-task" },
+
+        { "name": "AWS_REGION",                     "value": "ap-south-1" },
+        { "name": "AWS_EC2_METADATA_DISABLED",      "value": "true" },
+        { "name": "GOOGLE_APPLICATION_CREDENTIALS", "value": "/app/config/gcp-wif.json" },
+        { "name": "VERTEX_PROJECT",                 "value": "fortexa-495604" },
+        { "name": "VERTEX_LOCATION",                "value": "us-central1" },
+        { "name": "GEMINI_MODEL_PRO",               "value": "gemini-2.5-flash" },
+        { "name": "GEMINI_MODEL_FLASH",             "value": "gemini-2.5-flash" },
+
+        { "name": "RATE_LIMIT_ENABLED", "value": "false" },
+        { "name": "USE_AWS_SES",        "value": "true" },
+        { "name": "SES_FROM_EMAIL",     "value": "ssdt.nitte@gmail.com" },
+        { "name": "FRONTEND_URL",       "value": "https://fortexa.aevus.jp,https://d30r1phhqv8s7f.cloudfront.net" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ssdt-worker",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "worker",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

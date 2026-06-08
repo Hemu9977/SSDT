@@ -1,0 +1,42 @@
+{
+  "_comment": "CloudFront Response Headers Policy for the API distribution (api.fortexa.aevus.jp) to guarantee CORS headers even when the origin returns 5xx or CloudFront returns an error. Attach this to the API cache behavior(s).",
+  "_howto": "aws cloudfront create-response-headers-policy --response-headers-policy-config file://api-cloudfront-response-headers.json",
+
+  "Name": "ssdt-api-cors-and-security-headers",
+  "Comment": "CORS + security headers for SSDT API (adds ACAO even on error responses)",
+
+  "CorsConfig": {
+    "AccessControlAllowCredentials": true,
+    "AccessControlAllowHeaders": {
+      "Items": ["Content-Type", "Authorization", "x-auth-token"],
+      "Quantity": 3
+    },
+    "AccessControlAllowMethods": {
+      "Items": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+      "Quantity": 7
+    },
+    "AccessControlAllowOrigins": {
+      "Items": ["https://fortexa.aevus.jp"],
+      "Quantity": 1
+    },
+    "AccessControlExposeHeaders": {
+      "Items": ["*"],
+      "Quantity": 1
+    },
+    "AccessControlMaxAgeSec": 86400,
+    "OriginOverride": true
+  },
+
+  "SecurityHeadersConfig": {
+    "StrictTransportSecurity": {
+      "Override": true,
+      "AccessControlMaxAgeSec": 63072000,
+      "IncludeSubdomains": true,
+      "Preload": true
+    },
+    "ContentTypeOptions": { "Override": true },
+    "FrameOptions": { "FrameOption": "DENY", "Override": true },
+    "ReferrerPolicy": { "ReferrerPolicy": "strict-origin-when-cross-origin", "Override": true }
+  }
+}
+
