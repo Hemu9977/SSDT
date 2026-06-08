@@ -27,7 +27,7 @@ EXPOSE 3001
 
 # ECS health check — marks container unhealthy if /health stops responding
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+  CMD node -e "require('http').get('http://localhost:3001/ready', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 # Run as non-root for security (node user is built into node:20-slim)
 USER node

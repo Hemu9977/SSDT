@@ -1,6 +1,12 @@
 # Dependencies
 /node_modules
 
+# GCP Workload Identity Federation credential FILE (gcp-wif.json) is intentionally
+# committed so it is included in Docker images. It contains only WIF pool/provider
+# configuration — no private keys. The runtime secret is the ECS task IAM role.
+# DO NOT commit gcp-wif-creds.json — that file would contain an actual private key.
+config/gcp-wif-creds.json
+
 # Production build folder
 /frontend/build
 
@@ -11,6 +17,7 @@ backend/.env
 .env.development.local
 .env.test.local
 .env.production
+.env.production.webcheck.example
 # Logs
 logs
 *.log
