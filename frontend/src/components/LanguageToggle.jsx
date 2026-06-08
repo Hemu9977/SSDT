@@ -3,37 +3,24 @@ import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/LanguageToggle.css';
 
 const LanguageToggle = () => {
-  const { currentLang, isTranslating, translationProgress, toggleLanguage, hasReport } = useTranslation();
-
-  // Don't render the button if there's no report generated yet
-  if (!hasReport) {
-    return null;
-  }
+  const { currentLang, toggleLanguage, t } = useTranslation();
+  const isJapanese = currentLang === 'ja';
 
   return (
     <button
-      className={`language-toggle ${isTranslating ? 'translating' : ''}`}
+      className={`language-toggle ${isJapanese ? 'is-japanese' : 'is-english'}`}
       onClick={toggleLanguage}
-      disabled={isTranslating}
-      aria-label="Toggle language between English and Japanese"
-      title={currentLang === 'en' ? 'Switch to Japanese' : 'Switch to English'}
-      style={{
-        '--progress': `${translationProgress}%`
-      }}
+      type="button"
+      aria-label={isJapanese ? t('switchToEnglish') : t('switchToJapanese')}
+      title={isJapanese ? t('switchToEnglish') : t('switchToJapanese')}
     >
-      {isTranslating && (
-        <div className="progress-percentage">{translationProgress}%</div>
-      )}
-      <div className="toggle-content">
-        {!isTranslating && (
-          <>
-            <span className="flag-icon">{currentLang === 'en' ? '🇯🇵' : '🇬🇧'}</span>
-            <span className="toggle-text">
-              {currentLang === 'en' ? '日本語' : 'English'}
-            </span>
-          </>
-        )}
-      </div>
+      <span className="language-toggle__option language-toggle__option--en">
+        {t('englishShort')}
+      </span>
+      <span className="language-toggle__option language-toggle__option--ja">
+        {t('japaneseNative')}
+      </span>
+      <span className="language-toggle__thumb" aria-hidden="true" />
     </button>
   );
 };
