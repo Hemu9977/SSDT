@@ -1,9 +1,12 @@
 /**
  * Notification Service
  * Handles real-time Socket.IO notifications and scan completion orchestration.
- * 
+ *
  * - initializeSocket(httpServer): Sets up Socket.IO with JWT auth
- * - emitScanCompleted(userId, payload): Sends event to specific user room
+ * - initializeScanProgressSubscriber(redisSubscriber): Subscribes to Redis pub/sub
+ *   and forwards `scan_progress` events to the correct Socket.IO user room.
+ * - emitScanCompleted(userId, payload): Sends scan_completed event to user room
+ * - emitScanProgress(scanId, userId, data): Sends scan:update event to user room
  * - handleScanComplete(scanId, userId, scanType, targetUrl): Orchestrates email + socket
  */
 
@@ -11,8 +14,26 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { sendScanCompletionEmail, sendScanTriggeredEmail, sendScanFailedEmail, sendScheduleConfirmationEmail } = require('./emailService');
+const { CHANNEL } = require('./scanProgressService');
+const { getPublisher } = require('../config/redis');
 
 let io = null;
+
+/**
+ * Derive a progress integer from the current DB scan state.
+ * Used when replaying state to a late-joining socket client.
+ */
+function _deriveProgress(scan) {
+  if (scan.status === 'completed') return 100;
+  if (scan.status === 'failed')    return 0;
+  if (scan.refinedReport)          return 95;
+  const zapDone  = ['completed', 'completed_partial', 'failed'].includes(scan.zapResult?.status);
+  const wchkDone = ['completed', 'completed_partial', 'completed_with_errors', 'failed'].includes(scan.webCheckResult?.status);
+  if (zapDone && wchkDone)  return 85;
+  if (zapDone || wchkDone)  return 70;
+  if (scan.pagespeedResult) return 40;
+  return 15;
+}
 
 /**
  * Initialize Socket.IO server with JWT-based authentication.
@@ -59,9 +80,74 @@ function initializeSocket(httpServer) {
 
   io.on('connection', (socket) => {
     const userId = socket.userId;
-    // Join the user to their private room
+    // Join the user's private notification room
     socket.join(`user_${userId}`);
     console.log(`🔌 Socket connected: user ${userId} (socket ${socket.id})`);
+
+    // Allow client to subscribe to a specific scan's progress updates.
+    // Client emits: socket.emit('join:scan', { scanId })
+    // Security: verify the scan belongs to this user before joining the room.
+    // After joining, immediately replay the current scan state so late-connecting
+    // clients don't wait blind for the next event.
+    socket.on('join:scan', async ({ scanId } = {}) => {
+      if (!scanId || typeof scanId !== 'string') return;
+      try {
+        const ScanResult = require('../models/ScanResult');
+        const scan = await ScanResult.findOne(
+          { analysisId: scanId, userId },
+          {
+            target: 1,
+            status: 1, updatedAt: 1,
+            pagespeedResult: 1, observatoryResult: 1, urlscanResult: 1,
+            zapResult: 1, webCheckResult: 1, refinedReport: 1
+          }
+        );
+        if (!scan) return;
+
+        socket.join(`scan:${scanId}`);
+        console.log(`🔌 Socket ${socket.id} joined scan room scan:${scanId}`);
+
+        // Replay current state immediately — prefer Redis state snapshot (single source
+        // of truth for live progress), but fall back to DB-derived values.
+        let redisState = null;
+        try {
+          const raw = await getPublisher().get(`scan:${scanId}`);
+          if (raw) redisState = JSON.parse(raw);
+        } catch (e) {
+          // best-effort only
+        }
+
+        if (redisState && redisState.userId === String(userId)) {
+          socket.emit('scan:update', {
+            scanId,
+            target: scan.target,
+            status: redisState.status,
+            progress: redisState.progress,
+            message: redisState.message,
+            error: redisState.error,
+            modules: redisState.modules,
+            updatedAt: redisState.updatedAt
+          });
+          return;
+        }
+
+        socket.emit('scan:update', {
+          scanId,
+          target:           scan.target,
+          status:           scan.status,
+          progress:         _deriveProgress(scan),
+          hasPagespeed:     !!(scan.pagespeedResult && !scan.pagespeedResult.error),
+          hasObservatory:   !!(scan.observatoryResult && !scan.observatoryResult.error),
+          hasUrlscan:       !!(scan.urlscanResult && !scan.urlscanResult.error),
+          zapStatus:        scan.zapResult?.status   || null,
+          webCheckStatus:   scan.webCheckResult?.status || null,
+          hasAiReport:      !!scan.refinedReport,
+          updatedAt:        scan.updatedAt
+        });
+      } catch (err) {
+        console.error('[Socket] join:scan error:', err.message);
+      }
+    });
 
     socket.on('disconnect', (reason) => {
       console.log(`🔌 Socket disconnected: user ${userId} (${reason})`);
@@ -80,9 +166,53 @@ function emitScanCompleted(userId, payload) {
     console.warn('⚠️ Socket.IO not initialized, cannot emit scan_completed');
     return;
   }
-
   io.to(`user_${userId}`).emit('scan_completed', payload);
   console.log(`📢 Emitted scan_completed to user ${userId}:`, payload.scanId);
+}
+
+/**
+ * Emit a real-time scan:update event to the user's room AND the scan-specific room.
+ * Called directly (in-process) or indirectly via Redis pub/sub (worker process).
+ *
+ * @param {string} scanId
+ * @param {string} userId
+ * @param {object} data - { status, progress, message, ...partial results }
+ */
+function emitScanProgress(scanId, userId, data) {
+  if (!io) return;
+  const payload = { scanId, ...data };
+  // Deliver to both rooms so the client can listen on either
+  io.to(`user_${userId}`).emit('scan:update', payload);
+  io.to(`scan:${scanId}`).emit('scan:update', payload);
+}
+
+/**
+ * Subscribe to the Redis `scan_progress` pub/sub channel and forward each
+ * message to Socket.IO.  Call this once during server startup after both
+ * Socket.IO and Redis are ready.
+ *
+ * @param {Redis} subscriber - A dedicated ioredis client in subscribe mode
+ */
+function initializeScanProgressSubscriber(subscriber) {
+  subscriber.subscribe(CHANNEL, (err) => {
+    if (err) {
+      console.error('[NotificationService] Failed to subscribe to scan_progress:', err.message);
+      return;
+    }
+    console.log(`✅ Redis scan_progress subscriber active (channel: ${CHANNEL})`);
+  });
+
+  subscriber.on('message', (_channel, raw) => {
+    try {
+      const data = JSON.parse(raw);
+      const { scanId, userId, ...rest } = data;
+      if (scanId && userId) {
+        emitScanProgress(scanId, userId, rest);
+      }
+    } catch (e) {
+      console.error('[NotificationService] Bad scan_progress message:', e.message);
+    }
+  });
 }
 
 /**
@@ -228,7 +358,9 @@ async function handleScheduleCreated(userId, targetUrl, scheduleType, displayTim
 
 module.exports = {
   initializeSocket,
+  initializeScanProgressSubscriber,
   emitScanCompleted,
+  emitScanProgress,
   emitScanStarted,
   handleScanComplete,
   handleScheduledScanTriggered,

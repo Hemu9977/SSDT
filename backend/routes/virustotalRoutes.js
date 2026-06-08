@@ -1,25 +1,19 @@
 const express = require('express');
 const crypto = require('crypto');
-const { getPageSpeedReport } = require('../services/pagespeedService');
-const { scanHost } = require('../services/observatoryService');
-const { refineReport } = require('../services/geminiService');
-const { runZapScan, startAsyncZapScan, stopCombinedScan } = require('../services/zapService');
-const { runUrlScan } = require('../services/urlscanService');
-const { startAsyncWebCheckScan, stopWebCheckScan, getFullResults } = require('../services/webCheckService');
+const { runZapScan, stopCombinedScan } = require('../services/zapService');
+const { stopWebCheckScan, getFullResults } = require('../services/webCheckService');
 const gridfsService = require('../services/gridfsService');
 const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
-const { handleScanComplete } = require('../services/notificationService');
+const { addScanJob } = require('../queues/scanQueue');
+const { getPublisher } = require('../config/redis');
 
 const router = express.Router();
 
 // Expose err.message in dev only — never leak internals to production clients
 const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
-
-// In-memory lock to prevent parallel Gemini AI report calls for the same scan
-const geminiInProgress = new Set();
 
 // Patterns covering all RFC-1918/loopback/link-local ranges plus cloud metadata
 const BLOCKED_HOST_PATTERNS = [
@@ -415,7 +409,7 @@ router.get('/active-scan', auth, async (req, res) => {
   }
 });
 
-// 5️⃣ Combined URL Scan (PageSpeed + Observatory + ZAP + WebCheck + urlscan + Gemini) (Protected route with strict rate limiting)
+// 5️⃣ Combined URL Scan — creates DB record, enqueues BullMQ job, returns immediately
 router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) => {
   try {
     const { url } = req.body;
@@ -424,7 +418,6 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    // Validate URL format and security
     const validation = isValidUrl(url);
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error });
@@ -432,680 +425,166 @@ router.post('/combined-url-scan', auth, combinedScanLimiter, async (req, res) =>
 
     console.log(`🔐 User ${req.user.id} submitted URL for combined scan: ${url}`);
 
-    // Generate unique analysis ID
     const analysisId = crypto.randomUUID();
     console.log(`🔑 Analysis ID: ${analysisId}`);
 
-    // Create new scan record - ready to start combining immediately
-    const scan = new ScanResult({
+    // Create the DB record first so the client can immediately start polling / listening
+    await new ScanResult({
       target: url,
-      analysisId: analysisId,
-      status: 'combining',
+      analysisId,
+      status: 'queued',
       userId: req.user.id
-    });
-    await scan.save();
-    console.log('📝 Scan record created');
+    }).save();
+
+    // Enqueue the scan job — BullMQ worker picks it up and runs all scanners
+    await addScanJob(analysisId, url, req.user.id);
+    console.log(`📬 Scan job enqueued for ${analysisId}`);
 
     res.json({
       success: true,
-      message: 'URL submitted for combined analysis',
-      analysisId: analysisId,
-      url: url
+      message: 'Scan queued — you will receive real-time updates via WebSocket',
+      analysisId,
+      url
     });
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
-    // Graceful error handling for duplicates if race condition occurs
     if (err.code === 11000) {
-      return res.status(409).json({ error: "Scan already in progress. Please wait a moment and try again." });
+      return res.status(409).json({ error: 'Scan already in progress. Please wait and try again.' });
     }
-    res.status(500).json({
-      error: 'Failed to initiate combined scan',
-      details: devMsg(err)
-    });
+    res.status(500).json({ error: 'Failed to initiate combined scan', details: devMsg(err) });
   }
 });
 
-// 6️⃣ Combined Analysis Polling (Protected route)
+// 6️⃣ Combined Analysis — READ-ONLY fallback endpoint (WebSocket is primary)
+// Scan triggering + Gemini generation now handled by the BullMQ worker.
+// Frontend uses this only when Socket.IO updates are absent for ~15 seconds.
 router.get('/combined-analysis/:id', auth, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!id) return res.status(400).json({ error: 'Analysis ID is required' });
 
-    if (!id) {
-      return res.status(400).json({ error: 'Analysis ID is required' });
-    }
+    const scan = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
+    if (!scan) return res.status(404).json({ error: 'Analysis not found' });
 
-    console.log(`📊 Fetching combined analysis for ID: ${id}`);
+    // Stopped / cancelled guard
+    const isStopped =
+      ['stopped', 'cancelled'].includes(scan.status) ||
+      ['stopped', 'cancelled'].includes(scan.zapResult?.status) ||
+      ['stopped', 'cancelled'].includes(scan.webCheckResult?.status);
 
-    // Find the scan in database
-    let scan = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
-
-    if (!scan) {
-      return res.status(404).json({
-        error: 'Analysis not found in database'
-      });
-    }
-
-    // If the scan was explicitly stopped/cancelled, never restart work on polling.
-    // This route is called repeatedly by the frontend and must be idempotent.
-    if (['stopped', 'cancelled'].includes(scan.status)) {
-      return res.json({
-        status: scan.status,
-        message: 'Scan was stopped by user',
-        analysisId: id,
-        target: scan.target,
-        pagespeedResult: scan.pagespeedResult || null,
-        observatoryResult: scan.observatoryResult || null,
-        urlscanResult: scan.urlscanResult || null,
-        zapResult: scan.zapResult || null,
-        webCheckResult: scan.webCheckResult || null,
-        refinedReport: scan.refinedReport || null,
-        createdAt: scan.createdAt,
-        updatedAt: scan.updatedAt
-      });
-    }
-
-    // Secondary guard: if background components were stopped, do not restart them.
-    if (['stopped', 'cancelled'].includes(scan.zapResult?.status) || ['stopped', 'cancelled'].includes(scan.webCheckResult?.status)) {
+    if (isStopped) {
       return res.json({
         status: 'stopped',
         message: 'Scan was stopped by user',
         analysisId: id,
         target: scan.target,
-        pagespeedResult: scan.pagespeedResult || null,
+        pagespeedResult:   scan.pagespeedResult   || null,
         observatoryResult: scan.observatoryResult || null,
-        urlscanResult: scan.urlscanResult || null,
-        zapResult: scan.zapResult || null,
-        webCheckResult: scan.webCheckResult || null,
-        refinedReport: scan.refinedReport || null,
+        urlscanResult:     scan.urlscanResult     || null,
+        zapResult:         scan.zapResult         || null,
+        webCheckResult:    scan.webCheckResult    || null,
+        refinedReport:     scan.refinedReport     || null,
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt
       });
     }
 
-    // STEP A: Check if we need to run scans (PSI, Observatory, ZAP, urlscan, WebCheck, Gemini)
-    // ONLY trigger scans if they haven't been started yet (not just checking for results)
-    const needsScanning = (
-      !scan.pagespeedResult ||
-      !scan.observatoryResult ||
-      !scan.urlscanResult ||
-      !scan.refinedReport
-    );
-
-    // Check if ZAP scan needs to be started (only start once)
-    const zapNotStarted = !scan.zapResult || (!scan.zapResult.status && !scan.zapResult.error);
-
-    // Check if WebCheck scan needs to be started (only start once)
-    const webCheckNotStarted = !scan.webCheckResult || (!scan.webCheckResult.status && !scan.webCheckResult.error);
-
-    if (needsScanning || zapNotStarted || webCheckNotStarted) {
-      console.log('🔄 Running PageSpeed, Observatory, ZAP, WebCheck, urlscan and Gemini analysis...');
-
-      try {
-        // Update status to combining (durable cancellation: do not overwrite stopped scans)
-        const statusUpdate = await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          { $set: { status: 'combining', updatedAt: new Date() } }
-        );
-
-        if (statusUpdate.modifiedCount === 0) {
-          // Likely stopped in parallel by user; re-fetch and return without restarting work
-          const latest = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
-          if (latest && ['stopped', 'cancelled'].includes(latest.status)) {
-            return res.json({
-              status: latest.status,
-              message: 'Scan was stopped by user',
-              analysisId: id,
-              target: latest.target,
-              pagespeedResult: latest.pagespeedResult || null,
-              observatoryResult: latest.observatoryResult || null,
-              urlscanResult: latest.urlscanResult || null,
-              zapResult: latest.zapResult || null,
-              webCheckResult: latest.webCheckResult || null,
-              refinedReport: latest.refinedReport || null,
-              createdAt: latest.createdAt,
-              updatedAt: latest.updatedAt
-            });
-          }
-        }
-
-        // CRITICAL CHANGE: Run fast scans in parallel, ZAP and WebCheck run asynchronously
-        // Both ZAP and WebCheck will update database independently when complete
-        console.log('🚀 Fetching PageSpeed, Observatory and urlscan reports in parallel...');
-        console.log('🚀 Starting ZAP and WebCheck scans asynchronously in background...');
-
-        // Extract hostname for Observatory
-        const hostname = new URL(scan.target).hostname;
-        console.log(`🔍 Scanning hostname: ${hostname}`);
-
-        // Execute fast scans in parallel, start ZAP and WebCheck asynchronously ONLY if needed
-        // Both return immediately with "pending/running" status
-        const scanPromises = [];
-
-        if (!scan.pagespeedResult) {
-          scanPromises.push(getPageSpeedReport(scan.target));
-        } else {
-          scanPromises.push(Promise.resolve(scan.pagespeedResult));
-        }
-
-        if (!scan.observatoryResult) {
-          scanPromises.push(scanHost(hostname));
-        } else {
-          scanPromises.push(Promise.resolve(scan.observatoryResult));
-        }
-
-        if (!scan.urlscanResult) {
-          scanPromises.push(runUrlScan(scan.target));
-        } else {
-          scanPromises.push(Promise.resolve(scan.urlscanResult));
-        }
-
-        // Always call startAsyncZapScan - it returns current DB status
-        // (whether running, completed, or needs to start fresh)
-        if (zapNotStarted) {
-          console.log('🚀 Starting ZAP scan for the FIRST time...');
-        } else {
-          console.log('🔄 Checking ZAP scan status...');
-        }
-        scanPromises.push(startAsyncZapScan(scan.target, scan.analysisId, req.user.id));
-
-        // Always call startAsyncWebCheckScan - it returns current DB status
-        // (whether running, completed, or needs to start fresh)
-        if (webCheckNotStarted) {
-          console.log('🚀 Starting WebCheck scan for the FIRST time...');
-        } else {
-          console.log('🔄 Checking WebCheck scan status...');
-        }
-        scanPromises.push(startAsyncWebCheckScan(scan.target, scan.analysisId, req.user.id));
-
-        const [psiResult, obsResult, urlscanResult, zapInitResult, webCheckInitResult] = await Promise.allSettled(scanPromises);
-
-        // Handle PageSpeed result
-        let psiReport = null;
-        if (psiResult.status === 'fulfilled') {
-          psiReport = psiResult.value;
-          scan.pagespeedResult = psiReport;
-          console.log('✅ PageSpeed report fetched successfully');
-        } else {
-          console.error('⚠️  PageSpeed scan failed:', psiResult.reason);
-          console.error('⚠️  Error details:', psiResult.reason?.message);
-          // Store error gracefully - don't fail entire scan
-          scan.pagespeedResult = { error: psiResult.reason?.message || 'PageSpeed scan failed' };
-        }
-
-        // Handle Observatory result
-        let observatoryReport = null;
-        if (obsResult.status === 'fulfilled') {
-          observatoryReport = obsResult.value;
-          scan.observatoryResult = observatoryReport;
-          console.log('✅ Observatory scan result:', observatoryReport);
-        } else {
-          console.error('⚠️  Observatory scan failed:', obsResult.reason);
-          console.error('⚠️  Error details:', obsResult.reason?.message);
-          // Continue even if Observatory fails - it's not critical
-          scan.observatoryResult = { error: obsResult.reason?.message || 'Observatory scan failed' };
-        }
-
-        // Handle ZAP initialization result
-        // ZAP scan is running in background, so we just store the initial "pending" status
-        if (zapInitResult.status === 'fulfilled') {
-          const zapInit = zapInitResult.value;
-          scan.zapResult = zapInit; // Store pending status
-          console.log('✅ ZAP scan started in background:', zapInit.status);
-        } else {
-          console.error('⚠️  ZAP scan failed to start:', zapInitResult.reason);
-          console.error('⚠️  Error details:', zapInitResult.reason?.message);
-          // Store error if ZAP failed to start
-          scan.zapResult = {
-            status: 'failed',
-            error: zapInitResult.reason?.message || 'ZAP scan failed to start'
-          };
-        }
-
-        // Handle urlscan result
-        let urlscanReport = null;
-        if (urlscanResult.status === 'fulfilled') {
-          urlscanReport = urlscanResult.value;
-          scan.urlscanResult = urlscanReport;
-          console.log('✅ urlscan completed:', urlscanReport?.verdicts?.overall?.malicious ? 'MALICIOUS' : 'Clean');
-        } else {
-          console.error('⚠️  urlscan failed:', urlscanResult.reason);
-          console.error('⚠️  Error details:', urlscanResult.reason?.message);
-          // Continue even if urlscan fails - it's not critical
-          scan.urlscanResult = { error: urlscanResult.reason?.message || 'urlscan failed or not available' };
-        }
-
-        // Handle WebCheck initialization result
-        // WebCheck scans run in background, so we just store the initial "running" status
-        if (webCheckInitResult.status === 'fulfilled') {
-          const webCheckInit = webCheckInitResult.value;
-          scan.webCheckResult = webCheckInit; // Store running status
-          console.log('✅ WebCheck scan started in background:', webCheckInit.status);
-        } else {
-          console.error('⚠️  WebCheck scan failed to start:', webCheckInitResult.reason);
-          console.error('⚠️  Error details:', webCheckInitResult.reason?.message);
-          // Store error if WebCheck failed to start
-          scan.webCheckResult = {
-            status: 'failed',
-            error: webCheckInitResult.reason?.message || 'WebCheck scan failed to start'
-          };
-        }
-
-        // Save results so far (PSI, Observatory, urlscan complete, ZAP and WebCheck pending)
-        // CRITICAL: Use $set to update only specific fields, NOT the entire document
-        // This prevents overwriting zapResult/webCheckResult that background scans may have updated
-        const fastUpdate = await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          {
-            $set: {
-              status: 'combining',
-              pagespeedResult: scan.pagespeedResult,
-              observatoryResult: scan.observatoryResult,
-              urlscanResult: scan.urlscanResult,
-              // Only set initial zapResult if it was just started (not if it's already running/completed)
-              ...(zapNotStarted && scan.zapResult ? { zapResult: scan.zapResult } : {}),
-              // Only set initial webCheckResult if it was just started
-              ...(webCheckNotStarted && scan.webCheckResult ? { webCheckResult: scan.webCheckResult } : {}),
-              updatedAt: new Date()
-            }
-          }
-        );
-
-        if (fastUpdate.modifiedCount === 0) {
-          const latest = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
-          if (latest && ['stopped', 'cancelled'].includes(latest.status)) {
-            return res.json({
-              status: latest.status,
-              message: 'Scan was stopped by user',
-              analysisId: id,
-              target: latest.target,
-              pagespeedResult: latest.pagespeedResult || null,
-              observatoryResult: latest.observatoryResult || null,
-              urlscanResult: latest.urlscanResult || null,
-              zapResult: latest.zapResult || null,
-              webCheckResult: latest.webCheckResult || null,
-              refinedReport: latest.refinedReport || null,
-              createdAt: latest.createdAt,
-              updatedAt: latest.updatedAt
-            });
-          }
-        }
-        console.log('✅ Fast scans complete (PSI, Observatory, urlscan). ZAP and WebCheck running in background.');
-
-        // CRITICAL: Re-fetch the scan from DB to get the latest zapResult/webCheckResult
-        // Background scans may have completed while we were processing fast scans
-        scan = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
-        if (!scan) {
-          return res.status(404).json({ error: 'Scan not found after update' });
-        }
-
-        // DON'T generate Gemini report yet - wait for ZAP to complete
-        // Frontend will poll and we'll check ZAP status on next request
-      } catch (combineError) {
-        console.error('❌ Error in combining step:', combineError);
-        // Use atomic update for error case to avoid overwriting background scan progress
-        await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          {
-            $set: {
-              status: 'failed',
-              updatedAt: new Date()
-            }
-          }
-        );
-        scan.status = 'failed';
-
-        return res.status(500).json({
-          error: 'Failed to complete combined analysis',
-          details: combineError.message
-        });
-      }
-    }
-
-    // STEP C: Check if ZAP and WebCheck are complete and generate Gemini report
-    // This runs on EVERY poll request until Gemini report is generated
-
-    // Stale scan watchdog: if a background scan has been "running" too long, mark it as failed
-    const ZAP_STALE_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
-    const WEBCHECK_STALE_TIMEOUT_MS = 6 * 60 * 60 * 1000; // 6 hours
+    // Stale-scan watchdog (failsafe — worker should have already handled timeouts)
+    const ZAP_STALE_MS    = 24 * 60 * 60 * 1000;
+    const WEBCHK_STALE_MS =  6 * 60 * 60 * 1000;
     const now = Date.now();
 
-    if (scan.zapResult?.startedAt && !['completed', 'completed_partial', 'failed'].includes(scan.zapResult.status)) {
-      const zapAge = now - new Date(scan.zapResult.startedAt).getTime();
-      if (zapAge > ZAP_STALE_TIMEOUT_MS) {
-        console.error(`❌ ZAP scan timed out (running for ${Math.round(zapAge / 60000)}min). Failing entire scan.`);
-        await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          { $set: { 'zapResult.status': 'failed', 'zapResult.error': 'Scan timed out (exceeded 24 hour limit)', 'zapResult.phase': 'failed', status: 'failed', updatedAt: new Date() } }
-        );
-        scan.zapResult.status = 'failed';
-        scan.status = 'failed';
-      }
-    }
-
-    if (scan.webCheckResult?.startedAt && !['completed', 'completed_partial', 'completed_with_errors', 'failed'].includes(scan.webCheckResult.status)) {
-      const wcAge = now - new Date(scan.webCheckResult.startedAt).getTime();
-      if (wcAge > WEBCHECK_STALE_TIMEOUT_MS) {
-        console.error(`❌ WebCheck scan timed out (running for ${Math.round(wcAge / 60000)}min). Failing entire scan.`);
-        await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          { $set: { 'webCheckResult.status': 'failed', 'webCheckResult.error': 'Scan timed out (exceeded 6 hour limit)', status: 'failed', updatedAt: new Date() } }
-        );
-        scan.webCheckResult.status = 'failed';
-        scan.status = 'failed';
-      }
-    }
-
-    // If entire scan was failed by watchdog, return immediately
-    if (scan.status === 'failed') {
-      return res.json({ status: 'failed', error: 'Background scan timed out. Please try again.', target: scan.target, analysisId: id });
-    }
-
-    const zapStatus = scan.zapResult?.status;
-    const hasZapCompleted = zapStatus === 'completed' || zapStatus === 'completed_partial';
-    const hasZapFailed = zapStatus === 'failed';
-    const zapIsDone = hasZapCompleted || hasZapFailed;
-
-    // Check WebCheck status
-    const webCheckStatus = scan.webCheckResult?.status;
-    const hasWebCheckCompleted = webCheckStatus === 'completed' || webCheckStatus === 'completed_partial' || webCheckStatus === 'completed_with_errors';
-    const hasWebCheckFailed = webCheckStatus === 'failed';
-    const webCheckIsDone = hasWebCheckCompleted || hasWebCheckFailed;
-
-    // If either ZAP or WebCheck failed entirely, fail the whole scan
-    if ((hasZapFailed || hasWebCheckFailed) && !scan.refinedReport) {
-      const failedParts = [];
-      if (hasZapFailed) failedParts.push(`ZAP: ${scan.zapResult?.error || 'unknown error'}`);
-      if (hasWebCheckFailed) failedParts.push(`WebCheck: ${scan.webCheckResult?.error || 'unknown error'}`);
-      console.error(`❌ Background scan(s) failed: ${failedParts.join(', ')}. Failing entire scan.`);
+    if (scan.zapResult?.startedAt &&
+        !['completed','completed_partial','failed'].includes(scan.zapResult.status) &&
+        now - new Date(scan.zapResult.startedAt).getTime() > ZAP_STALE_MS) {
       await ScanResult.updateOne(
-        { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-        { $set: { status: 'failed', updatedAt: new Date() } }
+        { analysisId: id, userId: req.user.id, status: { $nin: ['stopped','cancelled'] } },
+        { $set: { 'zapResult.status': 'failed', 'zapResult.error': 'Timed out (24 h)', status: 'failed', updatedAt: new Date() } }
       );
-      scan.status = 'failed';
-      return res.json({ status: 'failed', error: `Scan failed: ${failedParts.join('; ')}`, target: scan.target, analysisId: id });
+      return res.json({ status: 'failed', error: 'ZAP scan timed out. Please try again.', target: scan.target, analysisId: id });
     }
 
-    // If ZAP AND WebCheck are done AND we don't have Gemini report yet, generate it now
-    if (zapIsDone && webCheckIsDone && !scan.refinedReport && scan.pagespeedResult && scan.observatoryResult) {
-      if (geminiInProgress.has(id)) {
-        console.log('🤖 Gemini report already being generated for this scan, skipping...');
-      } else {
-        geminiInProgress.add(id);
-        console.log('🤖 ZAP and WebCheck scans finished! Generating Gemini AI report with ALL scan data...');
-
-        // CRITICAL: Fresh refetch to ensure we have the absolute latest data
-        // This prevents race conditions where background scans completed after our last read
-        const freshScan = await ScanResult.findOne({ analysisId: id, userId: req.user.id });
-        if (!freshScan) {
-          geminiInProgress.delete(id);
-          console.error('❌ Scan not found during Gemini generation');
-          return res.status(404).json({ error: 'Scan not found' });
-        }
-
-        // Use fresh data for Gemini generation
-        const freshZapResult = freshScan.zapResult;
-        const freshWebCheckResult = freshScan.webCheckResult;
-
-        console.log(`📊 Fresh data check - ZAP status: ${freshZapResult?.status}, WebCheck status: ${freshWebCheckResult?.status}`);
-        console.log(`📊 WebCheck fullResults exists: ${!!freshWebCheckResult?.fullResults}, keys: ${freshWebCheckResult?.fullResults ? Object.keys(freshWebCheckResult.fullResults).length : 0}`);
-
-        if (freshZapResult?.status === 'completed_partial') {
-          console.log('⚠️ Note: ZAP scan completed with partial results');
-        }
-        if (freshWebCheckResult?.status === 'completed_partial' || freshWebCheckResult?.status === 'completed_with_errors') {
-          console.log('⚠️ Note: WebCheck scan completed with partial results or errors');
-        }
-
-        try {
-          // Prepare data for Gemini (with or without ZAP results depending on success)
-          const psiReport = freshScan.pagespeedResult?.error ? null : freshScan.pagespeedResult;
-          const observatoryReport = freshScan.observatoryResult?.error ? null : freshScan.observatoryResult;
-          const urlscanReport = freshScan.urlscanResult?.error ? null : freshScan.urlscanResult;
-
-          // Include ZAP data if scan completed (fully or partially)
-          const freshZapStatus = freshZapResult?.status;
-          const freshZapCompleted = freshZapStatus === 'completed' || freshZapStatus === 'completed_partial';
-          const zapReport = freshZapCompleted ? {
-            site: freshScan.target,
-            riskCounts: freshZapResult.riskCounts,
-            alerts: freshZapResult.alerts,
-            totalAlerts: freshZapResult.totalAlerts,
-            totalOccurrences: freshZapResult.totalOccurrences
-          } : null;
-
-          // Include WebCheck data if scan completed (fully or partially)
-          const freshWebCheckStatus = freshWebCheckResult?.status;
-          const freshWebCheckCompleted = freshWebCheckStatus === 'completed' || freshWebCheckStatus === 'completed_partial' || freshWebCheckStatus === 'completed_with_errors';
-
-          // Use getFullResults to handle both inline and GridFS storage
-          let webCheckReport = null;
-          if (freshWebCheckCompleted) {
-            webCheckReport = await getFullResults(freshWebCheckResult);
-            if (!webCheckReport) {
-              console.warn('⚠️ WebCheck marked complete but could not retrieve results');
-            } else {
-              console.log(`📊 WebCheck results retrieved: ${Object.keys(webCheckReport).length} scan types`);
-            }
-          }
-
-          // Generate AI report with all available data
-          const aiReport = await refineReport(
-            null,
-            psiReport,
-            observatoryReport,
-            freshScan.target,
-            zapReport,
-            urlscanReport,
-            webCheckReport
-          );
-
-          // Use atomic update for final completion to avoid race conditions
-          await ScanResult.updateOne(
-            { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-            {
-              $set: {
-                refinedReport: aiReport,
-                status: 'completed',
-                updatedAt: new Date()
-              }
-            }
-          );
-          // Update local scan object for response
-          scan.refinedReport = aiReport;
-          scan.status = 'completed';
-
-          // Trigger notification (email + UI popup)
-          handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
-
-          console.log('✅ Gemini AI report generated with all scan data!');
-          console.log(`   Included ZAP data: ${zapReport ? 'Yes' : 'No (scan not completed)'}`);
-          console.log(`   Included WebCheck data: ${webCheckReport ? `Yes (${Object.keys(webCheckReport).length} scan types)` : 'No (fullResults missing)'}`);
-        } catch (geminiError) {
-          console.error('⚠️  Gemini AI report generation failed:', geminiError.message);
-          // Store fallback message using atomic update
-          const fallbackReport = `AI analysis temporarily unavailable due to high demand. Please try again later.\n\nError: ${geminiError.message}`;
-          await ScanResult.updateOne(
-            { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-            {
-              $set: {
-                refinedReport: fallbackReport,
-                status: 'completed',
-                updatedAt: new Date()
-              }
-            }
-          );
-          // Update local scan object for response
-          scan.refinedReport = fallbackReport;
-          scan.status = 'completed';
-
-          // Trigger notification (email + UI popup)
-          handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
-        } finally {
-          geminiInProgress.delete(id);
-        }
-      }
-    } else if (zapIsDone && webCheckIsDone && !scan.refinedReport) {
-      // FALLBACK: Both ZAP and WebCheck done but can't generate AI report (missing PageSpeed/Observatory)
-      if (!scan.pagespeedResult || !scan.observatoryResult) {
-        console.log('⚠️ ZAP & WebCheck finished but cannot generate AI report - missing required scan data');
-        console.log(`   PageSpeed: ${scan.pagespeedResult ? 'Available' : 'MISSING'}`);
-        console.log(`   Observatory: ${scan.observatoryResult ? 'Available' : 'MISSING'}`);
-
-        const fallbackReport = 'AI analysis could not be generated - some scan data was unavailable. Please view individual scan results below.';
-        await ScanResult.updateOne(
-          { analysisId: id, userId: req.user.id, status: { $nin: ['stopped', 'cancelled'] } },
-          {
-            $set: {
-              refinedReport: fallbackReport,
-              status: 'completed',
-              updatedAt: new Date()
-            }
-          }
-        );
-        scan.refinedReport = fallbackReport;
-        scan.status = 'completed';
-        console.log('✅ Scan marked as completed (without full AI report)');
-
-        // Trigger notification (email + UI popup)
-        handleScanComplete(id, req.user.id, 'Combined Security Scan', scan.target);
-      }
-    } else if (!zapIsDone || !webCheckIsDone) {
-      // Still waiting for ZAP or WebCheck to finish
-      console.log(`⏳ Waiting for background scans: ZAP=${zapIsDone ? 'done' : 'running'}, WebCheck=${webCheckIsDone ? 'done' : 'running'}`);
+    if (scan.webCheckResult?.startedAt &&
+        !['completed','completed_partial','completed_with_errors','failed'].includes(scan.webCheckResult.status) &&
+        now - new Date(scan.webCheckResult.startedAt).getTime() > WEBCHK_STALE_MS) {
+      await ScanResult.updateOne(
+        { analysisId: id, userId: req.user.id, status: { $nin: ['stopped','cancelled'] } },
+        { $set: { 'webCheckResult.status': 'failed', 'webCheckResult.error': 'Timed out (6 h)', status: 'failed', updatedAt: new Date() } }
+      );
+      return res.json({ status: 'failed', error: 'WebCheck scan timed out. Please try again.', target: scan.target, analysisId: id });
     }
 
-    // STEP D: Return results (partial or complete)
-    // Extract key metrics for easy access - even for partial results
+    // ── Build response (same shape as before so frontend code is unchanged) ──
     const lighthouseResult = scan.pagespeedResult?.lighthouseResult || {};
     const categories = lighthouseResult.categories || {};
-
     const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error ? {
-      performance: categories.performance?.score ? Math.round(categories.performance.score * 100) : null,
-      accessibility: categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : null,
-      bestPractices: categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : null,
-      seo: categories.seo?.score ? Math.round(categories.seo.score * 100) : null
+      performance:   categories.performance?.score   != null ? Math.round(categories.performance.score * 100)   : null,
+      accessibility: categories.accessibility?.score  != null ? Math.round(categories.accessibility.score * 100)  : null,
+      bestPractices: categories['best-practices']?.score != null ? Math.round(categories['best-practices'].score * 100) : null,
+      seo:           categories.seo?.score            != null ? Math.round(categories.seo.score * 100)            : null
     } : null;
 
     const observatoryData = scan.observatoryResult && !scan.observatoryResult.error ? {
-      grade: scan.observatoryResult.grade,
-      score: scan.observatoryResult.score,
-      tests_passed: scan.observatoryResult.tests_passed,
-      tests_failed: scan.observatoryResult.tests_failed,
+      grade: scan.observatoryResult.grade, score: scan.observatoryResult.score,
+      tests_passed: scan.observatoryResult.tests_passed, tests_failed: scan.observatoryResult.tests_failed,
       tests_quantity: scan.observatoryResult.tests_quantity
     } : null;
 
-    // ZAP data handling - support pending/running/completed/failed states
     let zapData = null;
     if (scan.zapResult) {
-      const zapStatus = scan.zapResult.status;
-
-      if (zapStatus === 'completed') {
-        // ZAP scan completed successfully
-        zapData = {
-          status: 'completed',
-          riskCounts: scan.zapResult.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 },
-          alerts: scan.zapResult.alerts || [],
-          totalAlerts: scan.zapResult.totalAlerts || scan.zapResult.alerts?.length || 0,
-          totalOccurrences: scan.zapResult.totalOccurrences || 0,
-          reportFiles: scan.zapResult.reportFiles || [],
-          site: scan.zapResult.site || scan.target
-        };
-      } else if (zapStatus === 'pending' || zapStatus === 'running') {
-        // ZAP scan in progress - show progress info
-        zapData = {
-          status: zapStatus,
-          phase: scan.zapResult.phase || 'queued',
-          progress: scan.zapResult.progress || 0,
-          message: scan.zapResult.message || 'ZAP scan in progress...',
-          urlsFound: scan.zapResult.urlsFound || 0,
-          alertsFound: scan.zapResult.alertsFound || 0
-        };
-      } else if (zapStatus === 'failed') {
-        // ZAP scan failed
-        zapData = {
-          status: 'failed',
-          error: scan.zapResult.error || 'ZAP scan failed',
-          message: scan.zapResult.message || 'Vulnerability scan encountered an error'
-        };
+      const zs = scan.zapResult.status;
+      if (zs === 'completed' || zs === 'completed_partial') {
+        zapData = { status: zs,
+          riskCounts: scan.zapResult.riskCounts || {}, alerts: scan.zapResult.alerts || [],
+          totalAlerts: scan.zapResult.totalAlerts || 0, totalOccurrences: scan.zapResult.totalOccurrences || 0,
+          reportFiles: scan.zapResult.reportFiles || [], site: scan.zapResult.site || scan.target,
+          urlsFound: scan.zapResult.urlsFound || 0 };
+      } else if (zs === 'pending' || zs === 'running') {
+        zapData = { status: zs, phase: scan.zapResult.phase || 'queued', progress: scan.zapResult.progress || 0,
+          message: scan.zapResult.message || 'ZAP scan in progress...', urlsFound: scan.zapResult.urlsFound || 0,
+          alertsFound: scan.zapResult.alertsFound || 0 };
+      } else if (zs === 'failed') {
+        zapData = { status: 'failed', error: scan.zapResult.error || 'ZAP scan failed',
+          message: scan.zapResult.message || 'Vulnerability scan encountered an error' };
       }
     }
 
     const urlscanData = scan.urlscanResult && !scan.urlscanResult.error ? {
-      uuid: scan.urlscanResult.uuid,
-      verdicts: scan.urlscanResult.verdicts,
-      page: scan.urlscanResult.page,
-      stats: scan.urlscanResult.stats,
-      screenshot: scan.urlscanResult.screenshot,
-      reportUrl: scan.urlscanResult.reportUrl
+      uuid: scan.urlscanResult.uuid, verdicts: scan.urlscanResult.verdicts,
+      page: scan.urlscanResult.page, stats: scan.urlscanResult.stats,
+      screenshot: scan.urlscanResult.screenshot, reportUrl: scan.urlscanResult.reportUrl
     } : null;
 
-    // WebCheck data handling - support running/completed/failed states
     let webCheckData = null;
     if (scan.webCheckResult) {
-      const webCheckStatus = scan.webCheckResult.status;
-
-      if (webCheckStatus === 'completed' || webCheckStatus === 'completed_with_errors' || webCheckStatus === 'completed_partial') {
-        // WebCheck scans completed (possibly with some errors)
-        // Try to get full results (handles both inline and GridFS storage)
+      const ws = scan.webCheckResult.status;
+      if (['completed','completed_with_errors','completed_partial'].includes(ws)) {
         let webCheckResults = scan.webCheckResult.fullResults;
         if (!webCheckResults && scan.webCheckResult.resultsFileId) {
-          // Results in GridFS - fetch them
-          try {
-            webCheckResults = await getFullResults(scan.webCheckResult);
-          } catch (e) {
-            console.warn('Failed to fetch WebCheck results from GridFS:', e.message);
-          }
+          try { webCheckResults = await getFullResults(scan.webCheckResult); } catch (_e) {}
         }
-        // Fallback to summary if full results not available
-        if (!webCheckResults) {
-          webCheckResults = scan.webCheckResult.summary || {};
-        }
-
-        webCheckData = {
-          status: webCheckStatus,
-          results: webCheckResults,
+        webCheckData = { status: ws, results: webCheckResults || scan.webCheckResult.summary || {},
           summary: scan.webCheckResult.summary || {},
           completedScans: scan.webCheckResult.completedScans || 0,
           totalScans: scan.webCheckResult.totalScans || 30,
           hasErrors: scan.webCheckResult.hasErrors || false,
-          duration: scan.webCheckResult.duration || 0
-        };
-      } else if (webCheckStatus === 'uploading') {
-        // WebCheck scans complete, uploading large results to GridFS
-        webCheckData = {
-          status: 'uploading',
-          progress: 100, // Scans are done
+          duration: scan.webCheckResult.duration || 0 };
+      } else if (ws === 'uploading') {
+        webCheckData = { status: 'uploading', progress: 100,
           uploadProgress: scan.webCheckResult.uploadProgress || 0,
           completedScans: scan.webCheckResult.completedScans || scan.webCheckResult.totalScans,
           totalScans: scan.webCheckResult.totalScans || 30,
-          message: scan.webCheckResult.message || 'Uploading results to storage...'
-        };
-      } else if (webCheckStatus === 'running' || webCheckStatus === 'pending') {
-        // WebCheck scan in progress - show progress info
-        webCheckData = {
-          status: 'running',
-          progress: scan.webCheckResult.progress || 0,
+          message: scan.webCheckResult.message || 'Uploading results to storage...' };
+      } else if (ws === 'running' || ws === 'pending') {
+        webCheckData = { status: 'running', progress: scan.webCheckResult.progress || 0,
           completedScans: scan.webCheckResult.completedScans || 0,
           totalScans: scan.webCheckResult.totalScans || 30,
           message: scan.webCheckResult.message || 'WebCheck scans in progress...',
-          partialResults: scan.webCheckResult.partialResults || {}
-        };
-      } else if (webCheckStatus === 'failed') {
-        // WebCheck scan failed
-        webCheckData = {
-          status: 'failed',
-          error: scan.webCheckResult.error || 'WebCheck scan failed',
-          message: scan.webCheckResult.message || 'WebCheck encountered an error'
-        };
+          partialResults: scan.webCheckResult.partialResults || {} };
+      } else if (ws === 'failed') {
+        webCheckData = { status: 'failed', error: scan.webCheckResult.error || 'WebCheck scan failed',
+          message: scan.webCheckResult.message || 'WebCheck encountered an error' };
       }
-    }
-
-    // Always return all available data (progressive loading)
-    console.log(`📤 Returning combined-analysis response:`);
-    console.log(`   Status: ${scan.status}`);
-    console.log(`   Has refinedReport: ${!!scan.refinedReport}`);
-    if (scan.refinedReport) {
-      console.log(`   refinedReport length: ${scan.refinedReport.length} chars`);
     }
 
     return res.json({
@@ -1113,41 +592,31 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       status: scan.status,
       analysisId: id,
       target: scan.target,
-      // Partial data indicators
-      hasPsiResult: !!scan.pagespeedResult,
+      hasPsiResult:        !!scan.pagespeedResult,
       hasObservatoryResult: !!scan.observatoryResult,
-      hasZapResult: !!scan.zapResult && (scan.zapResult.status === 'completed' || scan.zapResult.status === 'completed_partial'),
-      zapPending: !!scan.zapResult && (scan.zapResult.status === 'pending' || scan.zapResult.status === 'running'),
-      hasUrlscanResult: !!scan.urlscanResult && !scan.urlscanResult.error,
-      hasWebCheckResult: !!scan.webCheckResult && (scan.webCheckResult.status === 'completed' || scan.webCheckResult.status === 'completed_partial' || scan.webCheckResult.status === 'completed_with_errors'),
-      webCheckPending: !!scan.webCheckResult && scan.webCheckResult.status === 'running',
-      hasRefinedReport: !!scan.refinedReport,
-      // Actual data (null if not yet available)
-      psiScores: psiScores,
-      observatoryData: observatoryData,
-      zapData: zapData,
-      urlscanData: urlscanData,
-      webCheckData: webCheckData,
-      refinedReport: scan.refinedReport || null,
-      pagespeedResult: scan.pagespeedResult || null,
+      hasZapResult:        !!scan.zapResult && ['completed','completed_partial'].includes(scan.zapResult.status),
+      zapPending:          !!scan.zapResult && ['pending','running'].includes(scan.zapResult.status),
+      hasUrlscanResult:    !!scan.urlscanResult && !scan.urlscanResult.error,
+      hasWebCheckResult:   !!scan.webCheckResult && ['completed','completed_partial','completed_with_errors'].includes(scan.webCheckResult.status),
+      webCheckPending:     !!scan.webCheckResult && scan.webCheckResult.status === 'running',
+      hasRefinedReport:    !!scan.refinedReport,
+      psiScores, observatoryData, zapData, urlscanData, webCheckData,
+      refinedReport:     scan.refinedReport     || null,
+      pagespeedResult:   scan.pagespeedResult   || null,
       observatoryResult: scan.observatoryResult || null,
-      zapResult: scan.zapResult || null,
-      urlscanResult: scan.urlscanResult || null,
-      webCheckResult: scan.webCheckResult || null,
+      zapResult:         scan.zapResult         || null,
+      urlscanResult:     scan.urlscanResult     || null,
+      webCheckResult:    scan.webCheckResult    || null,
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt
     });
 
   } catch (err) {
-    console.error('❌ Combined analysis retrieval error:', err);
-    console.error('❌ Error stack:', err.stack);
-    res.status(500).json({
-      error: 'Failed to retrieve combined analysis',
-      details: devMsg(err),
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
+    console.error('❌ Combined analysis error:', err.message);
+    res.status(500).json({ error: 'Failed to retrieve analysis', details: devMsg(err) });
   }
 });
+
 
 // 7️⃣ Download Complete JSON Report (All scan data combined)
 router.get('/download-complete-json/:id', auth, async (req, res) => {
@@ -1318,6 +787,167 @@ router.post('/stop-scan/:id', auth, async (req, res) => {
   }
 });
 
+// ─── PDF job store (Redis-backed) ─────────────────────────────────────────
+//
+// Jobs are stored in Redis so they survive backend restarts and are visible
+// across all ECS task instances (multi-container deployments).
+//
+// Key schema:
+//   pdf:job:{jobId}  → JSON metadata  (TTL: PDF_JOB_TTL_S)
+//   pdf:buf:{jobId}  → base64 PDF     (TTL: PDF_JOB_TTL_S)
+//
+// Status lifecycle:  pending → processing → completed | failed
+//
+// Jobs are NOT deleted on download — TTL handles expiry after 24 hours.
+
+const PDF_JOB_TTL_S = 24 * 60 * 60; // 24 hours
+
+function _pdfMetaKey(jobId) { return `pdf:job:${jobId}`; }
+function _pdfBufKey(jobId)  { return `pdf:buf:${jobId}`; }
+
+async function _getPdfMeta(jobId) {
+  try {
+    const raw = await getPublisher().get(_pdfMetaKey(jobId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error(`[PDF] Redis GET meta failed for ${jobId}:`, err.message);
+    return null;
+  }
+}
+
+async function _setPdfMeta(jobId, meta) {
+  try {
+    await getPublisher().set(_pdfMetaKey(jobId), JSON.stringify(meta), 'EX', PDF_JOB_TTL_S);
+  } catch (err) {
+    console.error(`[PDF] Redis SET meta failed for ${jobId}:`, err.message);
+  }
+}
+
+async function _setPdfBuffer(jobId, buffer) {
+  try {
+    await getPublisher().set(_pdfBufKey(jobId), buffer.toString('base64'), 'EX', PDF_JOB_TTL_S);
+  } catch (err) {
+    console.error(`[PDF] Redis SET buffer failed for ${jobId}:`, err.message);
+  }
+}
+
+async function _getPdfBuffer(jobId) {
+  try {
+    const raw = await getPublisher().get(_pdfBufKey(jobId));
+    return raw ? Buffer.from(raw, 'base64') : null;
+  } catch (err) {
+    console.error(`[PDF] Redis GET buffer failed for ${jobId}:`, err.message);
+    return null;
+  }
+}
+
+// Start async PDF generation — returns a jobId immediately, client polls for result
+router.post('/pdf-job', auth, async (req, res) => {
+  const { analysisId, lang = 'en' } = req.body || {};
+  if (!['en', 'ja'].includes(lang)) {
+    return res.status(400).json({ error: 'Invalid language. Use "en" or "ja"' });
+  }
+  if (!analysisId) return res.status(400).json({ error: 'analysisId is required' });
+
+  const scan = await ScanResult.findOne({ analysisId, userId: req.user.id });
+  if (!scan) return res.status(404).json({ error: 'Scan not found or access denied' });
+
+  const hasSomeData = scan.pagespeedResult || scan.observatoryResult || scan.urlscanResult;
+  if (!['completed', 'partial_complete'].includes(scan.status) && !hasSomeData) {
+    return res.status(400).json({ error: 'Scan is not yet complete', status: scan.status });
+  }
+
+  const jobId = crypto.randomUUID();
+  const meta = {
+    status: 'pending',
+    lang,
+    analysisId,
+    userId: req.user.id,
+    createdAt: Date.now(),
+  };
+  await _setPdfMeta(jobId, meta);
+  console.log(`[PDF] Job created  jobId=${jobId} lang=${lang} analysisId=${analysisId}`);
+
+  // Fire-and-forget — update Redis as generation progresses
+  (async () => {
+    try {
+      // Hydrate full WebCheck results from GridFS if needed
+      if (scan.webCheckResult && !scan.webCheckResult.fullResults && scan.webCheckResult.resultsFileId) {
+        const full = await getFullResults(scan.webCheckResult);
+        if (full) scan.webCheckResult.fullResults = full;
+      }
+
+      // Mark processing so polls return 202, not 404, during generation
+      await _setPdfMeta(jobId, { ...meta, status: 'processing' });
+      console.log(`[PDF] Job processing  jobId=${jobId} lang=${lang.toUpperCase()}`);
+
+      const buffer = await generateSingleLanguagePdf(scan, lang);
+      const filename = `security_report_${lang.toUpperCase()}_${scan.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+
+      // Store buffer then update metadata (order matters — poll checks meta first)
+      await _setPdfBuffer(jobId, buffer);
+      await _setPdfMeta(jobId, { ...meta, status: 'completed', filename, completedAt: Date.now() });
+      console.log(`[PDF] Job completed  jobId=${jobId} bytes=${buffer.length} filename=${filename}`);
+    } catch (err) {
+      console.error(`[PDF] Job failed  jobId=${jobId} error=${err.message}`);
+      await _setPdfMeta(jobId, {
+        ...meta,
+        status: 'failed',
+        error: err.message,
+        errorCode: err.code,
+        failedAt: Date.now(),
+      });
+    }
+  })();
+
+  res.json({ jobId });
+});
+
+// Poll PDF job status / download result
+// 202 while pending or processing, 200+PDF when completed, error JSON when failed
+router.get('/pdf-job/:jobId', auth, async (req, res) => {
+  const { jobId } = req.params;
+  console.log(`[PDF] Job status requested  jobId=${jobId} userId=${req.user.id}`);
+
+  const meta = await _getPdfMeta(jobId);
+
+  if (!meta) {
+    console.warn(`[PDF] Job expired or not found  jobId=${jobId}`);
+    return res.status(404).json({ error: 'Job not found or expired' });
+  }
+
+  if (meta.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  if (meta.status === 'pending' || meta.status === 'processing') {
+    return res.status(202).json({ status: meta.status });
+  }
+
+  if (meta.status === 'failed') {
+    const code = meta.errorCode === 'GEMINI_KEY_EXHAUSTED' ? 429 : 500;
+    return res.status(code).json({ status: 'failed', errorCode: meta.errorCode, error: meta.error });
+  }
+
+  // completed — stream PDF from Redis; keep keys alive (no delete, TTL handles expiry)
+  if (meta.status === 'completed') {
+    const buffer = await _getPdfBuffer(jobId);
+    if (!buffer) {
+      // Buffer expired before metadata — treat as expired
+      console.warn(`[PDF] Job buffer missing  jobId=${jobId}`);
+      return res.status(404).json({ error: 'Job not found or expired' });
+    }
+    console.log(`[PDF] Job served  jobId=${jobId} bytes=${buffer.length}`);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${meta.filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.send(buffer);
+  }
+
+  // Unknown status — shouldn't happen, but guard defensively
+  return res.status(500).json({ status: meta.status, error: 'Unexpected job state' });
+});
+
 // 🔟 Download PDF Report (Protected route) - Supports language selection
 router.get('/download-pdf/:id', auth, async (req, res) => {
   try {
@@ -1347,12 +977,17 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
       });
     }
 
-    // Check if scan is complete
-    if (scan.status !== 'completed') {
+    // Allow PDF for completed scans and for partial_complete (ZAP failed but other data available).
+    // Block only truly in-progress or terminal-failure scans with no usable data.
+    const hasSomeData = scan.pagespeedResult || scan.observatoryResult || scan.urlscanResult;
+    if (!['completed', 'partial_complete'].includes(scan.status) && !hasSomeData) {
       return res.status(400).json({
         error: 'Scan is not yet complete. Please wait for all scans to finish.',
         status: scan.status
       });
+    }
+    if (!['completed', 'partial_complete'].includes(scan.status) && hasSomeData) {
+      console.log(`📄 Generating PDF with partial results for scan ${id} (status: ${scan.status})`);
     }
 
     // Ensure WebCheck fullResults is populated (might be in GridFS)
