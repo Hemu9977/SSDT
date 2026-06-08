@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
+import { useTranslation } from '../../contexts/TranslationContext';
 import { API_BASE } from '../../config/api';
 
 const ForgotPasswordPage = () => {
@@ -9,6 +10,7 @@ const ForgotPasswordPage = () => {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const { t } = useTranslation();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -31,7 +33,7 @@ const ForgotPasswordPage = () => {
       }
     } catch (error) {
       console.error('Forgot password failed:', error);
-      setError('An error occurred. Please try again later.');
+      setError(t('genericErrorLater'));
     } finally {
       setLoading(false);
     }
@@ -44,29 +46,29 @@ const ForgotPasswordPage = () => {
       <main>
         <div className="auth-container">
           <div className="auth-content">
-            <h1 className="auth-title">Forgot Password</h1>
+            <h1 className="auth-title">{t('forgotPassword')}</h1>
             <p className="auth-description">
-              Enter your email address and we'll send you a link to reset your password.
+              {t('forgotPasswordDescription')}
             </p>
             <form className="auth-form" onSubmit={handleSubmit}>
               <div className="input-wrapper">
                 <input
                   type="email"
                   name="email"
-                  placeholder="Email"
+                  placeholder={t('email')}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
                 />
               </div>
               <button type="submit" disabled={loading}>
-                {loading ? 'Sending...' : 'Send Reset Link'}
+                {loading ? t('sending') : t('sendResetLink')}
               </button>
             </form>
             {message && <p className="success-message">{message}</p>}
             {error && <p className="error-message">{error}</p>}
             <p className="auth-switch-link">
-              Remember your password? <Link to="/login">Login</Link>
+              {t('rememberPassword')} <Link to="/login">{t('login')}</Link>
             </p>
           </div>
         </div>

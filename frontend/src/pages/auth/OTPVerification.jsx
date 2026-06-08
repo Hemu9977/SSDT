@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
+import { useTranslation } from '../../contexts/TranslationContext';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
 
@@ -13,6 +14,7 @@ const OTPVerification = () => {
   const [error, setError] = useState('');
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useTranslation();
 
   // Get email from location state (passed from register/login)
   const email = location.state?.email;
@@ -39,7 +41,7 @@ const OTPVerification = () => {
 
       if (response.ok) {
         localStorage.setItem('token', data.token);
-        setMessage('Verification successful! Welcome!');
+        setMessage(t('otpVerificationSuccess'));
         setTimeout(() => {
           navigate('/'); // Redirect to dashboard/home
         }, 2000);
@@ -48,7 +50,7 @@ const OTPVerification = () => {
       }
     } catch (error) {
       console.error('OTP verification failed:', error);
-      setError('Verification failed. Please try again.');
+      setError(t('verificationFailed'));
     } finally {
       setIsLoading(false);
     }
@@ -68,13 +70,13 @@ const OTPVerification = () => {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage('OTP sent successfully. Please check your email.');
+        setMessage(t('otpSentSuccess'));
       } else {
         setError(data.message);
       }
     } catch (error) {
       console.error('Resend OTP failed:', error);
-      setError('Failed to resend OTP. Please try again.');
+      setError(t('resendOtpFailed'));
     } finally {
       setResendLoading(false);
     }
@@ -87,15 +89,15 @@ const OTPVerification = () => {
       <main>
         <div className="auth-container">
           <div className="auth-content">
-            <h1 className="auth-title">Verify Your Email</h1>
+            <h1 className="auth-title">{t('verifyEmail')}</h1>
             <p className="auth-subtitle">
-              We've sent a 6-digit code to <strong>{email}</strong>
+              {t('otpSentTo')} <strong>{email}</strong>
             </p>
             <form className="auth-form" onSubmit={handleVerify}>
               <div className="input-wrapper">
                 <input
                   type="text"
-                  placeholder="Enter 6-digit code"
+                  placeholder={t('enterOtp')}
                   value={otp}
                   onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
                   maxLength="6"
@@ -103,7 +105,7 @@ const OTPVerification = () => {
                 />
               </div>
               <button type="submit" disabled={isLoading || otp.length !== 6}>
-                {isLoading ? 'Verifying...' : 'Verify'}
+                {isLoading ? t('verifying') : t('verify')}
               </button>
             </form>
             <div className="auth-links">
@@ -113,13 +115,13 @@ const OTPVerification = () => {
                 onClick={handleResend}
                 disabled={resendLoading}
               >
-                {resendLoading ? 'Sending...' : 'Resend Code'}
+                {resendLoading ? t('sending') : t('resendCode')}
               </button>
             </div>
             {message && <p className="success-message">{message}</p>}
             {error && <p className="error-message">{error}</p>}
             <p className="auth-switch-link">
-              Wrong email? <a href="/login">Go back to login</a>
+              {t('wrongEmail')} <a href="/login">{t('goBackToLogin')}</a>
             </p>
           </div>
         </div>

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
+import { useTranslation } from '../../contexts/TranslationContext';
 import { API_BASE } from '../../config/api';
 
 const ResetPasswordPage = () => {
@@ -15,10 +16,11 @@ const ResetPasswordPage = () => {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (!token) {
-      setError('Invalid reset link');
+      setError(t('invalidResetLink'));
     }
   }, [token]);
 
@@ -29,13 +31,13 @@ const ResetPasswordPage = () => {
     setError('');
 
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
+      setError(t('passwordsDoNotMatch'));
       setLoading(false);
       return;
     }
 
     if (password.length < 6) {
-      setError('Password must be at least 6 characters long');
+      setError(t('passwordMinLength'));
       setLoading(false);
       return;
     }
@@ -58,7 +60,7 @@ const ResetPasswordPage = () => {
       }
     } catch (error) {
       console.error('Reset password failed:', error);
-      setError('An error occurred. Please try again later.');
+      setError(t('genericErrorLater'));
     } finally {
       setLoading(false);
     }
@@ -71,16 +73,16 @@ const ResetPasswordPage = () => {
       <main>
         <div className="auth-container">
           <div className="auth-content">
-            <h1 className="auth-title">Reset Password</h1>
+            <h1 className="auth-title">{t('resetPassword')}</h1>
             <p className="auth-description">
-              Enter your new password below.
+              {t('resetPasswordDescription')}
             </p>
             <form className="auth-form" onSubmit={handleSubmit}>
               <div className="input-wrapper">
                 <input
                   type={showPassword ? 'text' : 'password'}
                   name="password"
-                  placeholder="New Password"
+                  placeholder={t('newPassword')}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
@@ -92,7 +94,7 @@ const ResetPasswordPage = () => {
                 <input
                   type={showConfirmPassword ? 'text' : 'password'}
                   name="confirmPassword"
-                  placeholder="Confirm New Password"
+                  placeholder={t('confirmNewPassword')}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
@@ -101,7 +103,7 @@ const ResetPasswordPage = () => {
                 <EyeIcon isVisible={showConfirmPassword} onClick={() => setShowConfirmPassword(!showConfirmPassword)} />
               </div>
               <button type="submit" disabled={loading || !token}>
-                {loading ? 'Resetting...' : 'Reset Password'}
+                {loading ? t('resetting') : t('resetPassword')}
               </button>
             </form>
             {message && <p className="success-message">{message}</p>}

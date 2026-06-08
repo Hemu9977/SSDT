@@ -7,6 +7,7 @@ import { FcGoogle } from 'react-icons/fc';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
+import { useTranslation } from '../../contexts/TranslationContext';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
 
@@ -18,6 +19,7 @@ const LoginPage = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const googleLogin = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
@@ -35,19 +37,19 @@ const LoginPage = () => {
         
         if (response.ok) {
           localStorage.setItem('token', data.token);
-          setMessage('Google login successful! Redirecting...');
+          setMessage(t('googleLoginSuccessful'));
           setTimeout(() => navigate('/'), 2000);
         } else {
-          setError(data.message || 'Google login failed');
+          setError(data.message || t('googleLoginFailed'));
         }
       } catch (err) {
         console.error('Google Login Error:', err);
-        setError('Google Login failed. Please try again.');
+        setError(t('googleLoginFailed'));
       } finally {
         setLoading(false);
       }
     },
-    onError: () => setError('Google Login Failed'),
+    onError: () => setError(t('googleLoginFailedShort')),
   });
 
   const handleSubmit = async (e) => {
@@ -77,7 +79,7 @@ const LoginPage = () => {
       }
     } catch (error) {
       console.error('Login failed:', error);
-      setError('Login failed. Please try again later.');
+      setError(t('loginFailedLater'));
     } finally {
       setLoading(false);
     }
@@ -90,13 +92,13 @@ const LoginPage = () => {
       <main>
         <div className="auth-container">
           <div className="auth-content">
-            <h1 className="auth-title">Login</h1>
+            <h1 className="auth-title">{t('loginTitle')}</h1>
             <form className="auth-form" onSubmit={handleSubmit}>
               <div className="input-wrapper">
                 <input
                   type="email"
                   name="email"
-                  placeholder="Email"
+                  placeholder={t('email')}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -106,7 +108,7 @@ const LoginPage = () => {
                 <input
                   type={showPassword ? 'text' : 'password'}
                   name="password"
-                  placeholder="Password"
+                  placeholder={t('password')}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
@@ -114,12 +116,12 @@ const LoginPage = () => {
                 <EyeIcon isVisible={showPassword} onClick={() => setShowPassword(!showPassword)} />
               </div>
               <button type="submit" disabled={loading}>
-                {loading ? 'Logging in...' : 'Login'}
+                {loading ? t('loggingIn') : t('login')}
               </button>
             </form>
 
             <div className="auth-separator">
-              <span>OR</span>
+              <span>{t('or')}</span>
             </div>
             
             <button 
@@ -129,17 +131,17 @@ const LoginPage = () => {
               style={{ width: '100%' }}
             >
               <FcGoogle size={22} />
-              <span>Login with Google</span>
+              <span>{t('loginWithGoogle')}</span>
             </button>
 
             {message && <p className="success-message">{message}</p>}
             {error && <p className="error-message">{error}</p>}
             
             <p className="auth-switch-link">
-              New user? <Link to="/register">Register now</Link>
+              {t('newUser')} <Link to="/register">{t('registerNow')}</Link>
             </p>
             <p className="auth-switch-link">
-              <Link to="/forgot-password">Forgot Password?</Link>
+              <Link to="/forgot-password">{t('forgotPassword')}</Link>
             </p>
           </div>
         </div>

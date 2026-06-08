@@ -7,6 +7,7 @@ import { FcGoogle } from 'react-icons/fc';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
+import { useTranslation } from '../../contexts/TranslationContext';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
 
@@ -19,6 +20,7 @@ const RegisterPage = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const googleSignup = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
@@ -36,19 +38,19 @@ const RegisterPage = () => {
         
         if (response.ok) {
           localStorage.setItem('token', data.token);
-          setMessage('Google sign up successful! Redirecting...');
+          setMessage(t('googleSignupSuccessful'));
           setTimeout(() => navigate('/'), 2000);
         } else {
-          setError(data.message || 'Google sign up failed');
+          setError(data.message || t('googleSignupFailed'));
         }
       } catch (err) {
         console.error('Google Sign Up Error:', err);
-        setError('Google sign up failed. Please try again.');
+        setError(t('googleSignupFailed'));
       } finally {
         setLoading(false);
       }
     },
-    onError: () => setError('Google Sign Up Failed'),
+    onError: () => setError(t('googleSignupFailedShort')),
   });
 
   const handleSubmit = async (e) => {
@@ -74,7 +76,7 @@ const RegisterPage = () => {
       }
     } catch (error) {
       console.error('Registration failed:', error);
-      setError('Registration failed. Please try again later.');
+      setError(t('registrationFailedLater'));
     } finally {
       setLoading(false);
     }
@@ -87,13 +89,13 @@ const RegisterPage = () => {
       <main>
         <div className="auth-container">
           <div className="auth-content">
-            <h1 className="auth-title">Register</h1>
+            <h1 className="auth-title">{t('registerTitle')}</h1>
             <form className="auth-form" onSubmit={handleSubmit}>
               <div className="input-wrapper">
                 <input
                   type="text"
                   name="name"
-                  placeholder="Name"
+                  placeholder={t('name')}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
@@ -103,7 +105,7 @@ const RegisterPage = () => {
                 <input
                   type="email"
                   name="email"
-                  placeholder="Email"
+                  placeholder={t('email')}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -113,7 +115,7 @@ const RegisterPage = () => {
                 <input
                   type={showPassword ? 'text' : 'password'}
                   name="password"
-                  placeholder="Password"
+                  placeholder={t('password')}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
@@ -121,12 +123,12 @@ const RegisterPage = () => {
                 <EyeIcon isVisible={showPassword} onClick={() => setShowPassword(!showPassword)} />
               </div>
               <button type="submit" disabled={loading}>
-                {loading ? 'Registering...' : 'Register'}
+                {loading ? t('registering') : t('register')}
               </button>
             </form>
 
             <div className="auth-separator">
-              <span>OR</span>
+              <span>{t('or')}</span>
             </div>
 
             <button 
@@ -136,14 +138,14 @@ const RegisterPage = () => {
               style={{ width: '100%' }}
             >
               <FcGoogle size={22} />
-              <span>Sign up with Google</span>
+              <span>{t('signUpWithGoogle')}</span>
             </button>
 
             {message && <p className="success-message">{message}</p>}
             {error && <p className="error-message">{error}</p>}
             
             <p className="auth-switch-link">
-              Have an account already? <Link to="/login">Log in</Link>
+              {t('haveAccount')} <Link to="/login">{t('logIn')}</Link>
             </p>
           </div>
         </div>
