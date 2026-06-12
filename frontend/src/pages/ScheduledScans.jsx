@@ -11,15 +11,16 @@ import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ScheduleScanModal from '../components/ScheduleScanModal';
 import { useUser } from '../contexts/UserContext';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/LandingPage.scss';
 import '../styles/ScheduledScans.scss';
 import { API_BASE } from '../config/api';
 
 const STATUS_CONFIG = {
-  scheduled: { label: 'Scheduled', color: '#00b8d4', icon: '' },
-  running:   { label: 'Running',   color: '#ffb900', icon: '' },
-  completed: { label: 'Completed', color: '#00d084', icon: '' },
-  failed:    { label: 'Failed',    color: '#ff4d6a', icon: '' },
+  scheduled: { labelKey: 'scheduled', color: '#00b8d4', icon: '' },
+  running: { labelKey: 'running', color: '#ffb900', icon: '' },
+  completed: { labelKey: 'completed', color: '#00d084', icon: '' },
+  failed: { labelKey: 'failed', color: '#ff4d6a', icon: '' },
 };
 
 const ScheduledScans = () => {
@@ -33,6 +34,7 @@ const ScheduledScans = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isPro } = useUser();
+  const { t, currentLang } = useTranslation();
   
   const searchParams = new URLSearchParams(location.search);
   const urlScanType = searchParams.get('type') || 'public';
@@ -54,7 +56,7 @@ const ScheduledScans = () => {
         headers: { 'x-auth-token': token }
       });
 
-      if (!res.ok) throw new Error('Failed to fetch schedules');
+      if (!res.ok) throw new Error(t('failedFetchSchedules'));
 
       const data = await res.json();
       setSchedules(data.schedules || []);
@@ -80,7 +82,7 @@ const ScheduledScans = () => {
         headers: { 'x-auth-token': token }
       });
 
-      if (!res.ok) throw new Error('Failed to delete schedule');
+      if (!res.ok) throw new Error(t('failedDeleteSchedule'));
 
       setSchedules(prev => prev.filter(s => s.id !== id));
       setDeleteConfirm(null);
@@ -98,7 +100,7 @@ const ScheduledScans = () => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to trigger scan');
+      if (!res.ok) throw new Error(data.error || t('failedTriggerScan'));
 
       fetchSchedules();
     } catch (err) {
@@ -122,7 +124,7 @@ const ScheduledScans = () => {
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString('en-US', {
+    return new Date(dateStr).toLocaleString(currentLang === 'ja' ? 'ja-JP' : 'en-US', {
       month: 'short', day: 'numeric', year: 'numeric',
       hour: '2-digit', minute: '2-digit'
     });
@@ -131,7 +133,7 @@ const ScheduledScans = () => {
   const formatRecurring = (recurring) => {
     if (!recurring || !recurring.days) return '';
     const days = recurring.days.join(', ');
-    return `Day${recurring.days.length > 1 ? 's' : ''} ${days} at ${recurring.time}`;
+    return t('dayAtTime', { plural: recurring.days.length > 1 ? 's' : '', days, time: recurring.time });
   };
 
   const isAuthTheme = isPro && (urlScanType === 'authenticated' || urlScanType === 'auth');
@@ -147,22 +149,22 @@ const ScheduledScans = () => {
             <div className="schedules-header__left">
               <div>
                 <h1>
-                  Scheduled Scans
+                  {t('scheduledScans')}
                 </h1>
                 <p className="schedules-subtitle">
-                  Manage your one-time and recurring security scans
+                  {t('scheduledScansSubtitle')}
                 </p>
               </div>
             </div>
             <button className="new-schedule-btn" onClick={handleNewSchedule} id="new-schedule-btn">
-              + New Schedule
+              {t('newSchedule')}
             </button>
           </div>
 
           {/* Plan Usage Stats */}
           <div className="plan-usage-bar">
             <div className="usage-stat">
-              <span className="usage-label">Active Schedules</span>
+              <span className="usage-label">{t('activeSchedules')}</span>
               <span className="usage-value">
                 {limits.activeSchedules || 0} / {limits.maxSchedules || 0}
               </span>
@@ -189,15 +191,15 @@ const ScheduledScans = () => {
           {loading ? (
             <div className="schedules-loading">
               <div className="loading-spinner" />
-              <p>Loading schedules...</p>
+              <p>{t('loadingSchedules')}</p>
             </div>
           ) : schedules.length === 0 ? (
             /* Empty state */
             <div className="schedules-empty">
-              <h3>No Scheduled Scans</h3>
-              <p>Create your first scheduled scan to automatically run security tests on your targets.</p>
+              <h3>{t('noScheduledScans')}</h3>
+              <p>{t('noScheduledScansDescription')}</p>
               <button className="new-schedule-btn" onClick={() => navigate('/')}>
-                Go to Dashboard to Schedule
+                {t('goDashboardSchedule')}
               </button>
             </div>
           ) : (
@@ -222,13 +224,13 @@ const ScheduledScans = () => {
                           </div>
                           <div className="schedule-card__meta">
                             <span className={`badge badge--${schedule.scanType}`}>
-                              {schedule.scanType === 'public' ? 'Public' : 'Auth'}
+                              {schedule.scanType === 'public' ? t('public') : t('auth')}
                             </span>
                             <span className="badge badge--type">
-                              {schedule.scheduleType === 'recurring' ? 'Recurring' : 'One-Time'}
+                              {schedule.scheduleType === 'recurring' ? t('recurring') : t('oneTime')}
                             </span>
                             <span className="badge" style={{ borderColor: status.color, color: status.color }}>
-                              {status.label}
+                              {t(status.labelKey)}
                             </span>
                           </div>
                         </div>
@@ -236,17 +238,17 @@ const ScheduledScans = () => {
                         <div className="schedule-card__timing">
                           {schedule.scheduleType === 'recurring' ? (
                             <div className="timing-info">
-                              <span className="timing-label">Recurrence</span>
+                              <span className="timing-label">{t('recurrence')}</span>
                               <span className="timing-value">{formatRecurring(schedule.recurring)}</span>
                             </div>
                           ) : null}
                           <div className="timing-info">
-                            <span className="timing-label">Next Run</span>
+                            <span className="timing-label">{t('nextRun')}</span>
                             <span className="timing-value">{formatDate(schedule.nextRun)}</span>
                           </div>
                           {schedule.lastRun && (
                             <div className="timing-info">
-                              <span className="timing-label">Last Run</span>
+                              <span className="timing-label">{t('lastRun')}</span>
                               <span className="timing-value">{formatDate(schedule.lastRun)}</span>
                             </div>
                           )}
@@ -256,7 +258,7 @@ const ScheduledScans = () => {
                       {/* Failure info */}
                       {schedule.lastFailure?.reason && (
                         <div className="schedule-card__failure">
-                          Last failure: {schedule.lastFailure.reason}
+                          {t('lastFailure', { reason: schedule.lastFailure.reason })}
                         </div>
                       )}
 
@@ -265,32 +267,32 @@ const ScheduledScans = () => {
                         <button
                           className="action-btn action-btn--run"
                           onClick={() => handleRunNow(schedule.id)}
-                          title="Run Now"
+                          title={t('runNow')}
                         >
-                          Run Now
+                          {t('runNow')}
                         </button>
                         <button
                           className="action-btn action-btn--edit"
                           onClick={() => handleEdit(schedule)}
-                          title="Edit"
+                          title={t('edit')}
                         >
-                          Edit
+                          {t('edit')}
                         </button>
                         <button
                           className="action-btn action-btn--delete"
                           onClick={() => setDeleteConfirm(schedule.id)}
-                          title="Delete"
+                          title={t('delete')}
                         >
-                          Delete
+                          {t('delete')}
                         </button>
                       </div>
 
                       {/* Delete confirmation */}
                       {deleteConfirm === schedule.id && (
                         <div className="delete-confirm">
-                          <span>Delete this schedule?</span>
-                          <button className="confirm-yes" onClick={() => handleDelete(schedule.id)}>Yes, Delete</button>
-                          <button className="confirm-no" onClick={() => setDeleteConfirm(null)}>Cancel</button>
+                          <span>{t('deleteSchedulePrompt')}</span>
+                          <button className="confirm-yes" onClick={() => handleDelete(schedule.id)} type="button">{t('yesDelete')}</button>
+                          <button className="confirm-no" onClick={() => setDeleteConfirm(null)} type="button">{t('cancel')}</button>
                         </div>
                       )}
                     </motion.div>

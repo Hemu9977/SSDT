@@ -3,6 +3,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import ThemeToggle from './ThemeToggle';
 import LanguageToggle from './LanguageToggle';
 import { useUser } from '../contexts/UserContext';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/Header.scss';
 import logo from '../assets/logo.png';
 
@@ -11,14 +12,13 @@ const Header = () => {
   const location = useLocation();
   const token = localStorage.getItem('token');
   const { isPro } = useUser();
+  const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Close menu on route change
   useEffect(() => {
     setMenuOpen(false);
   }, [location.pathname]);
 
-  // Close menu on outside click
   useEffect(() => {
     if (!menuOpen) return;
     const handleOutside = (e) => {
@@ -28,7 +28,6 @@ const Header = () => {
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [menuOpen]);
 
-  // Prevent body scroll when mobile menu is open
   useEffect(() => {
     document.body.style.overflow = menuOpen ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
@@ -44,15 +43,16 @@ const Header = () => {
   return (
     <header className="header-container">
       <Link to="/" className="logo-container">
-        <img src={logo} alt="FORTEXA Logo" className="logo" />
-        <h1>FORTEXA</h1>
+        <img src={logo} alt={t('fortexaLogoAlt')} className="logo" />
+        <h1>{t('appName')}</h1>
       </Link>
 
       <button
         className={`hamburger${menuOpen ? ' open' : ''}`}
-        onClick={() => setMenuOpen(v => !v)}
-        aria-label="Toggle navigation menu"
+        onClick={() => setMenuOpen((value) => !value)}
+        aria-label={t('toggleNavigationMenu')}
         aria-expanded={menuOpen}
+        type="button"
       >
         <span />
         <span />
@@ -70,11 +70,11 @@ const Header = () => {
               className="profile-button"
               onClick={() => setMenuOpen(false)}
             >
-              Profile
-              {isPro && <span className="pro-badge-header">PRO ⚡</span>}
+              {t('profile')}
+              {isPro && <span className="pro-badge-header">{t('pro')}</span>}
             </Link>
-            <button onClick={handleLogout} className="logout-button">
-              Logout
+            <button onClick={handleLogout} className="logout-button" type="button">
+              {t('logout')}
             </button>
           </>
         ) : (
@@ -83,7 +83,7 @@ const Header = () => {
             className="signup-button"
             onClick={() => setMenuOpen(false)}
           >
-            Sign Up
+            {t('signup')}
           </Link>
         )}
       </div>

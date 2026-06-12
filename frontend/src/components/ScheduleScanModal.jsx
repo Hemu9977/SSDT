@@ -8,10 +8,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useUser } from '../contexts/UserContext';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScheduleScanModal.scss';
 import { API_BASE } from '../config/api';
 
-const CustomCalendar = ({ value, onChange, label }) => {
+const CustomCalendar = ({ value, onChange, label, t }) => {
   const [showPicker, setShowPicker] = useState(false);
   const parseLocalDate = (isoDate) => {
     if (!isoDate) return null;
@@ -94,7 +95,7 @@ const CustomCalendar = ({ value, onChange, label }) => {
     <div className={`custom-calendar-wrapper ${showPicker ? 'picker-open' : ''}`} ref={containerRef}>
       <label>{label}</label>
       <div className="calendar-input-trigger" onClick={() => setShowPicker(!showPicker)}>
-        <span className="current-value">{value || 'Select Date'}</span>
+        <span className="current-value">{value || t('selectDate')}</span>
         <span className="calendar-icon">📅</span>
       </div>
       
@@ -125,7 +126,7 @@ const CustomCalendar = ({ value, onChange, label }) => {
               const isoDate = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
               onChange(isoDate);
               setShowPicker(false);
-            }}>Today</button>
+            }}>{t('today')}</button>
           </motion.div>
         )}
       </AnimatePresence>
@@ -133,7 +134,7 @@ const CustomCalendar = ({ value, onChange, label }) => {
   );
 };
 
-const ScrollingTimePicker = ({ value, onChange, label }) => {
+const ScrollingTimePicker = ({ value, onChange, label, t }) => {
   // Parse initial value (HH:mm)
   const h24 = parseInt((value || '10:00').split(':')[0]);
   const m = parseInt((value || '10:00').split(':')[1]);
@@ -221,7 +222,7 @@ const ScrollingTimePicker = ({ value, onChange, label }) => {
         </div>
       </div>
       <div className="picker-selected-value">
-        Selected: {String(hour).padStart(2, '0')}:{String(minute).padStart(2, '0')} {period}
+        {t('selectedTime', { time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${period}` })}
       </div>
     </div>
   );
@@ -240,6 +241,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const { isPro } = useUser();
+  const { t } = useTranslation();
 
   const resetForm = React.useCallback(() => {
     setScanType(defaultScanType);
@@ -298,7 +300,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
     const token = localStorage.getItem('token');
     if (!token) {
-      setError('Please log in to schedule scans');
+      setError(t('pleaseLoginSchedule'));
       setLoading(false);
       return;
     }
@@ -311,20 +313,20 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
     if (mode === 'one-time') {
       if (!scheduledDate || !scheduledTime) {
-        setError('Please select a date and time');
+        setError(t('pleaseSelectDateTime'));
         setLoading(false);
         return;
       }
 
       const scheduledLocal = new Date(`${scheduledDate}T${scheduledTime}`);
       if (Number.isNaN(scheduledLocal.getTime())) {
-        setError('Invalid date/time');
+        setError(t('invalidDateTime'));
         setLoading(false);
         return;
       }
       const now = new Date();
       if (scheduledLocal <= now) {
-        setError('Scheduled time must be in the future');
+        setError(t('scheduledTimeFuture'));
         setLoading(false);
         return;
       }
@@ -332,7 +334,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
       const maxAllowed = new Date(now);
       maxAllowed.setMonth(maxAllowed.getMonth() + 1);
       if (scheduledLocal > maxAllowed) {
-        setError('Scheduled time must be within 1 month from now');
+        setError(t('scheduledTimeWithinMonth'));
         setLoading(false);
         return;
       }
@@ -344,7 +346,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
     if (mode === 'recurring') {
       if (selectedDays.length === 0) {
-        setError('Please select at least one day');
+        setError(t('pleaseSelectDay'));
         setLoading(false);
         return;
       }
@@ -357,7 +359,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
     if (!editSchedule) {
       sessionStorage.setItem('pendingScheduleConfig', JSON.stringify(configData));
-      setSuccess('Configuration saved! Redirecting...');
+      setSuccess(t('configSavedRedirecting'));
       
       setTimeout(() => {
         resetForm();
@@ -389,10 +391,10 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to save schedule');
+        throw new Error(data.error || t('failedSaveSchedule'));
       }
 
-      setSuccess(editSchedule ? 'Schedule updated!' : 'Scan scheduled successfully!');
+      setSuccess(editSchedule ? t('scheduleUpdated') : t('scanScheduledSuccess'));
       if (onScheduleCreated) onScheduleCreated(data.schedule);
 
       setTimeout(() => {
@@ -427,7 +429,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
           onClick={(e) => e.stopPropagation()}
         >
           <div className="schedule-modal__header">
-            <h2>{editSchedule ? 'Edit Schedule' : 'Schedule a Scan'}</h2>
+            <h2>{editSchedule ? t('editSchedule') : t('scheduleAScan')}</h2>
             <button className="schedule-modal__close" onClick={onClose}>&times;</button>
           </div>
 
@@ -436,7 +438,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
               {/* Display Read-Only URL when editing */}
               {editSchedule && editSchedule.targetUrl && (
                 <div className="form-group">
-                  <label>Target URL (Read Only)</label>
+                  <label>{t('targetUrlReadOnly')}</label>
                   <input
                     type="url"
                     value={editSchedule.targetUrl}
@@ -448,23 +450,23 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
               {/* Mode Selector */}
               <div className="form-group">
-                <label>Schedule Mode</label>
+                <label>{t('scheduleMode')}</label>
                 <div className="mode-selector">
                   <button
                     type="button"
                     className={`mode-btn ${mode === 'one-time' ? 'active' : ''}`}
                     onClick={() => setMode('one-time')}
                   >
-                    <span className="mode-label">One-Time</span>
-                    <span className="mode-desc">Pick date & time</span>
+                    <span className="mode-label">{t('oneTime')}</span>
+                    <span className="mode-desc">{t('pickDateTime')}</span>
                   </button>
                   <button
                     type="button"
                     className={`mode-btn ${mode === 'recurring' ? 'active' : ''}`}
                     onClick={() => setMode('recurring')}
                   >
-                    <span className="mode-label">Recurring</span>
-                    <span className="mode-desc">Auto-repeat</span>
+                    <span className="mode-label">{t('recurring')}</span>
+                    <span className="mode-desc">{t('autoRepeat')}</span>
                   </button>
                 </div>
               </div>
@@ -474,16 +476,18 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
                 <div className="form-row">
                   <div className="form-group half">
                     <CustomCalendar
-                      label="Date"
+                      label={t('date')}
                       value={scheduledDate}
                       onChange={setScheduledDate}
+                      t={t}
                     />
                   </div>
                   <div className="form-group half">
                     <ScrollingTimePicker
-                      label="Time"
+                      label={t('time')}
                       value={scheduledTime}
                       onChange={setScheduledTime}
+                      t={t}
                     />
                   </div>
                 </div>
@@ -493,7 +497,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
               {mode === 'recurring' && (
                 <div className="recurring-config">
                   <div className="form-group">
-                    <label>Frequency</label>
+                    <label>{t('frequency')}</label>
                     <div className="frequency-selector">
                       {['monthly', 'twice-monthly', 'custom'].map(freq => (
                         <button
@@ -502,14 +506,14 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
                           className={`freq-btn ${frequency === freq ? 'active' : ''}`}
                           onClick={() => handleFrequencyChange(freq)}
                         >
-                          {freq.replace('-', ' ')}
+                          {t(freq === 'twice-monthly' ? 'twiceMonthly' : freq)}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <div className="form-group">
-                    <label>Day(s) of Month</label>
+                    <label>{t('daysOfMonth')}</label>
                     <div className="day-picker">
                       {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
                         <button
@@ -526,9 +530,10 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
 
                   <div className="form-group">
                     <ScrollingTimePicker
-                      label="Execution Time"
+                      label={t('executionTime')}
                       value={recurringTime}
                       onChange={setRecurringTime}
+                      t={t}
                     />
                   </div>
                 </div>
@@ -540,9 +545,9 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
             </div>
 
             <div className="schedule-modal__actions">
-              <button type="button" className="btn-cancel" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn-cancel" onClick={onClose}>{t('cancel')}</button>
               <button type="submit" className="btn-submit" disabled={loading}>
-                {loading ? 'Processing...' : (editSchedule ? 'Update Schedule' : 'Continue to Config')}
+                {loading ? t('processing') : (editSchedule ? t('updateSchedule') : t('continueToConfig'))}
               </button>
             </div>
           </form>

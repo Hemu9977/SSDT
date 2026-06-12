@@ -1,11 +1,13 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScanTypeSelector.scss';
 
 const ScanTypeSelector = () => {
   const navigate = useNavigate();
   const { isPro } = useUser();
+  const { t } = useTranslation();
 
   const handleScanTypeSelection = (scanType) => {
     // 🧹 PREVENT WORKFLOW TANGLE: Clear any pending schedule intent
@@ -23,10 +25,10 @@ const ScanTypeSelector = () => {
     <div className="scan-type-selector-container">
       <div className="scan-type-content">
         <h1 className="scan-type-title">
-          Choose Your <span className="highlight">Scan Type</span>
+          {t('chooseScanTypePrefix')} <span className="highlight">{t('chooseScanTypeHighlight')}</span>
         </h1>
         <p className="scan-type-subtitle">
-          Select the type of security scan you want to perform
+          {t('chooseScanTypeSubtitle')}
         </p>
         
         <div className="scan-type-cards">
@@ -50,31 +52,30 @@ const ScanTypeSelector = () => {
                 />
               </svg>
             </div>
-            <h2 className="card-title">Public Website Scan</h2>
+            <h2 className="card-title">{t('publicWebsiteScan')}</h2>
             <p className="card-description">
-              Comprehensive security analysis for publicly accessible websites. Includes deep vulnerability scanning,
-              performance optimization checks, and security metadata analysis.
+              {t('publicScanDescription')}
             </p>
             <ul className="card-features">
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Comprehensive Vulnerability Scan</span>
+                <span>{t('comprehensiveVulnerabilityScan')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Site Performance Analysis</span>
+                <span>{t('sitePerformanceAnalysis')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Security Header Analysis</span>
+                <span>{t('securityHeaderAnalysis')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Website Health Check</span>
+                <span>{t('websiteHealthCheck')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>No Login Required</span>
+                <span>{t('noLoginRequired')}</span>
               </li>
             </ul>
             <div className="card-actions">
@@ -85,7 +86,7 @@ const ScanTypeSelector = () => {
                   navigate('/schedules?type=public');
                 }}
               >
-                <span>Schedule Scan</span>
+                <span>{t('scheduleScan')}</span>
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
@@ -103,7 +104,7 @@ const ScanTypeSelector = () => {
                   handleScanTypeSelection('normal');
                 }}
               >
-                <span>Start Public Scan</span>
+                <span>{t('startPublicScan')}</span>
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
@@ -137,31 +138,30 @@ const ScanTypeSelector = () => {
                 />
               </svg>
             </div>
-            <h2 className="card-title">Authenticated Website Scan</h2>
+            <h2 className="card-title">{t('authenticatedWebsiteScan')}</h2>
             <p className="card-description">
-              Deep security analysis for login-protected areas. Automatically detects login interfaces,
-              validates credentials, and performs in-depth scans on authenticated areas.
+              {t('authScanDescription')}
             </p>
             <ul className="card-features">
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Auto-Detect Login Forms</span>
+                <span>{t('autoDetectLoginForms')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Credential Validation</span>
+                <span>{t('credentialValidation')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>In-Depth Authenticated Scan</span>
+                <span>{t('inDepthAuthenticatedScan')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Cookie-Based Session Management</span>
+                <span>{t('cookieSessionManagement')}</span>
               </li>
               <li>
                 <span className="feature-icon">✓</span>
-                <span>Server-Side Credential Handling</span>
+                <span>{t('serverSideCredentialHandling')}</span>
               </li>
             </ul>
             <div className="card-actions">
@@ -172,7 +172,7 @@ const ScanTypeSelector = () => {
                   navigate('/schedules?type=authenticated');
                 }}
               >
-                <span>Schedule Scan</span>
+                <span>{t('scheduleScan')}</span>
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
@@ -190,7 +190,7 @@ const ScanTypeSelector = () => {
                   handleScanTypeSelection('auth');
                 }}
               >
-                <span>Start Authenticated Scan</span>
+                <span>{t('startAuthenticatedScan')}</span>
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
@@ -219,7 +219,7 @@ const ScanTypeSelector = () => {
               d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"
             />
           </svg>
-          <span>Your credentials are never stored and are handled securely in-memory during the scan</span>
+          <span>{t('credentialsSecurityNote')}</span>
         </div>
       </div>
     </div>

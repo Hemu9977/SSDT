@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { useTranslation } from '../contexts/TranslationContext';
@@ -20,16 +20,16 @@ const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) =
 );
 
 const STEPS = [
-  { id: 1, label: 'Configure' },
-  { id: 2, label: 'Credentials' },
-  { id: 3, label: 'Verify' },
-  { id: 4, label: 'Scanning' },
-  { id: 5, label: 'Results' }
+  { id: 1, labelKey: 'configure' },
+  { id: 2, labelKey: 'credentials' },
+  { id: 3, labelKey: 'verifyStep' },
+  { id: 4, labelKey: 'scanning' },
+  { id: 5, labelKey: 'results' }
 ];
 
 const AuthenticatedScanPanel = () => {
   const navigate = useNavigate();
-  const { currentLang, setHasReport } = useTranslation();
+  const { currentLang, setHasReport, t } = useTranslation();
   const { theme } = useTheme();
 
   // Wizard state
@@ -111,6 +111,36 @@ const AuthenticatedScanPanel = () => {
     return () => document.removeEventListener('click', handleClickOutside);
   }, [pdfDropdownOpen]);
 
+  // Reset AI report translation when a new scan begins
+  useEffect(() => {
+    setTranslatedReport(null);
+    setIsTranslatingReport(false);
+  }, [report?.analysisId]);
+
+  // Translate the AI-generated security report when the user switches to Japanese.
+  // Uses Gemini via POST /api/translate because the report is dynamic markdown content.
+  useEffect(() => {
+    if (currentLang !== 'ja') return;
+    if (!report?.refinedReport) return;
+    if (translatedReport !== null) return; // already translated for this scan
+
+    const controller = new AbortController();
+    setIsTranslatingReport(true);
+
+    fetch(`${API_BASE}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: [report.refinedReport], targetLang: 'ja' }),
+      signal: controller.signal,
+    })
+      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+      .then(data => { if (data.translated?.[0]) setTranslatedReport(data.translated[0]); })
+      .catch(err => { if (err.name !== 'AbortError') console.error('[AI Report] Translation failed:', err.message); })
+      .finally(() => setIsTranslatingReport(false));
+
+    return () => controller.abort();
+  }, [currentLang, report?.refinedReport, translatedReport]);
+
   // Resume scan on page refresh (like normal scan)
   useEffect(() => {
     const resumeScan = () => {
@@ -159,40 +189,8 @@ const AuthenticatedScanPanel = () => {
     }
   }, []);
 
-  // Auto-translate AI report when language changes to Japanese (same as Hero.jsx)
-  useEffect(() => {
-    const translateReport = async () => {
-      const refinedReport = report?.refinedReport;
-      if (!refinedReport) return;
-      if (currentLang !== 'ja') return;
-      if (translatedReport) return; // Already cached
-
-      setIsTranslatingReport(true);
-      try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(`${API_BASE}/api/translate`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-auth-token': token
-          },
-          body: JSON.stringify({ texts: [refinedReport], targetLang: 'ja' })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setTranslatedReport(data.translated[0]);
-        }
-      } catch (err) {
-        console.error('Translation failed:', err);
-      } finally {
-        setIsTranslatingReport(false);
-      }
-    };
-
-    translateReport();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report?.refinedReport, currentLang]);
+  // Report prose is rendered exactly as provided by the backend. Frontend UI
+  // localization uses only static local dictionaries and makes no translation calls.
 
   // ========== Step 1: Detect Login Fields ==========
   const handleDetectFields = async () => {
@@ -222,7 +220,7 @@ const AuthenticatedScanPanel = () => {
       }
 
       if (!data.success) {
-        setDetectionError(data.error || 'Could not analyze the login page');
+        setDetectionError(data.error || t('couldNotAnalyzeLogin'));
         return;
       }
 
@@ -266,7 +264,7 @@ const AuthenticatedScanPanel = () => {
 
         setStep(2);
       } else {
-        setDetectionError('No login forms detected on this page.');
+        setDetectionError(t('noLoginFormsDetected'));
       }
     } catch (err) {
       setDetectionError(err.message);
@@ -313,7 +311,7 @@ const AuthenticatedScanPanel = () => {
     // Check if all selected fields have values
     const hasEmptyFields = selectedFields.some(field => !credentials[field.selector]);
     if (hasEmptyFields) {
-      setError('Please fill in all credential fields');
+      setError(t('pleaseFillCredentials'));
       return;
     }
 
@@ -339,7 +337,7 @@ const AuthenticatedScanPanel = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Login test failed');
+        throw new Error(data.error || t('loginTestFailed'));
       }
 
       setTestResult(data);
@@ -422,7 +420,7 @@ const AuthenticatedScanPanel = () => {
     }
 
     if (!tempSessionId) {
-      setError('Session expired. Please test login again.');
+      setError(t('sessionExpiredTestAgain'));
       return;
     }
 
@@ -444,12 +442,12 @@ const AuthenticatedScanPanel = () => {
 
       if (!res.ok) {
         if (data.code === 'SESSION_EXPIRED') {
-          setError('Session expired. Please test login again.');
+          setError(t('sessionExpiredTestAgain'));
           setStep(2);
           setScanning(false);
           return;
         }
-        throw new Error(data.error || 'Failed to start scan');
+        throw new Error(data.error || t('failedStartScan'));
       }
 
       setScanId(data.scanId);
@@ -483,7 +481,7 @@ const AuthenticatedScanPanel = () => {
         });
 
         if (!res.ok) {
-          throw new Error('Failed to get scan status');
+          throw new Error(t('failedFetchSchedules'));
         }
 
         const data = await res.json();
@@ -508,7 +506,7 @@ const AuthenticatedScanPanel = () => {
           clearInterval(pollingIntervalRef.current);
           isPollingRef.current = false;
           localStorage.removeItem('activeAuthScan');
-          setError(data.error || 'Scan failed');
+          setError(data.error || t('scanFailed'));
           setScanning(false);
         }
       } catch (err) {
@@ -519,7 +517,7 @@ const AuthenticatedScanPanel = () => {
     // Poll immediately then every 3 seconds
     poll();
     pollingIntervalRef.current = setInterval(poll, 3000);
-  }, []);
+  }, [t]);
 
   // ========== Stop Scan ==========
   const handleStopScan = async () => {
@@ -543,7 +541,7 @@ const AuthenticatedScanPanel = () => {
       isPollingRef.current = false;
 
       localStorage.removeItem('activeAuthScan');
-      setError('Scan stopped by user');
+      setError(t('scanWasStopped'));
       setScanning(false);
     } catch (err) {
       console.error('Failed to stop scan:', err);
@@ -583,7 +581,7 @@ const AuthenticatedScanPanel = () => {
     if (field.placeholder) return field.placeholder;
     if (field.name) return field.name;
     if (field.id) return field.id;
-    return field.inputType || 'Field';
+    return field.inputType || t('field');
   };
 
   // Render field selector helper
@@ -594,7 +592,7 @@ const AuthenticatedScanPanel = () => {
       <div className="field-selector">
         <label>{label}</label>
         <select value={selected || ''} onChange={(e) => onChange(e.target.value)}>
-          <option value="">-- Select {label} --</option>
+          <option value="">{t('selectFieldOption', { label })}</option>
           {options.map((field, idx) => (
             <option key={idx} value={field.selector}>
               {getFieldLabel(field)} [{field.inputType || field.tagName.toLowerCase()}]
@@ -610,7 +608,7 @@ const AuthenticatedScanPanel = () => {
       <div className="panel-content">
         {/* Security Disclaimer */}
         <div className="security-disclaimer">
-          🔒 Your credentials are never stored and are handled securely in-memory during the scan
+          ðŸ”’ {t('securityDisclaimer')}
         </div>
 
         {/* Step Indicators */}
@@ -621,7 +619,7 @@ const AuthenticatedScanPanel = () => {
               className={`step-indicator ${s.id <= step ? 'active' : ''} ${s.id === step ? 'current' : ''}`}
             >
               <div className="step-circle">{s.id}</div>
-              <div className="step-label">{s.label}</div>
+              <div className="step-label">{t(s.labelKey)}</div>
             </div>
           ))}
         </div>
@@ -631,28 +629,28 @@ const AuthenticatedScanPanel = () => {
           <div className="error-banner">
             <span>{error}</span>
             <button className="dismiss-btn" onClick={() => setError(null)}>
-              Dismiss
+              {t('dismiss')}
             </button>
           </div>
         )}
 
         {pendingSchedule && (
           <div className="scheduling-mode-banner" style={{ background: 'rgba(0, 176, 198, 0.1)', border: '1px solid var(--accent)', padding: '1rem', borderRadius: '8px', marginBottom: '1.5rem', textAlign: 'center', color: 'var(--accent)' }}>
-            <strong>Scheduling Mode Active</strong><br/>
-            Setting up an authenticated scan for {pendingSchedule.date} at {pendingSchedule.time}
+            <strong>{t('schedulingModeActive')}</strong><br/>
+            {t('settingUpAuthScan', { date: pendingSchedule.date, time: pendingSchedule.time })}
           </div>
         )}
 
         {/* Step 1: Configure URLs */}
         {step === 1 && (
           <div className="step-content">
-            <h2>Configure Scan</h2>
+            <h2>{t('configureScan')}</h2>
             <p className="step-description">
-              Enter the target URL to scan and the login page URL
+              {t('enterTargetAndLoginUrls')}
             </p>
 
             <div className="form-group">
-              <label htmlFor="targetUrl">Target URL</label>
+              <label htmlFor="targetUrl">{t('targetWebsiteUrl')}</label>
               <input
                 id="targetUrl"
                 type="text"
@@ -661,11 +659,11 @@ const AuthenticatedScanPanel = () => {
                 placeholder="https://example.com"
                 className="url-input"
               />
-              <span className="help-text">The main URL you want to analyze for vulnerabilities</span>
+              <span className="help-text">{t('targetUrlHelp')}</span>
             </div>
 
             <div className="form-group">
-              <label htmlFor="loginUrl">Login Page URL</label>
+              <label htmlFor="loginUrl">{t('loginPageUrl')}</label>
               <input
                 id="loginUrl"
                 type="text"
@@ -674,7 +672,7 @@ const AuthenticatedScanPanel = () => {
                 placeholder="https://example.com/login"
                 className="url-input"
               />
-              <span className="help-text">The URL of the login page (can be the same as your target)</span>
+              <span className="help-text">{t('loginPageUrlHelp')}</span>
             </div>
 
             <div className="step-actions">
@@ -684,13 +682,13 @@ const AuthenticatedScanPanel = () => {
                 disabled={!targetUrl || !loginUrl || detecting}
               >
                 {detecting && <span className="spinner" />}
-                <span>{detecting ? 'Analyzing...' : 'Detect Login Interface'}</span>
+                <span>{detecting ? t('analyzing') : t('detectLoginFields')}</span>
               </button>
             </div>
 
             {detectionError && (
               <div className="detection-error">
-                <strong>Detection Error:</strong> {detectionError}
+                <strong>{t('detectionErrorLabel')}</strong> {detectionError}
               </div>
             )}
           </div>
@@ -699,22 +697,22 @@ const AuthenticatedScanPanel = () => {
         {/* Step 2: Enter Credentials */}
         {step === 2 && detectedFields && (
           <div className="step-content">
-            <h2>Enter Credentials</h2>
+            <h2>{t('enterCredentials')}</h2>
             <p className="step-description">
-              Select the login fields and enter your credentials
+              {t('selectLoginFieldsAndEnterCredentials')}
             </p>
 
             {/* Detection Summary */}
             <div className="detection-summary">
-              <h3>Detected Login Form</h3>
-              <p className="page-title">Page: {detectedFields.pageTitle}</p>
+              <h3>{t('detectedLoginForm')}</h3>
+              <p className="page-title">{t('page')}: {detectedFields.pageTitle}</p>
 
               {/* Warnings */}
               {detectedFields.warnings && detectedFields.warnings.length > 0 && (
                 <div className="warnings">
                   {detectedFields.warnings.map((warning, idx) => (
                     <div key={idx} className="warning-item">
-                      ⚠️ {warning}
+                      âš ï¸ {warning}
                     </div>
                   ))}
                 </div>
@@ -723,7 +721,7 @@ const AuthenticatedScanPanel = () => {
               {/* Field Selection */}
               {detectedFields.forms && detectedFields.forms[0] && (
                 <div className="field-selection">
-                  <h4>Available Fields:</h4>
+                  <h4>{t('availableFields')}</h4>
                   {detectedFields.forms[0].fields
                     .filter(f => f.tagName === 'INPUT' && f.inputType !== 'submit' && f.inputType !== 'button')
                     .map((field, idx) => (
@@ -746,7 +744,7 @@ const AuthenticatedScanPanel = () => {
               {detectedFields.forms && detectedFields.forms[0] && (
                 <div className="field-selectors">
                   {renderFieldSelector(
-                    'Submit Button',
+                    t('submitButton'),
                     detectedFields.forms[0].fields.filter(f =>
                       f.tagName === 'BUTTON' || f.inputType === 'submit'
                     ),
@@ -754,7 +752,7 @@ const AuthenticatedScanPanel = () => {
                     setSelectedSubmitButton
                   )}
                   <div className="submit-button-hint">
-                    💡 <strong>Tip:</strong> If login fails, try selecting a different submit button from the dropdown above and test again.
+                    ðŸ’¡ <strong>{t('tip')}</strong> {t('tryDifferentSubmitButton')}
                   </div>
                 </div>
               )}
@@ -775,7 +773,7 @@ const AuthenticatedScanPanel = () => {
                         type={showPasswords[field.selector] ? 'text' : 'password'}
                         value={credentials[field.selector] || ''}
                         onChange={(e) => handleCredentialChange(field.selector, e.target.value)}
-                        placeholder={`Enter ${getFieldLabel(field)}`}
+                        placeholder={`${t('enter')} ${getFieldLabel(field)}`}
                         className="url-input"
                         autoComplete="off"
                       />
@@ -784,7 +782,7 @@ const AuthenticatedScanPanel = () => {
                         className="toggle-password"
                         onClick={() => togglePasswordVisibility(field.selector)}
                       >
-                        {showPasswords[field.selector] ? 'Hide' : 'Show'}
+                        {showPasswords[field.selector] ? t('hide') : t('show')}
                       </button>
                     </div>
                   ) : (
@@ -793,7 +791,7 @@ const AuthenticatedScanPanel = () => {
                       type="text"
                       value={credentials[field.selector] || ''}
                       onChange={(e) => handleCredentialChange(field.selector, e.target.value)}
-                      placeholder={`Enter ${getFieldLabel(field)}`}
+                      placeholder={`${t('enter')} ${getFieldLabel(field)}`}
                       className="url-input"
                       autoComplete="off"
                     />
@@ -803,8 +801,8 @@ const AuthenticatedScanPanel = () => {
             </div>
 
             <div className="step-actions">
-              <button className="secondary-btn" onClick={() => setStep(1)}>
-                Back
+                <button className="secondary-btn" onClick={() => setStep(1)}>
+                {t('back')}
               </button>
               <button
                 className="primary-btn"
@@ -812,7 +810,7 @@ const AuthenticatedScanPanel = () => {
                 disabled={testing || selectedFields.length === 0}
               >
                 {testing && <span className="spinner" />}
-                <span>{testing ? 'Testing Login...' : 'Test Login'}</span>
+                <span>{testing ? t('testingLogin') : t('testLogin')}</span>
               </button>
             </div>
 
@@ -821,18 +819,18 @@ const AuthenticatedScanPanel = () => {
               <div className={`test-result ${testResult.authenticated ? 'test-success' : 'test-fail'}`}>
                 {testResult.authenticated ? (
                   <>
-                    <strong>✅ Login Successful!</strong>
-                    <p>Credentials verified. Session cookies captured.</p>
+                    <strong>âœ… {t('loginSuccessful')}</strong>
+                    <p>{t('credentialsVerified')}</p>
                     {testResult.postLoginUrl && (
                       <p>
-                        Redirected to: <span className="post-login-url">{testResult.postLoginUrl}</span>
+                        {t('redirectTo')} <span className="post-login-url">{testResult.postLoginUrl}</span>
                       </p>
                     )}
                   </>
                 ) : (
                   <>
-                    <strong>❌ Login Failed</strong>
-                    <p>{testResult.errorMessage || 'Could not authenticate with provided credentials'}</p>
+                    <strong>âŒ {t('loginFailed')}</strong>
+                    <p>{testResult.errorMessage || t('couldNotAuthenticateProvidedCredentials')}</p>
                   </>
                 )}
               </div>
@@ -843,32 +841,32 @@ const AuthenticatedScanPanel = () => {
         {/* Step 3: Verify & Start Scan */}
         {step === 3 && (
           <div className="step-content">
-            <h2>Verify Configuration</h2>
+            <h2>{t('verifyConfiguration')}</h2>
             <p className="step-description">
-              Review your configuration and start the authenticated security scan
+              {t('reviewConfigurationAndStartAuthenticatedSecurityScan')}
             </p>
 
             {/* Test Result */}
             {testResult && testResult.authenticated && (
               <div className="test-result test-success">
-                <strong>✅ Authentication Verified</strong>
-                <p>Ready to start authenticated security scan</p>
+                <strong>âœ… {t('authenticationVerified')}</strong>
+                <p>{t('readyToStartAuthenticatedSecurityScan')}</p>
               </div>
             )}
 
             {/* Scan Summary */}
             <div className="scan-summary">
               <div className="summary-item">
-                <span className="summary-label">Target:</span>
+                <span className="summary-label">{t('targetLabel')}</span>
                 <span className="summary-value">{targetUrl}</span>
               </div>
               <div className="summary-item">
-                <span className="summary-label">Login URL:</span>
+                <span className="summary-label">{t('loginUrlLabel')}</span>
                 <span className="summary-value">{loginUrl}</span>
               </div>
               <div className="summary-item">
-                <span className="summary-label">Fields:</span>
-                <span className="summary-value">{selectedFields.length} credential field(s)</span>
+                <span className="summary-label">{t('fieldsLabel')}</span>
+                <span className="summary-value">{selectedFields.length} {t('credentialFields')}</span>
               </div>
             </div>
 
@@ -882,20 +880,20 @@ const AuthenticatedScanPanel = () => {
                 disabled={scanning}
               >
                 {scanning && <span className="spinner" />}
-                <span>{pendingSchedule ? "Save Scheduled Scan" : "Start Authenticated Scan"}</span>
+                <span>{pendingSchedule ? t('saveScheduledScan') : t('startAuthenticatedScan')}</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* Step 4: Scanning  +  Step 5: Results — unified progressive view */}
+        {/* Step 4: Scanning  +  Step 5: Results â€” unified progressive view */}
         {(step === 4 || step === 5) && (
           <div className="step-content">
-            <h2>{step === 5 ? 'Scan Complete' : 'Scanning in Progress'}</h2>
+            <h2>{step === 5 ? t('scanComplete') : t('scanningInProgress')}</h2>
             <p className="step-description">
               {step === 5
-                ? 'Security scan completed. Review the findings below.'
-                : 'Running all security scanners on the authenticated website'}
+                ? t('securityScanCompletedReviewBelow')
+                : t('runningAuthenticatedWebsiteScan')}
             </p>
 
             {/* Progress Bar (only during scanning) */}
@@ -908,11 +906,11 @@ const AuthenticatedScanPanel = () => {
                   <span className="progress-percent">{scanProgress}%</span>
                   <span className="progress-phase">
                     {(() => {
-                      if (!report?.hasPsiResult || !report?.hasObservatoryResult) return 'Fetching PageSpeed & Observatory...';
-                      if (report?.zapPending) return `ZAP Auth Scan: ${scanPhase} (${scanProgress}%)...`;
-                      if (!report?.hasZapResult) return 'Running authenticated ZAP scan...';
-                      if (!report?.hasRefinedReport) return 'Generating AI report...';
-                      return 'Finalizing...';
+                      if (!report?.hasPsiResult || !report?.hasObservatoryResult) return t('fetchingPerformanceAndSecurityMetadata');
+                      if (report?.zapPending) return t('vulnerabilityAnalysisInProgress', { phase: scanPhase, progress: scanProgress });
+                      if (!report?.hasZapResult) return t('startingComprehensiveVulnerabilityScan');
+                      if (!report?.hasRefinedReport) return t('generatingAiPoweredSecurityInsights');
+                      return t('finalizingResults');
                     })()}
                   </span>
                 </div>
@@ -929,7 +927,7 @@ const AuthenticatedScanPanel = () => {
               lineHeight: '1.6',
               fontSize: '0.95rem'
             }}>
-              <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>AI-Generated Analysis Summary</h4>
+              <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>{t('aiGeneratedAnalysisSummary')}</h4>
               {report?.refinedReport ? (
                 isTranslatingReport ? (
                   <div style={{ textAlign: 'center', padding: '1rem' }}>
@@ -954,7 +952,7 @@ const AuthenticatedScanPanel = () => {
               )}
             </div>
 
-            {/* Score Cards Grid — matches Hero.jsx exactly */}
+            {/* Score Cards Grid â€” matches Hero.jsx exactly */}
             {(() => {
               // Helper functions (same as Hero.jsx)
               const getScoreClass = (score) => score >= 90 ? 'score-good' : score >= 50 ? 'score-medium' : 'score-poor';
@@ -969,18 +967,18 @@ const AuthenticatedScanPanel = () => {
 
               // ZAP data
               const backendZapData = report?.zapData;
-              let zapRiskLabel = 'Passed'; let zapRiskColor = '#00d084'; let zapPendingMessage = null;
+              let zapRiskLabel = t('passed'); let zapRiskColor = '#00d084'; let zapPendingMessage = null;
               if (backendZapData) {
                 if (backendZapData.status === 'pending' || backendZapData.status === 'running') {
                   zapRiskLabel = 'Scanning...'; zapRiskColor = '#ffb900';
-                  zapPendingMessage = `${backendZapData.phase || 'starting'}: ${backendZapData.progress || 0}%`;
+                  zapPendingMessage = `${backendZapData.phase || t('starting')}: ${backendZapData.progress || 0}%`;
                 } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
                   if (backendZapData.riskCounts.High > 0) { zapRiskLabel = 'High Risk'; zapRiskColor = '#e81123'; }
                   else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = 'Medium Risk'; zapRiskColor = '#ff8c00'; }
                   else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = 'Low Risk'; zapRiskColor = '#ffb900'; }
                 } else if (backendZapData.status === 'failed') {
                   zapRiskLabel = 'Failed'; zapRiskColor = '#e81123';
-                  zapPendingMessage = backendZapData.message || 'Scan failed';
+                  zapPendingMessage = backendZapData.message || t('scanFailed');
                 }
               }
 
@@ -1002,7 +1000,7 @@ const AuthenticatedScanPanel = () => {
 
               return (
                 <>
-                  <h3 className="report-title">Combined Scan Report {report?.target ? `for ${report.target}` : ''}</h3>
+                  <h3 className="report-title">ðŸ“Š {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
 
                   <div className="score-cards-grid">
                     {/* OWASP ZAP (Authenticated) */}
@@ -1014,13 +1012,13 @@ const AuthenticatedScanPanel = () => {
                           {zapPendingMessage ? (
                             <p className="score-card__label" style={{ color: '#ffb900' }}>{zapPendingMessage}</p>
                           ) : backendZapData.status === 'completed' ? (
-                            <p className="score-card__label">{backendZapData.alerts ? backendZapData.alerts.length : 0} Alerts</p>
+                            <p className="score-card__label">{backendZapData.alerts ? backendZapData.alerts.length : 0} {t('alerts')}</p>
                           ) : backendZapData.status === 'completed_partial' ? (
-                            <p className="score-card__label" style={{ color: '#ffb900' }}>{backendZapData.alerts ? backendZapData.alerts.length : 0} Alerts (Partial)</p>
+                            <p className="score-card__label" style={{ color: '#ffb900' }}>{backendZapData.alerts ? backendZapData.alerts.length : 0} {t('alerts')} ({t('partial')})</p>
                           ) : null}
                         </>
                       ) : report?.zapResult?.error || (report?.status === 'completed' && !report?.hasZapResult) ? (
-                        <div style={{ color: '#ffb900', marginTop: '10px' }}>Unavailable</div>
+                        <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
                       ) : (
                         <div className="score-card__loading loading-pulse">
                           <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
@@ -1031,11 +1029,11 @@ const AuthenticatedScanPanel = () => {
 
                     {/* Performance (PSI) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">Performance</h4>
+                      <h4 className="score-card__title">{t('performance')}</h4>
                       {psiScores?.performance != null ? (
                         <>
                           <span className={`score-card__value ${getScoreClass(psiScores.performance)}`}>{psiScores.performance}</span>
-                          <p className="score-card__label">out of 100</p>
+                          <p className="score-card__label">{t('outOf100')}</p>
                         </>
                       ) : (
                         <div className="score-card__loading loading-pulse">
@@ -1047,7 +1045,7 @@ const AuthenticatedScanPanel = () => {
 
                     {/* Security Config (Observatory) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">Security Config</h4>
+                      <h4 className="score-card__title">{t('securityConfig')}</h4>
                       {observatoryData?.grade ? (
                         <>
                           <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
@@ -1067,12 +1065,12 @@ const AuthenticatedScanPanel = () => {
                       {report?.hasUrlscanResult && report?.urlscanData ? (
                         <>
                           <span className="score-card__value" style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084' }}>
-                            {report.urlscanData.verdicts?.overall?.malicious ? 'Malicious' : 'Clean'}
+                            {report.urlscanData.verdicts?.overall?.malicious ? t('malicious') : t('clean')}
                           </span>
-                          <p className="score-card__label">{report.urlscanData.verdicts?.overall?.score || 0} threat score</p>
+                          <p className="score-card__label">{report.urlscanData.verdicts?.overall?.score || 0} {t('threatScore')}</p>
                         </>
                       ) : report?.urlscanResult?.error || (report?.status === 'completed' && !report?.hasUrlscanResult) ? (
-                        <div style={{ color: '#ffb900', marginTop: '10px' }}>Unavailable</div>
+                        <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
                       ) : (
                         <div className="score-card__loading loading-pulse">
                           <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
@@ -1083,24 +1081,24 @@ const AuthenticatedScanPanel = () => {
 
                     {/* SSL Certificate (WebCheck) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">SSL Certificate</h4>
+                      <h4 className="score-card__title">{t('sslCertificate')}</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                          <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.ssl && !webCheckReport.ssl.error ? (
                         <>
-                          <span className="score-card__value score-card__value--safe">Valid</span>
-                          <p className="score-card__label">{webCheckReport.ssl.issuer?.O || 'Unknown Issuer'}</p>
+                          <span className="score-card__value score-card__value--safe">{t('valid')}</span>
+                          <p className="score-card__label">{webCheckReport.ssl.issuer?.O || t('unknownIssuer')}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{webCheckError ? 'Failed' : 'Pending'}</div>
+                          <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{webCheckError ? t('failed') : t('pending')}</div>
                       )}
                     </div>
 
                     {/* Security Headers (WebCheck) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">Security Headers</h4>
+                      <h4 className="score-card__title">{t('securityHeaders')}</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                          <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['http-security'] && !webCheckReport['http-security'].error ? (
                         <>
                           {(() => {
@@ -1109,27 +1107,27 @@ const AuthenticatedScanPanel = () => {
                             const color = passed >= 4 ? '#00d084' : passed >= 2 ? '#ffb900' : '#e81123';
                             return <span className="score-card__value" style={{ color }}>{passed}/5</span>;
                           })()}
-                          <p className="score-card__label">Headers Present</p>
+                          <p className="score-card__label">{t('headersPresent')}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
                     {/* Tech Stack (WebCheck) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">Tech Stack</h4>
+                      <h4 className="score-card__title">{t('techStack')}</h4>
                       {webCheckLoading ? (
                         <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
                       ) : (() => {
                         const techData = webCheckReport?.['tech-stack'];
                         const techArray = techData?.technologies || (Array.isArray(techData) ? techData : null) || (techData && !techData.error && typeof techData === 'object' ? Object.keys(techData) : null);
                         if (techArray && techArray.length > 0) {
-                          return (<><span className="score-card__value score-card__value--safe">{techArray.length}</span><p className="score-card__label">Technologies Detected</p></>);
+                          return (<><span className="score-card__value score-card__value--safe">{techArray.length}</span><p className="score-card__label">{t('technologiesDetected')}</p></>);
                         } else if (techData && !techData.error) {
-                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>No technologies detected</div>;
+                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('noTechnologiesDetected')}</div>;
                         } else {
-                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{techData?.error ? 'Scan Failed' : 'Pending'}</div>;
+                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{techData?.error ? t('scanFailed') : t('pending')}</div>;
                         }
                       })()}
                     </div>
@@ -1147,7 +1145,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">WAF Status</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1164,7 +1162,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Score: {webCheckReport.tls.tlsInfo?.score || 0}/100</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1358,11 +1356,11 @@ const AuthenticatedScanPanel = () => {
                         <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
                       ) : webCheckReport?.dnssec && !webCheckReport.dnssec.error ? (
                         <>
-                          <span className={`score-card__value score-card__value--${webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>{webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'Valid' : 'Not Set'}</span>
+                          <span className={`score-card__value score-card__value--${webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>{webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? t('valid') : t('notSet')}</span>
                           <p className="score-card__label">DNSSEC Status</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1437,8 +1435,8 @@ const AuthenticatedScanPanel = () => {
                     if (!screenshotSrc) return null;
                     return (
                       <div className="screenshot-preview">
-                        <h4>Website Screenshot <span>({screenshotSource})</span></h4>
-                        <img src={screenshotSrc} alt="Website Screenshot" />
+                        <h4>{t('websiteScreenshot')} <span>({screenshotSource})</span></h4>
+                        <img src={screenshotSrc} alt={t('websiteScreenshot')} />
                       </div>
                     );
                   })()}
@@ -1472,7 +1470,7 @@ const AuthenticatedScanPanel = () => {
                   {report?.hasUrlscanResult && report?.urlscanData && (
                     <details style={{ marginBottom: '2rem' }}>
                       <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px', border: '1px solid #00d084' }}>
-                        View URLScan.io Analysis
+                        {t('viewUrlscanAnalysis')}
                       </summary>
                       <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
                         <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
@@ -1515,7 +1513,7 @@ const AuthenticatedScanPanel = () => {
                   {/* Observatory Summary */}
                   {observatoryData ? (
                     <div className="report-summary" style={{ marginTop: '2rem' }}>
-                      <h4>Mozilla Observatory Security Configuration</h4>
+                      <h4>{t('mozillaObservatorySecurityConfiguration')}</h4>
                       <p><b>Security Grade:</b> <span style={{ color: getObservatoryGradeColor(observatoryData.grade), fontWeight: 'bold', fontSize: '1.2rem' }}>{observatoryData.grade}</span></p>
                       <p><b>Score:</b> {observatoryData.score}/100</p>
                       <p><b>Tests Passed:</b> {observatoryData.tests_passed}/{observatoryData.tests_quantity}</p>
@@ -1524,7 +1522,7 @@ const AuthenticatedScanPanel = () => {
                     </div>
                   ) : (
                     <div className="report-summary" style={{ marginTop: '2rem', opacity: 0.7 }}>
-                      <h4>Mozilla Observatory Security Configuration</h4>
+                      <h4>{t('mozillaObservatorySecurityConfiguration')}</h4>
                       <p style={{ color: '#888' }}><i>Observatory scan data not available for this URL.</i></p>
                       <p><b>Manual Scan:</b>{' '}<a href={`https://developer.mozilla.org/en-US/observatory/analyze?host=${report?.target ? encodeURIComponent(new URL(report.target).hostname) : ''}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline', fontWeight: 'bold' }}>Run Mozilla Observatory Scan</a></p>
                     </div>
@@ -1554,53 +1552,64 @@ const AuthenticatedScanPanel = () => {
                                   setPdfDownloading(true);
                                   setPdfProgress(0);
                                   setPdfProgressMessage('Initializing English PDF...');
-                                  const progressSteps = [
-                                    { progress: 15, message: 'Formatting scan data...' },
-                                    { progress: 35, message: 'Waiting for API rate limit...' },
-                                    { progress: 55, message: 'Formatting AI analysis...' },
-                                    { progress: 80, message: 'Rendering PDF document...' },
-                                    { progress: 95, message: 'Finalizing...' },
-                                  ];
-                                  let currentStep = 0;
-                                  const progressInterval = setInterval(() => {
-                                    if (currentStep < progressSteps.length) {
-                                      setPdfProgress(progressSteps[currentStep].progress);
-                                      setPdfProgressMessage(progressSteps[currentStep].message);
-                                      currentStep++;
-                                    }
-                                  }, 6000);
                                   try {
                                     const token = localStorage.getItem('token');
-                                    const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=en`, {
-                                      headers: { 'x-auth-token': token }
+                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
+                                      method: 'POST',
+                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
                                     });
-                                    clearInterval(progressInterval);
-                                    if (!response.ok) {
-                                      const errorData = await response.json().catch(() => ({}));
-                                      if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                                    if (!startRes.ok) {
+                                      const e = await startRes.json().catch(() => ({}));
+                                      throw new Error(e.error || 'Failed to start PDF generation');
+                                    }
+                                    const { jobId } = await startRes.json();
+                                    const progressSteps = [
+                                      { progress: 15, message: 'Formatting scan data...' },
+                                      { progress: 35, message: 'Waiting for API rate limit...' },
+                                      { progress: 55, message: 'Formatting AI analysis...' },
+                                      { progress: 75, message: 'Rendering PDF document...' },
+                                      { progress: 90, message: 'Finalizing...' },
+                                    ];
+                                    let pollCount = 0;
+                                    while (true) {
+                                      await new Promise(r => setTimeout(r, 5000));
+                                      pollCount++;
+                                      if (pollCount > 120) throw new Error('PDF generation timed out');
+                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
+                                      setPdfProgress(progressSteps[stepIdx].progress);
+                                      setPdfProgressMessage(progressSteps[stepIdx].message);
+                                      const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                        headers: { 'x-auth-token': token }
+                                      });
+                                      if (pollRes.status === 202) continue;
+                                      if (pollRes.status === 200) {
+                                        setPdfProgress(100);
+                                        setPdfProgressMessage('Download complete!');
+                                        const blob = await pollRes.blob();
+                                        const url = window.URL.createObjectURL(blob);
+                                        const a = document.createElement('a');
+                                        a.href = url;
+                                        a.download = `security_report_EN_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        window.URL.revokeObjectURL(url);
+                                        document.body.removeChild(a);
+                                        break;
+                                      }
+                                      const errorData = await pollRes.json().catch(() => ({}));
+                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                                         alert('Gemini key is exhausted');
                                         throw new Error('Gemini key is exhausted');
                                       }
-                                      if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
+                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
                                         alert('English PDF must contain English only');
                                         throw new Error(errorData.error || 'English-only validation failed');
                                       }
-                                      throw new Error(errorData.error || 'PDF download failed');
+                                      throw new Error(errorData.error || 'PDF generation failed');
                                     }
-                                    setPdfProgress(100);
-                                    setPdfProgressMessage('Download complete!');
-                                    const blob = await response.blob();
-                                    const url = window.URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = `security_report_EN_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    window.URL.revokeObjectURL(url);
-                                    document.body.removeChild(a);
                                     setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
                                   } catch (err) {
-                                    clearInterval(progressInterval);
                                     console.error('PDF download failed:', err);
                                     setPdfProgressMessage(`Error: ${err.message}`);
                                     setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
@@ -1616,55 +1625,66 @@ const AuthenticatedScanPanel = () => {
                                   setPdfDownloading(true);
                                   setPdfProgress(0);
                                   setPdfProgressMessage('Initializing Japanese PDF...');
-                                  const progressSteps = [
-                                    { progress: 10, message: 'Formatting scan data...' },
-                                    { progress: 25, message: 'Waiting for API rate limit...' },
-                                    { progress: 40, message: 'Formatting AI analysis...' },
-                                    { progress: 55, message: 'Waiting for API rate limit...' },
-                                    { progress: 70, message: 'Translating to Japanese...' },
-                                    { progress: 85, message: 'Rendering PDF document...' },
-                                    { progress: 95, message: 'Finalizing...' },
-                                  ];
-                                  let currentStep = 0;
-                                  const progressInterval = setInterval(() => {
-                                    if (currentStep < progressSteps.length) {
-                                      setPdfProgress(progressSteps[currentStep].progress);
-                                      setPdfProgressMessage(progressSteps[currentStep].message);
-                                      currentStep++;
-                                    }
-                                  }, 8000);
                                   try {
                                     const token = localStorage.getItem('token');
-                                    const response = await fetch(`${API_BASE}/api/scan/download-pdf/${report.analysisId}?lang=ja`, {
-                                      headers: { 'x-auth-token': token }
+                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
+                                      method: 'POST',
+                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
                                     });
-                                    clearInterval(progressInterval);
-                                    if (!response.ok) {
-                                      const errorData = await response.json().catch(() => ({}));
-                                      if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
+                                    if (!startRes.ok) {
+                                      const e = await startRes.json().catch(() => ({}));
+                                      throw new Error(e.error || 'Failed to start PDF generation');
+                                    }
+                                    const { jobId } = await startRes.json();
+                                    const progressSteps = [
+                                      { progress: 10, message: 'Formatting scan data...' },
+                                      { progress: 25, message: 'Waiting for API rate limit...' },
+                                      { progress: 40, message: 'Formatting AI analysis...' },
+                                      { progress: 55, message: 'Waiting for API rate limit...' },
+                                      { progress: 70, message: 'Translating to Japanese...' },
+                                      { progress: 85, message: 'Rendering PDF document...' },
+                                      { progress: 92, message: 'Finalizing...' },
+                                    ];
+                                    let pollCount = 0;
+                                    while (true) {
+                                      await new Promise(r => setTimeout(r, 5000));
+                                      pollCount++;
+                                      if (pollCount > 120) throw new Error('PDF generation timed out');
+                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
+                                      setPdfProgress(progressSteps[stepIdx].progress);
+                                      setPdfProgressMessage(progressSteps[stepIdx].message);
+                                      const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                        headers: { 'x-auth-token': token }
+                                      });
+                                      if (pollRes.status === 202) continue;
+                                      if (pollRes.status === 200) {
+                                        setPdfProgress(100);
+                                        setPdfProgressMessage('Download complete!');
+                                        const blob = await pollRes.blob();
+                                        const url = window.URL.createObjectURL(blob);
+                                        const a = document.createElement('a');
+                                        a.href = url;
+                                        a.download = `security_report_JA_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        window.URL.revokeObjectURL(url);
+                                        document.body.removeChild(a);
+                                        break;
+                                      }
+                                      const errorData = await pollRes.json().catch(() => ({}));
+                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                                         alert('Gemini key is exhausted');
                                         throw new Error('Gemini key is exhausted');
                                       }
-                                      if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
+                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
                                         alert('English PDF must contain English only');
                                         throw new Error(errorData.error || 'English-only validation failed');
                                       }
-                                      throw new Error(errorData.error || 'PDF download failed');
+                                      throw new Error(errorData.error || 'PDF generation failed');
                                     }
-                                    setPdfProgress(100);
-                                    setPdfProgressMessage('Download complete!');
-                                    const blob = await response.blob();
-                                    const url = window.URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = `security_report_JA_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    window.URL.revokeObjectURL(url);
-                                    document.body.removeChild(a);
                                     setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
                                   } catch (err) {
-                                    clearInterval(progressInterval);
                                     console.error('PDF download failed:', err);
                                     setPdfProgressMessage(`Error: ${err.message}`);
                                     setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
@@ -1682,7 +1702,7 @@ const AuthenticatedScanPanel = () => {
                           onClick={async () => {
                             try {
                               const token = localStorage.getItem('token');
-                              const response = await fetch(`${API_BASE}/api/scan/download-complete-json/${report.analysisId}`, {
+                              const response = await fetch(`${API_BASE}/api/scan/download-complete-json/${report.analysisId || scanId}`, {
                                 headers: { 'x-auth-token': token }
                               });
                               if (!response.ok) throw new Error('Download failed');
@@ -1744,3 +1764,4 @@ const AuthenticatedScanPanel = () => {
 };
 
 export default AuthenticatedScanPanel;
+

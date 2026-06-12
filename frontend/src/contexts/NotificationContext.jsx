@@ -9,7 +9,7 @@
  * - Auto-dismiss after 8 seconds
  */
 
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { io } from 'socket.io-client';
 import { useUser } from './UserContext';
 import { API_BASE } from '../config/api';
@@ -30,6 +30,8 @@ export const NotificationProvider = ({ children }) => {
   const socketRef = useRef(null);
   const notificationIdRef = useRef(0);
   const timerRefs = useRef({});
+  // Map of scanId → callback for real-time scan:update events
+  const scanListenersRef = useRef(new Map());
 
   // Remove a notification by ID
   const removeNotification = useCallback((id) => {
@@ -101,14 +103,28 @@ export const NotificationProvider = ({ children }) => {
     // Create Socket.IO connection with auth token
     const socket = io(API_BASE, {
       auth: { token },
-      transports: ['websocket', 'polling'],
+      // Force WebSocket-only.
+      // Socket.IO long-polling fallback can create high-frequency HTTP traffic under load,
+      // which worsens backend overload and competes with scan workers.
+      transports: ['websocket'],
       reconnection: true,
       reconnectionAttempts: 10,
-      reconnectionDelay: 2000
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 10000,
+      timeout: 20000
     });
 
     socket.on('connect', () => {
       console.log('🔌 Notification socket connected:', socket.id);
+
+      // Re-join scan rooms after reconnect so scan replay works reliably.
+      try {
+        for (const scanId of scanListenersRef.current.keys()) {
+          socket.emit('join:scan', { scanId });
+        }
+      } catch (_) {
+        // best-effort
+      }
     });
 
     socket.on('disconnect', (reason) => {
@@ -119,7 +135,7 @@ export const NotificationProvider = ({ children }) => {
       console.warn('🔌 Notification socket connection error:', error.message);
     });
 
-    // Listen for scan completion events
+    // Listen for scan completion events (UI notification popup)
     socket.on('scan_completed', (data) => {
       console.log('📢 Scan completed notification received:', data);
       addNotification({
@@ -132,6 +148,14 @@ export const NotificationProvider = ({ children }) => {
       });
     });
 
+    // Forward scan:update events to registered per-scan listeners
+    socket.on('scan:update', (data) => {
+      const { scanId } = data;
+      if (scanId && scanListenersRef.current.has(scanId)) {
+        scanListenersRef.current.get(scanId)(data);
+      }
+    });
+
     socketRef.current = socket;
 
     return () => {
@@ -139,6 +163,28 @@ export const NotificationProvider = ({ children }) => {
       socketRef.current = null;
     };
   }, [user, addNotification]);
+
+  /**
+   * Register a listener for real-time scan:update events for a specific scan.
+   * Also tells the server to join the scan:<scanId> room for tighter delivery.
+   *
+   * @param {string}   scanId   - The analysisId of the scan to watch
+   * @param {Function} callback - Called with the full scan:update payload
+   */
+  const addScanListener = useCallback((scanId, callback) => {
+    scanListenersRef.current.set(scanId, callback);
+    // Ask the server to add us to the scan-specific Socket.IO room
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('join:scan', { scanId });
+    }
+  }, []);
+
+  /**
+   * Unregister the scan:update listener for a scan (call on component unmount).
+   */
+  const removeScanListener = useCallback((scanId) => {
+    scanListenersRef.current.delete(scanId);
+  }, []);
 
   // Mark notification as read on backend
   const markAsRead = useCallback(async (analysisId) => {
@@ -171,12 +217,14 @@ export const NotificationProvider = ({ children }) => {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  const value = {
+  const value = useMemo(() => ({
     notifications,
     addNotification,
     removeNotification,
-    markAsRead
-  };
+    markAsRead,
+    addScanListener,
+    removeScanListener
+  }), [notifications, addNotification, removeNotification, markAsRead, addScanListener, removeScanListener]);
 
   return (
     <NotificationContext.Provider value={value}>

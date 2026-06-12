@@ -204,7 +204,17 @@ router.post('/', auth, async (req, res) => {
  * GET /api/schedules
  * List all schedules for authenticated user
  */
-router.get('/', auth, async (req, res) => {
+router.get(
+  '/',
+  (req, res, next) => {
+    // Health-check behavior: if called without auth, return a simple message.
+    // If a token is present, proceed through normal auth + schedule listing.
+    const token = req.header('x-auth-token');
+    if (!token) return res.json({ message: 'Schedules working' });
+    next();
+  },
+  auth,
+  async (req, res) => {
   try {
     const schedules = await ScheduledScan.find({ userId: req.user.id })
       .sort({ createdAt: -1 })

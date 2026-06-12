@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/WebCheckDetails.scss';
 
 const getObservatoryGradeColor = (grade) => {
@@ -63,6 +64,8 @@ const Expandable = ({ label, children, defaultOpen = false }) => {
 };
 
 const WebCheckDetails = ({ webCheckReport, theme }) => {
+  const { t } = useTranslation();
+
   if (!webCheckReport || Object.keys(webCheckReport).length === 0) return null;
 
   const bg = theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)';
@@ -73,7 +76,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
   return (
     <details style={{ marginBottom: '2rem', overflow: 'hidden' }}>
       <summary style={{ cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem', padding: '1rem', background: bg, borderRadius: '8px', border: '1px solid #00d084' }}>
-        View Site Health Analysis ({completedCount} components analyzed)
+        {t('viewSiteHealthAnalysis', { count: completedCount })}
       </summary>
       <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem', fontSize: '0.9rem', overflow: 'hidden' }}>
 

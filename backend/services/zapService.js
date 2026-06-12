@@ -6,6 +6,7 @@ const ScanResult = require('../models/ScanResult');
 const ZapAlert = require('../models/ZapAlert');
 const gridfsService = require('./gridfsService');
 const cleanupService = require('./cleanupService');
+const { publishScanProgress } = require('./scanProgressService');
 
 // ============================================================================
 // ZAP API CONFIGURATION
@@ -324,57 +325,44 @@ async function runZapScanWithUrlTracking(options) {
     const activeScanId = scanResponse.data.scan;
     console.log(`⚡ Active scan started: ${activeScanId}`);
 
-    // Wait for active scan to complete with stuck detection
+    // Wait for active scan to complete with high-watermark stuck detection.
     let scanProgress = 0;
-    let lastProgress = 0;
-    let stuckCount = 0;
-    const maxStuckIterations = 15; // 75 seconds
+    let hwmProgress = -1;
+    let lastHwmAdvance = Date.now();
+    const STUCK_TIMEOUT_MS_SIMPLE = 5 * 60 * 1000; // 5 min (shorter for the simple path)
     const activeScanStartTime = Date.now();
     const maxActiveScanTime = 25 * 60 * 1000; // 25 minutes max
 
     while (scanProgress < 100) {
       await sleep(5000);
 
-      // Check timeout
       if (Date.now() - activeScanStartTime > maxActiveScanTime) {
-        console.warn('⚠️ Active scan timeout, stopping...');
-        try {
-          await zapApi.get('/JSON/ascan/action/stop/', {
-            params: { scanId: activeScanId }
-          });
-        } catch (stopError) {
-          // Ignore stop errors
-        }
+        console.warn('Active scan timeout, stopping...');
+        try { await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } }); } catch (_) {}
         break;
       }
 
-      const statusResponse = await zapApi.get('/JSON/ascan/view/status/', {
-        params: { scanId: activeScanId }
-      });
+      let statusResponse;
+      try {
+        statusResponse = await zapApi.get('/JSON/ascan/view/status/', { params: { scanId: activeScanId } });
+      } catch (_) { continue; }
 
-      scanProgress = parseInt(statusResponse.data.status);
+      scanProgress = parseInt(statusResponse.data.status) || 0;
 
-      // Stuck detection
-      if (scanProgress === lastProgress) {
-        stuckCount++;
-        if (stuckCount >= maxStuckIterations) {
-          console.warn(`⚠️ Scan stuck at ${scanProgress}%, stopping...`);
-          try {
-            await zapApi.get('/JSON/ascan/action/stop/', {
-              params: { scanId: activeScanId }
-            });
-          } catch (stopError) {
-            // Ignore stop errors
-          }
-          break;
-        }
-      } else {
-        stuckCount = 0;
+      if (scanProgress >= hwmProgress + 2) {
+        hwmProgress = scanProgress;
+        lastHwmAdvance = Date.now();
       }
-      lastProgress = scanProgress;
+
+      const stuckMs = Date.now() - lastHwmAdvance;
+      if (stuckMs > STUCK_TIMEOUT_MS_SIMPLE) {
+        console.warn(`Active scan stuck at ${scanProgress}% (high-water=${hwmProgress}%) for ${(stuckMs/60000).toFixed(1)}min — stopping`);
+        try { await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } }); } catch (_) {}
+        break;
+      }
 
       if (onProgress) onProgress({ stage: 'scan', progress: scanProgress });
-      console.log(`⚡ Scan progress: ${scanProgress}% | Stuck: ${stuckCount}`);
+      console.log(`Active scan: ${scanProgress}% (high-water: ${hwmProgress}%) stuckFor: ${(stuckMs/60000).toFixed(1)}min`);
     }
 
     // Step 3: Retrieve alerts with URL details
@@ -616,6 +604,14 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
           }
         );
         console.log(`📊 Progress: ${phase} - ${progress}%`);
+
+        // Emit real-time WebSocket progress milestone (non-blocking)
+        publishScanProgress(scanId, userId, {
+          status: 'combining',
+          progress: Math.round(45 + (progress * 0.25)), // maps ZAP 0-100% → overall 45-70%
+          message: `ZAP: ${phase} (${progress}%)`,
+          zapResult: { status: 'running', phase, progress, ...additionalData }
+        }).catch(() => {});
       } catch (updateError) {
         console.error('Failed to update progress:', updateError.message);
       }
@@ -1069,74 +1065,80 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     const activeScanId = activeScanResponse.data.scan;
     console.log(`⚡ Active scan ID: ${activeScanId}`);
 
-    // Wait for active scan to complete with stuck detection
+    // Wait for active scan to complete with high-watermark stuck detection.
+    // See runAsyncZapScanBackground for rationale — same fix applied here.
     let scanProgress = 0;
-    let lastProgress = 0;
-    let stuckCount = 0;
-    const maxStuckIterations = 60; // 300 seconds = 5 minutes (for comprehensive 12-hour scans)
+    let highWaterMark = -1;
+    let lastProgressIncrease = Date.now();
+    const STUCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 min without forward progress
+    const MIN_PROGRESS_DELTA = 2;
     const activeScanStartTime = Date.now();
-    const maxActiveScanTime = (maxActiveScanDuration + 30) * 60 * 1000; // Add 30 min buffer for cleanup
+    const maxActiveScanTime = (maxActiveScanDuration + 30) * 60 * 1000;
 
     while (scanProgress < 100) {
       await sleep(5000);
 
-      // Check timeout
+      // Wall-clock timeout (secondary; primary is stuck detection)
       if (Date.now() - activeScanStartTime > maxActiveScanTime) {
-        console.warn('⚠️ Active scan timeout exceeded, stopping scan...');
+        console.warn(`[ZAP][${scanId}] Active scan wall-clock timeout exceeded — stopping`);
         try {
-          await zapApi.get('/JSON/ascan/action/stop/', {
-            params: { scanId: activeScanId }
-          });
-        } catch (stopError) {
-          console.error('Failed to stop scan:', stopError.message);
-        }
+          await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } });
+        } catch (_) {}
         break;
       }
 
-      const statusResponse = await zapApi.get('/JSON/ascan/view/status/', {
-        params: { scanId: activeScanId }
-      });
-
-      scanProgress = parseInt(statusResponse.data.status);
-      const uiProgress = 60 + Math.floor(scanProgress * 0.3); // 60% to 90%
-
-      // Stuck detection
-      if (scanProgress === lastProgress) {
-        stuckCount++;
-        if (stuckCount >= maxStuckIterations) {
-          console.warn(`⚠️ Scan stuck at ${scanProgress}% for ${stuckCount * 5} seconds, stopping...`);
-          try {
-            await zapApi.get('/JSON/ascan/action/stop/', {
-              params: { scanId: activeScanId }
-            });
-          } catch (stopError) {
-            console.error('Failed to stop scan:', stopError.message);
-          }
-          break;
-        }
-      } else {
-        stuckCount = 0; // Reset if progress changed
+      let statusResponse;
+      try {
+        statusResponse = await zapApi.get('/JSON/ascan/view/status/', {
+          params: { scanId: activeScanId }
+        });
+      } catch (statusErr) {
+        console.warn(`[ZAP][${scanId}] Status check failed (will retry):`, statusErr.message);
+        continue;
       }
-      lastProgress = scanProgress;
+
+      scanProgress = parseInt(statusResponse.data.status) || 0;
+      const uiProgress = 60 + Math.floor(scanProgress * 0.3); // 60–90%
+
+      // High-watermark stuck detection
+      if (scanProgress >= highWaterMark + MIN_PROGRESS_DELTA) {
+        highWaterMark = scanProgress;
+        lastProgressIncrease = Date.now();
+      }
+
+      const stuckMs = Date.now() - lastProgressIncrease;
+      const stuckMin = (stuckMs / 60000).toFixed(1);
+
+      if (stuckMs > STUCK_TIMEOUT_MS) {
+        console.warn(
+          `[ZAP][${scanId}] Active scan stuck — current=${scanProgress}% high-water=${highWaterMark}% ` +
+          `stuckFor=${stuckMin}min — terminating and collecting alerts`
+        );
+        try {
+          await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } });
+        } catch (_) {}
+        break;
+      }
 
       // Get current alert count
       let currentAlerts = 0;
       try {
         const alertsCountResponse = await zapApi.get('/JSON/core/view/numberOfAlerts/');
         currentAlerts = parseInt(alertsCountResponse.data.numberOfAlerts || 0);
-      } catch (alertError) {
-        console.warn('⚠️ Could not fetch alert count');
-      }
+      } catch (_) {}
 
       await updateProgress('active_scan', uiProgress, {
-        message: `Testing for vulnerabilities: ${scanProgress}%`,
+        message: `Testing for vulnerabilities: ${scanProgress}% (high-water: ${highWaterMark}%)`,
         alertsFound: currentAlerts
       });
 
-      console.log(`⚡ Active scan progress: ${scanProgress}% | Alerts: ${currentAlerts} | Stuck: ${stuckCount}`);
+      console.log(
+        `[ZAP][${scanId}] Active scan: current=${scanProgress}% high-water=${highWaterMark}% ` +
+        `stuckFor=${stuckMin}min alerts=${currentAlerts}`
+      );
     }
 
-    console.log('✅ Active scan complete');
+    console.log(`[ZAP][${scanId}] Active scan loop exited — scanProgress=${scanProgress}% high-water=${highWaterMark}%`);
 
     // Phase 6: Retrieve and process alerts
     await updateProgress('processing', 92, { message: 'Collecting vulnerability data...' });
@@ -1231,6 +1233,33 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     console.log(`   Total occurrences: ${summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0)}`);
     console.log(`   Risk breakdown: High=${riskCounts.High}, Medium=${riskCounts.Medium}, Low=${riskCounts.Low}, Info=${riskCounts.Informational}`);
 
+    // Emit real-time progress: ZAP done
+    await publishScanProgress(scanId, scanResult.userId, {
+      status: 'combining',
+      progress: 70,
+      message: 'ZAP vulnerability scan complete — waiting for WebCheck...',
+      zapResult: {
+        status: 'completed',
+        riskCounts,
+        totalAlerts: summaryAlerts.length,
+        totalOccurrences: summaryAlerts.reduce((s, a) => s + a.totalOccurrences, 0),
+        urlsFound
+      }
+    });
+
+    // Trigger Gemini if both background scans are now done
+    // Use lazy require to avoid circular dependency
+    setImmediate(() => {
+      try {
+        const { checkAndGenerateGemini } = require('./geminiCompletionService');
+        checkAndGenerateGemini(scanId, String(scanResult.userId)).catch((e) =>
+          console.error('[ZAP] checkAndGenerateGemini error:', e.message)
+        );
+      } catch (e) {
+        console.error('[ZAP] Failed to load geminiCompletionService:', e.message);
+      }
+    });
+
     // Cleanup: Remove the ZAP context to avoid accumulation
     if (contextCreated) {
       try {
@@ -1254,13 +1283,26 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
   } catch (error) {
     console.error('❌ ZAP scan failed:', error.message);
 
-    // Clean up failed scan immediately (no partial data)
+    // Mark only zapResult as failed — do NOT delete the ScanResult document.
+    // Other scanners (WebCheck, PSI, Observatory, URLScan) may have completed
+    // successfully; deleting the document destroys all of their data.
     if (scanResult) {
       try {
-        await cleanupService.cleanupFailedScan(scanId, scanResult.userId);
-        console.log(`🗑️ Cleaned up failed scan: ${scanId}`);
-      } catch (cleanupError) {
-        console.error('Failed to cleanup scan:', cleanupError.message);
+        await ScanResult.updateOne(
+          { analysisId: scanId, status: { $nin: ['stopped', 'cancelled'] } },
+          {
+            $set: {
+              'zapResult.status': 'failed',
+              'zapResult.phase': 'failed',
+              'zapResult.error': error.message,
+              'zapResult.failedAt': new Date(),
+              updatedAt: new Date()
+            }
+          }
+        );
+        console.log(`[ZAP] Marked zapResult as failed for ${scanId}`);
+      } catch (updateErr) {
+        console.error('[ZAP] Failed to mark zapResult as failed:', updateErr.message);
       }
     }
 
@@ -1377,22 +1419,16 @@ async function startAsyncZapScan(targetUrl, scanId, userId) {
 
     console.log(`✅ ZAP scan marked as pending in database`);
 
-    // Start the actual scan in the background (fire and forget)
-    // This runs independently and updates the database when complete
-    runAsyncZapScanBackground(targetUrl, scanId, userId)
-      .then(() => {
-        console.log(`✅ Background ZAP scan completed: ${scanId}`);
-      })
-      .catch((error) => {
-        console.error(`❌ Background ZAP scan failed: ${scanId}`, error.message);
-      });
+    // Enqueue to BullMQ zap-queue — provides retry, backoff, and crash recovery.
+    const { addZapJob } = require('../queues/zapQueue');
+    await addZapJob(scanId, targetUrl, userId);
 
     // Return immediately with pending status
     return {
       status: 'pending',
       phase: 'queued',
       progress: 0,
-      message: 'ZAP comprehensive security scan started (up to 12 hours). Results will appear when ready.',
+      message: 'ZAP comprehensive security scan queued (up to 12 hours). Results will appear when ready.',
       startedAt: new Date()
     };
 
@@ -1412,8 +1448,44 @@ async function startAsyncZapScan(targetUrl, scanId, userId) {
  *
  * COMPREHENSIVE SCAN MODE - up to 12 hours
  */
+// Hard upper bound for the entire ZAP background scan (default: 12 hours).
+// Set ZAP_SCAN_TIMEOUT_MS in ECS task definition to override.
+const ZAP_SCAN_TIMEOUT_MS = parseInt(process.env.ZAP_SCAN_TIMEOUT_MS || '43200000', 10);
+
 async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
   console.log(`🔍 [BACKGROUND] Starting ZAP scan: ${scanId}`);
+  console.log(`   Global timeout: ${ZAP_SCAN_TIMEOUT_MS / 1000}s`);
+
+  // Idempotency: skip if ZAP already completed (e.g. BullMQ retry after a non-ZAP error).
+  const existingForCheck = await ScanResult.findOne({ analysisId: scanId });
+  if (existingForCheck?.zapResult?.status === 'completed') {
+    console.log(`[ZAP] Scan ${scanId} zapResult already completed — skipping`);
+    return;
+  }
+
+  // Hard deadline — every polling loop checks this before sleeping.
+  const globalDeadline = Date.now() + ZAP_SCAN_TIMEOUT_MS;
+
+  // zapStarted distinguishes "ZAP never became accessible" (re-throw → BullMQ retries)
+  // from "ZAP was running but scan failed mid-way" (handle gracefully, don't re-throw).
+  let zapStarted = false;
+
+  // ── ZAP startup health check (up to 5 retries, 5 s apart) ────────────────
+  console.log('[BACKGROUND] Waiting for ZAP to be ready...');
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      await zapApi.get('/JSON/core/view/version/', { timeout: 10000 });
+      console.log(`[ZAP] ✅ Health check passed (attempt ${attempt})`);
+      zapStarted = true;
+      break;
+    } catch (healthErr) {
+      if (attempt === 5) {
+        throw new Error(`ZAP not accessible after 5 health-check attempts: ${healthErr.message}`);
+      }
+      console.warn(`[ZAP] Health check failed (attempt ${attempt}/5): ${healthErr.message}. Retrying in 5 s...`);
+      await sleep(5000);
+    }
+  }
 
   try {
     // Update helper function with retry logic for long-running scans
@@ -1653,9 +1725,15 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     // Wait for spider to complete with timeout protection
     let spiderProgress = 0;
     let spiderIterations = 0;
-    const maxSpiderIterations = Math.ceil(spiderConfig.maxDuration * 60 / 3); // Based on maxDuration in minutes
+    // Cap spider at 1 hour; also respect the global deadline.
+    const maxSpiderDurationSec = 3600;
+    const maxSpiderIterations = Math.ceil(maxSpiderDurationSec / 3);
 
     while (spiderProgress < 100 && spiderIterations < maxSpiderIterations) {
+      if (Date.now() > globalDeadline) {
+        console.warn('[BACKGROUND] Global deadline reached during spider, moving on');
+        break;
+      }
       await sleep(3000);
       spiderIterations++;
 
@@ -1714,11 +1792,17 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
       console.log(`🌐 [BACKGROUND] AJAX Spider started${contextCreated ? ' (domain-scoped)' : ''}`);
 
       // Wait for AJAX spider to complete with timeout
+      // Fixed: cap at 3 minutes (not 600-minute spider duration — that was a bug).
       let ajaxSpiderProgress = 'running';
       let ajaxSpiderIterations = 0;
-      const maxAjaxSpiderIterations = Math.ceil(spiderConfig.maxDuration * 60 / 5); // Based on maxDuration
+      const maxAjaxSpiderIterations = 720; // 720 × 5 s = 1 hour max
 
       while (ajaxSpiderProgress === 'running' && ajaxSpiderIterations < maxAjaxSpiderIterations) {
+        if (Date.now() > globalDeadline) {
+          console.warn('[BACKGROUND] Global deadline reached during AJAX spider, stopping');
+          try { await zapApi.get('/JSON/ajaxSpider/action/stop/'); } catch (_) {}
+          break;
+        }
         await sleep(5000);
         ajaxSpiderIterations++;
 
@@ -1831,14 +1915,19 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
 
     // Phase 6: Configure Active Scanner
     console.log('⚙️ [BACKGROUND] Configuring active scanner...');
-    const maxActiveScanDuration = 720; // 12 hours maximum - industry standard comprehensive scan
+    // Derive max active-scan duration from the remaining global timeout budget.
+    // This ensures ZAP's own limit aligns with our process timeout.
+    const remainingMs = Math.max(0, globalDeadline - Date.now());
+    const maxActiveScanDuration = Math.max(1, Math.ceil(remainingMs / 60000)); // in minutes
+
+    console.log(`[ZAP] Active scan budget: ${maxActiveScanDuration} min`);
 
     try {
       await zapApi.get('/JSON/ascan/action/setOptionMaxScanDurationInMins/', {
         params: { Integer: maxActiveScanDuration }
       });
       await zapApi.get('/JSON/ascan/action/setOptionMaxRuleDurationInMins/', {
-        params: { Integer: Math.floor(maxActiveScanDuration / 3) }
+        params: { Integer: Math.max(1, Math.floor(maxActiveScanDuration / 3)) }
       });
       await zapApi.get('/JSON/ascan/action/setOptionThreadPerHost/', {
         params: { Integer: 10 }
@@ -1875,28 +1964,35 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     const activeScanId = activeScanResponse.data.scan;
     console.log(`⚡ [BACKGROUND] Active scan ID: ${activeScanId}`);
 
-    // Wait for active scan to complete with stuck detection
+    // Wait for active scan to complete with high-watermark stuck detection.
+    //
+    // WHY NOT a simple equality counter:
+    //   ZAP's active scan progress is non-monotonic. It can report 35%, then 36%,
+    //   then 35% again as it discovers new URLs or completes sub-rules mid-scan.
+    //   A simple `if (progress === lastProgress) stuckCount++` resets on every
+    //   micro-fluctuation and never fires — scans hang indefinitely at ~35%.
+    //
+    // FIX: only reset the "last advance" timer when progress exceeds the previous
+    //   high-water mark by at least MIN_PROGRESS_DELTA points.
+    //   After STUCK_TIMEOUT_MS without meaningful advance, stop and collect results.
     let scanProgress = 0;
-    let lastProgress = 0;
-    let stuckCount = 0;
-    const maxStuckIterations = 60; // 300 seconds = 5 minutes (for comprehensive 12-hour scans)
-    const activeScanStartTime = Date.now();
-    const maxActiveScanTime = (maxActiveScanDuration + 30) * 60 * 1000; // Add 30 min buffer for cleanup
+    let highWaterMark = -1;                  // highest ZAP % seen so far
+    let lastProgressIncrease = Date.now();   // when highWaterMark last meaningfully advanced
+    const STUCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 min without forward progress
+    const MIN_PROGRESS_DELTA = 2;            // must advance >= 2 points to reset the timer
     let connectionFailureCount = 0;
-    const maxConnectionFailures = 5; // After 5 consecutive connection failures, save partial results
+    const maxConnectionFailures = 5;
 
     while (scanProgress < 100) {
       await sleep(5000);
 
-      // Check timeout
-      if (Date.now() - activeScanStartTime > maxActiveScanTime) {
-        console.warn('⚠️ [BACKGROUND] Active scan timeout exceeded, stopping scan...');
+      // Check global deadline (primary timeout mechanism)
+      if (Date.now() > globalDeadline) {
+        console.warn('⚠️ [BACKGROUND] Global deadline reached, stopping active scan...');
         try {
-          await zapApi.get('/JSON/ascan/action/stop/', {
-            params: { scanId: activeScanId }
-          });
+          await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } });
         } catch (stopError) {
-          console.error('Failed to stop scan:', stopError.message);
+          console.warn('Could not stop active scan:', stopError.message);
         }
         break;
       }
@@ -1914,52 +2010,59 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
         console.error(`❌ [BACKGROUND] Connection failure ${connectionFailureCount}/${maxConnectionFailures}: ${statusError.message}`);
 
         if (connectionFailureCount >= maxConnectionFailures) {
-          console.warn('⚠️ [BACKGROUND] Too many connection failures, saving partial results...');
-          break; // Exit loop to save partial results
+          console.warn('⚠️ [BACKGROUND] Persistent ZAP connectivity issue — waiting 15 s before retrying...');
+          connectionFailureCount = 0; // Reset so we keep trying until deadline
+          await sleep(15000);
         }
         continue; // Try again on next iteration
       }
 
-      scanProgress = parseInt(statusResponse.data.status);
-      const uiProgress = 60 + Math.floor(scanProgress * 0.3); // 60% to 90%
+      scanProgress = parseInt(statusResponse.data.status) || 0;
+      const uiProgress = 60 + Math.floor(scanProgress * 0.3); // 60–90%
 
-      // Stuck detection
-      if (scanProgress === lastProgress) {
-        stuckCount++;
-        if (stuckCount >= maxStuckIterations) {
-          console.warn(`⚠️ [BACKGROUND] Scan stuck at ${scanProgress}% for ${stuckCount * 5} seconds, stopping...`);
-          try {
-            await zapApi.get('/JSON/ascan/action/stop/', {
-              params: { scanId: activeScanId }
-            });
-          } catch (stopError) {
-            console.error('Failed to stop scan:', stopError.message);
-          }
-          break;
-        }
-      } else {
-        stuckCount = 0;
+      // High-watermark stuck detection.
+      // Only reset the "last advance" timer when progress meaningfully exceeds
+      // the previous high-water mark (>= MIN_PROGRESS_DELTA points).
+      if (scanProgress >= highWaterMark + MIN_PROGRESS_DELTA) {
+        highWaterMark = scanProgress;
+        lastProgressIncrease = Date.now();
       }
-      lastProgress = scanProgress;
+
+      const stuckMs = Date.now() - lastProgressIncrease;
+      const stuckMin = (stuckMs / 60000).toFixed(1);
+
+      if (stuckMs > STUCK_TIMEOUT_MS) {
+        console.warn(
+          `[ZAP][${scanId}] Active scan stuck — current=${scanProgress}% high-water=${highWaterMark}% ` +
+          `stuckFor=${stuckMin}min activeScanId=${activeScanId} — terminating and collecting alerts`
+        );
+        try {
+          await zapApi.get('/JSON/ascan/action/stop/', { params: { scanId: activeScanId } });
+        } catch (stopErr) {
+          console.warn(`[ZAP][${scanId}] stop() call failed (non-fatal):`, stopErr.message);
+        }
+        break;
+      }
 
       // Get current alert count
       let currentAlerts = 0;
       try {
         const alertsCountResponse = await zapApi.get('/JSON/core/view/numberOfAlerts/');
         currentAlerts = parseInt(alertsCountResponse.data.numberOfAlerts || 0);
-      } catch (alertError) {
-        console.warn('⚠️ Could not fetch alert count');
-      }
+      } catch (_) {}
 
       await updateProgress('active_scan', uiProgress, {
-        message: `Testing: ${scanProgress}%`,
+        message: `Testing: ${scanProgress}% (high-water: ${highWaterMark}%)`,
         alertsFound: currentAlerts
       });
 
-      console.log(`⚡ [BACKGROUND] Active scan: ${scanProgress}% | Alerts: ${currentAlerts} | Stuck: ${stuckCount}`);
+      console.log(
+        `[ZAP][${scanId}] Active scan: current=${scanProgress}% high-water=${highWaterMark}% ` +
+        `stuckFor=${stuckMin}min alerts=${currentAlerts} activeScanId=${activeScanId}`
+      );
     }
 
-    console.log('✅ [BACKGROUND] Active scan complete');
+    console.log(`[ZAP][${scanId}] Active scan loop exited — scanProgress=${scanProgress}% high-water=${highWaterMark}%`);
 
     // Phase 8: Retrieve and process alerts with retry logic
     await updateProgress('processing', 92, { message: 'Collecting vulnerability data...' });
@@ -1967,33 +2070,25 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
 
     let rawAlerts = [];
     let htmlReportResponse = null;
-    let partialResults = false;
 
-    try {
-      const alertsResponse = await zapApiWithRetry(
-        () => zapApi.get('/JSON/core/view/alerts/', {
-          params: { baseurl: targetUrl, start: 0, count: 10000 }
-        }),
-        3, 2000, 'Alerts retrieval'
-      );
-      rawAlerts = alertsResponse.data.alerts || [];
-      console.log(`📊 [BACKGROUND] Retrieved ${rawAlerts.length} raw alerts`);
-    } catch (alertsError) {
-      console.error('❌ [BACKGROUND] Failed to retrieve alerts:', alertsError.message);
-      partialResults = true;
-      // Continue with empty alerts - we'll still save what we have
-    }
+    // Alert retrieval uses 5 retries — if still failing, throw so BullMQ retries the job.
+    const alertsResponse = await zapApiWithRetry(
+      () => zapApi.get('/JSON/core/view/alerts/', {
+        params: { baseurl: targetUrl, start: 0, count: 10000 }
+      }),
+      5, 3000, 'Alerts retrieval'
+    );
+    rawAlerts = alertsResponse.data.alerts || [];
+    console.log(`📊 [BACKGROUND] Retrieved ${rawAlerts.length} raw alerts`);
 
-    // Generate HTML report with retry
+    // HTML report is a bonus artifact — non-fatal if ZAP can't generate it.
     try {
       htmlReportResponse = await zapApiWithRetry(
         () => zapApi.get('/OTHER/core/other/htmlreport/', { responseType: 'arraybuffer' }),
         3, 2000, 'HTML report generation'
       );
     } catch (reportError) {
-      console.error('❌ [BACKGROUND] Failed to generate HTML report:', reportError.message);
-      partialResults = true;
-      // Continue without HTML report
+      console.warn('⚠️ [BACKGROUND] HTML report generation failed (non-fatal):', reportError.message);
     }
 
     // Process alerts into dual versions
@@ -2032,12 +2127,11 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
           size: htmlBuffer.length
         });
       } catch (uploadError) {
-        console.error('❌ [BACKGROUND] Failed to store HTML report:', uploadError.message);
-        partialResults = true;
+        console.warn('⚠️ [BACKGROUND] Failed to store HTML report (non-fatal):', uploadError.message);
       }
     }
 
-    // Store detailed alerts
+    // Store detailed alerts (non-fatal — summary alerts already saved in MongoDB doc)
     try {
       const detailedAlertsBuffer = Buffer.from(JSON.stringify(detailedAlerts, null, 2), 'utf-8');
       detailedAlertsFileId = await gridfsService.uploadFile(
@@ -2054,17 +2148,13 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
         description: 'Full alert details with all affected URLs'
       });
     } catch (uploadError) {
-      console.error('❌ [BACKGROUND] Failed to store detailed alerts:', uploadError.message);
-      partialResults = true;
+      console.warn('⚠️ [BACKGROUND] Failed to store detailed alerts (non-fatal):', uploadError.message);
     }
 
-    console.log(`✅ [BACKGROUND] Reports stored in GridFS (partial: ${partialResults})`);
+    console.log(`✅ [BACKGROUND] Reports stored in GridFS`);
 
-    // Determine final status based on partial results
-    const finalStatus = partialResults ? 'completed_partial' : 'completed';
-    const statusMessage = partialResults
-      ? `Scan completed with partial results. Found ${summaryAlerts.length} vulnerability types. Some data may be missing due to connection issues.`
-      : `Scan complete! Found ${summaryAlerts.length} vulnerability types.`;
+    const finalStatus = 'completed';
+    const statusMessage = `Scan complete! Found ${summaryAlerts.length} vulnerability types.`;
 
     // Update final scan result with retry logic (critical operation)
     let finalUpdateSuccess = false;
@@ -2083,7 +2173,6 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
               'zapResult.totalAlerts': summaryAlerts.length,
               'zapResult.totalOccurrences': summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0),
               'zapResult.reportFiles': reportFiles,
-              'zapResult.partialResults': partialResults,
               'zapResult.completedAt': new Date(),
               'zapResult.message': statusMessage,
               updatedAt: new Date()
@@ -2104,11 +2193,26 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
       throw new Error('Failed to save scan results after 5 attempts - database connection issue');
     }
 
-    console.log(`✅ [BACKGROUND] ZAP scan complete: ${scanId}`);
-    console.log(`   URLs found: ${urlsFound}`);
-    console.log(`   Alert types: ${summaryAlerts.length}`);
-    console.log(`   Total occurrences: ${summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0)}`);
-    console.log(`   Risk breakdown: High=${riskCounts.High}, Medium=${riskCounts.Medium}, Low=${riskCounts.Low}, Info=${riskCounts.Informational}`);
+    console.log(`[ZAP][${scanId}] ZAP scan complete`);
+    console.log(`[ZAP][${scanId}]   URLs found: ${urlsFound}`);
+    console.log(`[ZAP][${scanId}]   Alert types: ${summaryAlerts.length}`);
+    console.log(`[ZAP][${scanId}]   Total occurrences: ${summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0)}`);
+    console.log(`[ZAP][${scanId}]   Risk: High=${riskCounts.High} Medium=${riskCounts.Medium} Low=${riskCounts.Low} Info=${riskCounts.Informational}`);
+
+    // Trigger Gemini report generation. The zapWorker completed handler also calls
+    // this, but belt-and-suspenders: if the worker's handler fires before the DB
+    // update above commits, Gemini might see zapResult.status still as 'running'.
+    // Calling it here (after the DB write) guarantees the DB is consistent.
+    setImmediate(() => {
+      try {
+        const { checkAndGenerateGemini } = require('./geminiCompletionService');
+        checkAndGenerateGemini(scanId, String(userId)).catch(e =>
+          console.error(`[ZAP][${scanId}] checkAndGenerateGemini error (success path):`, e.message)
+        );
+      } catch (e) {
+        console.error(`[ZAP][${scanId}] Failed to load geminiCompletionService:`, e.message);
+      }
+    });
 
     // Cleanup: Remove the ZAP context to avoid accumulation
     if (contextCreated) {
@@ -2125,26 +2229,47 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
   } catch (error) {
     console.error('❌ [BACKGROUND] ZAP scan failed:', error.message);
 
-    // Update scan result with error
+    // If ZAP never became accessible (zapStarted=false), re-throw so BullMQ
+    // retries the job with exponential backoff (useful for cold-start ECS delays).
+    // For mid-scan failures, handle gracefully so the overall scan can still complete.
+    if (!zapStarted) {
+      throw error;
+    }
+
+    // Mark only ZAP as failed — do NOT fail the whole scan.
+    // Other scanners (WebCheck, fast scans) may have succeeded.
     try {
       await ScanResult.updateOne(
-        { analysisId: scanId },
+        { analysisId: scanId, status: { $nin: ['stopped', 'cancelled'] } },
         {
           $set: {
             'zapResult.status': 'failed',
             'zapResult.phase': 'failed',
             'zapResult.error': error.message,
             'zapResult.failedAt': new Date(),
-            'zapResult.message': `Scan failed: ${error.message}`,
+            'zapResult.message': `ZAP scan unavailable: ${error.message}`,
             updatedAt: new Date()
           }
         }
       );
+      console.log(`[ZAP] Marked zapResult as failed for ${scanId}`);
     } catch (updateError) {
-      console.error('Failed to update scan result with error:', updateError.message);
+      console.error('Failed to update ZAP result with error:', updateError.message);
     }
 
-    throw error;
+    // Critical: trigger Gemini completion even when ZAP fails.
+    // Without this the scan stays stuck in "combining" forever because
+    // geminiCompletionService waits for BOTH ZAP and WebCheck to finish.
+    setImmediate(() => {
+      try {
+        const { checkAndGenerateGemini } = require('./geminiCompletionService');
+        checkAndGenerateGemini(scanId, String(userId)).catch(e =>
+          console.error('[ZAP] checkAndGenerateGemini error after ZAP failure:', e.message)
+        );
+      } catch (e) {
+        console.error('[ZAP] Failed to trigger Gemini after ZAP failure:', e.message);
+      }
+    });
   }
 }
 
@@ -2507,6 +2632,7 @@ module.exports = {
   groupAlertsByUrl,
   createDualVersionAlerts,
   startAsyncZapScan, // For combined scan async flow
+  runAsyncZapScanBackground, // BullMQ worker entrypoint (must be exported)
   runZapScan: runZapScanWithUrlTracking, // Backward compatibility alias
   stopZapScan, // Stop running ZAP scan and restart ZAP container
   stopCombinedScan, // Stop combined scan and restart ALL containers (ZAP + WebCheck)

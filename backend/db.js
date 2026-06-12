@@ -1,8 +1,44 @@
 const mongoose = require('mongoose');
 const dns = require('dns');
 
-// Set DNS servers explicitly to resolve ECONNREFUSED on some networks for Atlas SRV
-dns.setServers(['8.8.8.8', '1.1.1.1']);
+// ── DNS resolver configuration ────────────────────────────────────────────────
+//
+// Node.js has two independent DNS subsystems:
+//
+//   dns.lookup()      → getaddrinfo (OS resolver).  Reads /etc/hosts.
+//                       Used by: net.createConnection, ioredis, plain axios.
+//                       NOT affected by dns.setServers().
+//
+//   dns.resolve*()    → c-ares (Node.js async resolver).  Does NOT read /etc/hosts.
+//                       Used by: dns.resolveSrv, dns.resolve4, cacheable-lookup.
+//                       IS affected by dns.setServers().
+//
+// MongoDB Atlas bootstraps with mongodb+srv:// which requires dns.resolveSrv()
+// (c-ares) to discover the replica set.  On some systems — particularly Windows
+// where c-ares reads DNS servers from the registry — c-ares auto-detects
+// 127.0.0.1 as the nameserver but nothing is listening on port 53, producing:
+//   querySrv ECONNREFUSED localhost
+// Explicitly setting Google DNS (8.8.8.8 / 1.1.1.1) makes c-ares bypass this.
+//
+// Why this is now safe after the WebCheck DNS fix:
+//   • WebCheck container is accessed via IP (127.0.0.1:3002), so no DNS lookup fires.
+//   • installSmartLookup() in httpClient.js routes loopback hostnames through
+//     dns.lookup() (OS), bypassing cacheable-lookup's dns.resolve4() entirely.
+//   • All remaining dns.resolve4() calls from cacheable-lookup target external
+//     API hostnames which 8.8.8.8 handles correctly.
+//
+// On ECS Fargate: skip the override.  The VPC DNS at 169.254.169.253 handles
+// both Atlas SRV queries and Docker service-name lookups (webcheck, zap-scanner).
+// Overriding to 8.8.8.8 there would break internal service name resolution.
+
+const IS_ECS = !!process.env.ECS_CONTAINER_METADATA_URI_V4;
+
+if (!IS_ECS) {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+  console.log('[DB] c-ares DNS overridden to 8.8.8.8/1.1.1.1 (local dev — Atlas SRV fix)');
+} else {
+  console.log('[DB] Running on ECS Fargate — using VPC DNS for Atlas SRV and service names');
+}
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 5000; // 5 seconds

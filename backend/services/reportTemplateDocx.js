@@ -297,18 +297,21 @@ function extractFinalPage(blocks) {
 }
 
 async function extractEmbeddedImages(zip) {
-  const desired = [
-    'word/media/image1.png',
-    'word/media/image2.png',
-    'word/media/image3.png',
-    'word/media/image4.jpeg'
+  const slots = [
+    ['word/media/image1.png', 'word/media/image1.jpeg'],
+    ['word/media/image2.png', 'word/media/image2.jpeg'],
+    ['word/media/image3.png', 'word/media/image3.jpeg'],
+    ['word/media/image4.png', 'word/media/image4.jpeg'],
   ];
 
   const images = {};
-  for (const name of desired) {
-    const file = zip.file(name);
-    if (!file) continue;
-    images[path.basename(name)] = { name, buffer: await file.async('nodebuffer') };
+  for (const candidates of slots) {
+    for (const name of candidates) {
+      const file = zip.file(name);
+      if (!file) continue;
+      images[path.basename(name)] = { name, buffer: await file.async('nodebuffer') };
+      break; // first match wins; don't overwrite with alternate extension
+    }
   }
   return images;
 }
@@ -376,26 +379,27 @@ async function loadTemplateFromDocx() {
   const finalPage = extractFinalPage(blocks);
   const images = await extractEmbeddedImages(zip);
 
-  const missing = [];
-  if (!disclaimer?.disclaimerTitle || !disclaimer?.disclaimerBody) missing.push('Disclaimer');
-  if (!history?.diagnosisTitle || !history?.diagnosisHeaders?.length) missing.push('Diagnosis History');
-  if (!finalPage?.finalPageUrl || !finalPage?.finalPageLines?.length) missing.push('Final Page');
-
-  if (missing.length) {
-    throw new Error(`Failed to extract required template sections from DOCX: ${missing.join(', ')}`);
+  if (!disclaimer?.disclaimerTitle || !disclaimer?.disclaimerBody) {
+    console.warn('[reportTemplateDocx] Disclaimer section missing or incomplete — using built-in fallback');
+  }
+  if (!history?.diagnosisTitle || !history?.diagnosisHeaders?.length) {
+    console.warn('[reportTemplateDocx] Diagnosis History section missing or incomplete — using built-in fallback');
+  }
+  if (!finalPage?.finalPageUrl || !finalPage?.finalPageLines?.length) {
+    console.warn('[reportTemplateDocx] Final Page section missing or incomplete — using built-in fallback');
   }
 
   const pageBackgrounds = loadPageBackgrounds();
   const logoOverride = loadLogoOverride();
 
   return {
-    disclaimerTitle: disclaimer.disclaimerTitle,
-    disclaimerBody: disclaimer.disclaimerBody,
-    diagnosisTitle: history.diagnosisTitle,
-    diagnosisHeaders: history.diagnosisHeaders,
-    diagnosisRows: history.diagnosisRows,
-    finalPageLines: finalPage.finalPageLines,
-    finalPageUrl: finalPage.finalPageUrl,
+    disclaimerTitle: disclaimer?.disclaimerTitle || '免責事項',
+    disclaimerBody:  disclaimer?.disclaimerBody  || '',
+    diagnosisTitle:   history?.diagnosisTitle    || '診断履歴',
+    diagnosisHeaders: history?.diagnosisHeaders?.length ? history.diagnosisHeaders : ['診断日', '診断者', '診断結果'],
+    diagnosisRows:    history?.diagnosisRows     || [],
+    finalPageLines: finalPage?.finalPageLines?.length ? finalPage.finalPageLines : [],
+    finalPageUrl:   finalPage?.finalPageUrl      || 'https://aevus.jp/',
     images,
     templateDir: TEMPLATE_DIR,
     docxPath,

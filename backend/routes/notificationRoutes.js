@@ -5,6 +5,11 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const ScanResult = require('../models/ScanResult');
 
+// Health-check endpoint to verify the route is registered
+router.get('/', (req, res) => {
+  res.json({ message: 'Notifications working' });
+});
+
 /**
  * GET /api/notifications/unread
  * Returns all scheduled scans that have completed but Haven't been "seen" by the user.

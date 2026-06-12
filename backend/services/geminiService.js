@@ -1,4 +1,5 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
+const fs = require('fs');
 const {
   sanitizeRefinedReportForLLM,
   sanitizeHistoryRowsForLLM,
@@ -6,122 +7,405 @@ const {
   assertNoLeakage,
 } = require('./geminiSanitizer');
 
-// Model name is configurable via GEMINI_MODEL env var
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// gemini-2.5-pro  → deep analysis, final reports, vulnerability reasoning
+// gemini-2.5-flash → formatting, translation, summaries (lower latency / cost)
+const MODEL_PRO   = process.env.GEMINI_MODEL_PRO   || 'gemini-2.5-pro';
+const MODEL_FLASH = process.env.GEMINI_MODEL_FLASH  || 'gemini-2.5-flash';
 
-/**
- * Get all available Gemini API keys from environment variables
- * Supports GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, etc.
- * @returns {Array<string>} - Array of API keys
- */
-function getApiKeys() {
-  const keys = [];
+const VERTEX_PROJECT  = process.env.VERTEX_PROJECT  || process.env.GOOGLE_CLOUD_PROJECT || 'fortexa-495604';
+const VERTEX_LOCATION = process.env.VERTEX_LOCATION || 'us-central1';
 
-  // Get primary API key
-  if (process.env.GEMINI_API_KEY) {
-    keys.push(process.env.GEMINI_API_KEY);
+// Hard deadline per generateContent call, by model tier.
+// gemini-2.5-pro can take 60-120s for a full security report on complex sites.
+// gemini-2.5-flash is typically under 30s; 90s is a generous safety margin.
+// Both are well above the WIF auth overhead (~1s after token is cached).
+const GEMINI_CALL_TIMEOUT_PRO_MS   = 150_000; // 2.5 min — deep analysis model
+const GEMINI_CALL_TIMEOUT_FLASH_MS =  90_000; // 1.5 min — fast model
+
+// ECS Fargate always injects ECS_CONTAINER_METADATA_URI_V4. Use it to distinguish
+// production (Vertex AI + WIF) from local development (API key or ambient ADC).
+const IS_ECS = !!process.env.ECS_CONTAINER_METADATA_URI_V4;
+
+// ─── Startup diagnostics ────────────────────────────────────────────────────────
+// Logged at module load time so CloudWatch shows the auth decision immediately on
+// container start — before any request comes in.
+console.log('[Gemini] ── Startup diagnostics ─────────────────────────────');
+console.log(`[Gemini]   NODE_ENV                     = ${process.env.NODE_ENV || '(not set)'}`);
+console.log(`[Gemini]   IS_ECS (ECS_CONTAINER_METADATA_URI_V4 present) = ${IS_ECS}`);
+console.log(`[Gemini]   ECS_CONTAINER_METADATA_URI_V4 = ${process.env.ECS_CONTAINER_METADATA_URI_V4 ? process.env.ECS_CONTAINER_METADATA_URI_V4.slice(0, 40) + '…' : '(not set)'}`);
+console.log(`[Gemini]   GEMINI_API_KEY present        = ${!!process.env.GEMINI_API_KEY} ${process.env.GEMINI_API_KEY ? '(key starts: ' + process.env.GEMINI_API_KEY.slice(0, 8) + '…)' : ''}`);
+console.log(`[Gemini]   GOOGLE_API_KEY present        = ${!!process.env.GOOGLE_API_KEY}`);
+console.log(`[Gemini]   GOOGLE_APPLICATION_CREDENTIALS= ${process.env.GOOGLE_APPLICATION_CREDENTIALS || '(not set)'}`);
+console.log(`[Gemini]   VERTEX_PROJECT               = ${VERTEX_PROJECT}`);
+console.log(`[Gemini]   VERTEX_LOCATION              = ${VERTEX_LOCATION}`);
+console.log(`[Gemini]   GEMINI_MODEL_PRO             = ${MODEL_PRO}`);
+console.log(`[Gemini]   GEMINI_MODEL_FLASH           = ${MODEL_FLASH}`);
+console.log(`[Gemini]   AWS_REGION                   = ${process.env.AWS_REGION || '(not set)'}`);
+console.log(`[Gemini]   AWS_EC2_METADATA_DISABLED    = ${process.env.AWS_EC2_METADATA_DISABLED || '(not set)'}`);
+console.log(`[Gemini]   AWS_CONTAINER_CREDENTIALS_RELATIVE_URI present = ${!!process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`);
+console.log('[Gemini] ──────────────────────────────────────────────────────');
+
+// Warn if SDK env-var sniffing could override the auth client we construct below.
+// @google/genai v1.x reads GOOGLE_API_KEY from env as a fallback even when you pass
+// { vertexai: true } — if this variable is present in ECS, it will silently use AI
+// Studio (generativelanguage.googleapis.com) instead of Vertex AI.
+if (IS_ECS && process.env.GOOGLE_API_KEY) {
+  console.error('[Gemini] ❌ GOOGLE_API_KEY is set in the ECS environment. The @google/genai SDK will use this');
+  console.error('[Gemini]    to call generativelanguage.googleapis.com (AI Studio) instead of Vertex AI.');
+  console.error('[Gemini]    Remove GOOGLE_API_KEY from the ECS task definition or Secrets Manager.');
+}
+if (IS_ECS && process.env.GEMINI_API_KEY) {
+  console.error('[Gemini] ❌ GEMINI_API_KEY is set in the ECS environment. This will override the WIF auth client.');
+  console.error('[Gemini]    Remove GEMINI_API_KEY from the ECS task definition or Secrets Manager immediately.');
+}
+
+// Client initialisation — three modes:
+//   ECS:         Vertex AI + Workload Identity Federation via programmatic AwsClient
+//                (fetches credentials from the ECS container endpoint, not EC2 IMDS)
+//   Local-Key:   AI Studio with GEMINI_API_KEY (if set and valid)
+//   Local-ADC:   Vertex AI with ambient ADC (gcloud auth application-default login)
+//
+// AI Studio API keys always start with "AIza". If the key is present but has the wrong
+// format (e.g. an OAuth token was accidentally pasted), fall through to Vertex AI mode
+// rather than making every Gemini call fail silently with an auth error.
+
+// Exported so other modules can include the auth mode in their own log lines.
+let GEMINI_AUTH_MODE;
+let ai;
+let _wifAuthClient = null; // holds the AwsClient on ECS so verifyCredentials() tests the same path
+
+if (!IS_ECS && process.env.GEMINI_API_KEY) {
+  const _rawKey = process.env.GEMINI_API_KEY;
+  if (_rawKey.startsWith('AIza')) {
+    GEMINI_AUTH_MODE = 'AI_STUDIO';
+    ai = new GoogleGenAI({ apiKey: _rawKey });
+    console.log(`[Gemini] AUTH_MODE=AI_STUDIO (local dev, GEMINI_API_KEY) endpoint=generativelanguage.googleapis.com`);
+    console.log(`[Gemini]   pro=${MODEL_PRO}  flash=${MODEL_FLASH}`);
+  } else {
+    GEMINI_AUTH_MODE = 'VERTEX_ADC';
+    console.error(`[Gemini] ❌ GEMINI_API_KEY is set but format is invalid (must start with "AIza"). Got: "${_rawKey.slice(0, 12)}…"`);
+    console.error(`[Gemini]    Falling back to Vertex AI / ambient ADC.`);
+    ai = new GoogleGenAI({ vertexai: true, project: VERTEX_PROJECT, location: VERTEX_LOCATION });
+    console.log(`[Gemini] AUTH_MODE=VERTEX_ADC (fallback — invalid API key) endpoint=${VERTEX_LOCATION}-aiplatform.googleapis.com`);
+    console.log(`[Gemini]   project=${VERTEX_PROJECT}  location=${VERTEX_LOCATION}`);
+  }
+} else if (IS_ECS) {
+  GEMINI_AUTH_MODE = 'VERTEX_WIF';
+  const { AwsClient } = require('google-auth-library');
+  const _wifFile = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+  // Validate the WIF config file exists and has the required fields before constructing
+  // AwsClient — a missing file causes a synchronous crash; missing fields cause silent
+  // WIF failures that only surface at the first API call.
+  let _wifConfig = {};
+  if (!_wifFile) {
+    console.error('[Gemini] ❌ GOOGLE_APPLICATION_CREDENTIALS is not set — WIF cannot initialise.');
+  } else if (!fs.existsSync(_wifFile)) {
+    console.error(`[Gemini] ❌ WIF config file not found: ${_wifFile}`);
+    console.error('[Gemini]    Ensure backend/config/gcp-wif.json is present in the Docker image.');
+    console.error('[Gemini]    The file is intentionally committed to git — check that it was not .gitignored.');
+  } else {
+    try {
+      _wifConfig = JSON.parse(fs.readFileSync(_wifFile, 'utf8'));
+      const required = ['type', 'audience', 'subject_token_type', 'token_url', 'service_account_impersonation_url'];
+      const missing  = required.filter(k => !_wifConfig[k]);
+      if (missing.length) {
+        console.error(`[Gemini] ❌ WIF config is missing required fields: ${missing.join(', ')}`);
+      } else {
+        console.log(`[Gemini] ✅ WIF config loaded — audience=${_wifConfig.audience}`);
+        console.log(`[Gemini]    token_url=${_wifConfig.token_url}`);
+        console.log(`[Gemini]    impersonation_url=${_wifConfig.service_account_impersonation_url}`);
+      }
+    } catch (parseErr) {
+      console.error(`[Gemini] ❌ Failed to parse WIF config file: ${parseErr.message}`);
+    }
   }
 
-  // Get additional API keys (GEMINI_API_KEY_2, GEMINI_API_KEY_3, etc.)
-  let i = 2;
-  while (process.env[`GEMINI_API_KEY_${i}`]) {
-    keys.push(process.env[`GEMINI_API_KEY_${i}`]);
-    i++;
-  }
+  const _ecsCredentialSupplier = {
+    getAwsRegion: async () => {
+      const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+      if (!region) throw new Error('[WIF] AWS_REGION is not set in the ECS task environment');
+      return region;
+    },
+    getAwsSecurityCredentials: async () => {
+      const relUri = process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
+      if (!relUri) throw new Error('[WIF] AWS_CONTAINER_CREDENTIALS_RELATIVE_URI not set — task must have a task IAM role');
+      const resp = await fetch(`http://169.254.170.2${relUri}`);
+      if (!resp.ok) throw new Error(`[WIF] ECS credentials endpoint returned HTTP ${resp.status}`);
+      const creds = await resp.json();
+      return { accessKeyId: creds.AccessKeyId, secretAccessKey: creds.SecretAccessKey, token: creds.Token };
+    },
+  };
 
-  console.log(`📋 Found ${keys.length} Gemini API key(s) configured`);
-  return keys;
+  // Do NOT spread the full _wifConfig — AwsClient throws if both credential_source
+  // AND aws_security_credentials_supplier are present. Pick only the WIF exchange fields.
+  _wifAuthClient = new AwsClient({
+    type:                              _wifConfig.type,
+    audience:                          _wifConfig.audience,
+    subject_token_type:                _wifConfig.subject_token_type,
+    token_url:                         _wifConfig.token_url,
+    service_account_impersonation_url: _wifConfig.service_account_impersonation_url,
+    universe_domain:                   _wifConfig.universe_domain,
+    aws_security_credentials_supplier: _ecsCredentialSupplier,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+
+  ai = new GoogleGenAI({
+    vertexai: true,
+    project: VERTEX_PROJECT,
+    location: VERTEX_LOCATION,
+    googleAuthOptions: { authClient: _wifAuthClient },
+  });
+  console.log(`[Gemini] AUTH_MODE=VERTEX_WIF (ECS WIF programmatic) endpoint=${VERTEX_LOCATION}-aiplatform.googleapis.com`);
+  console.log(`[Gemini]   project=${VERTEX_PROJECT}  location=${VERTEX_LOCATION}`);
+  console.log(`[Gemini]   pro=${MODEL_PRO}  flash=${MODEL_FLASH}`);
+  console.log(`[Gemini]   AWS_REGION=${process.env.AWS_REGION || '(not set)'}`);
+  console.log(`[Gemini]   AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=${process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI || '(not set — credentials will fail)'}`);
+} else {
+  GEMINI_AUTH_MODE = 'VERTEX_ADC';
+  // Local dev: ambient ADC (gcloud auth application-default login) or GOOGLE_APPLICATION_CREDENTIALS
+  ai = new GoogleGenAI({ vertexai: true, project: VERTEX_PROJECT, location: VERTEX_LOCATION });
+  console.log(`[Gemini] AUTH_MODE=VERTEX_ADC (local ADC) endpoint=${VERTEX_LOCATION}-aiplatform.googleapis.com`);
+  console.log(`[Gemini]   project=${VERTEX_PROJECT}  location=${VERTEX_LOCATION}`);
+  console.log(`[Gemini]   ADC source: GOOGLE_APPLICATION_CREDENTIALS=${process.env.GOOGLE_APPLICATION_CREDENTIALS || '(not set — using ambient ADC)'}`);
 }
 
 /**
- * Refine and combine PageSpeed, Observatory, ZAP, urlscan, and WebCheck reports using Gemini AI
- * @param {Object} _unused - Reserved parameter (unused, pass null)
- * @param {Object} psiReport - PageSpeed Insights report
- * @param {Object} observatoryReport - Mozilla Observatory scan result
- * @param {string} url - The scanned URL
- * @param {Object} zapReport - OWASP ZAP vulnerability scan result (optional)
- * @param {Object} urlscanReport - urlscan.io website analysis result (optional)
- * @param {Object} webCheckReport - WebCheck comprehensive scan results (optional)
- * @returns {Promise<string>} - AI-generated refined report in Markdown format
+ * Verify credentials are reachable at startup (non-blocking, informational only).
+ *
+ * On ECS this tests the actual AwsClient (WIF programmatic path) — the same client
+ * that ai.models.generateContent() uses. It does NOT use GoogleAuth / ADC.
+ * On local dev (no _wifAuthClient) it uses GoogleAuth with ambient ADC.
+ */
+async function verifyCredentials() {
+  try {
+    let tokenResult;
+    if (_wifAuthClient) {
+      // ECS: test through the exact same AwsClient that the ai instance uses
+      tokenResult = await Promise.race([
+        _wifAuthClient.getAccessToken(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('token fetch timed out after 30s')), 30_000)),
+      ]);
+    } else {
+      // Local dev: test ambient ADC
+      const { GoogleAuth } = require('google-auth-library');
+      const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+      const client = await auth.getClient();
+      tokenResult = await Promise.race([
+        client.getAccessToken(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('token fetch timed out after 30s')), 30_000)),
+      ]);
+    }
+    const hint = tokenResult?.token ? `token starts with ${String(tokenResult.token).slice(0, 12)}…` : 'no token';
+    const label = _wifAuthClient ? 'WIF credential verification' : 'ADC credential verification';
+    console.log(`[Gemini] ✅ ${label} passed (AUTH_MODE=${GEMINI_AUTH_MODE}) — ${hint}`);
+    return true;
+  } catch (err) {
+    const label = _wifAuthClient ? 'WIF credential verification' : 'ADC credential verification';
+    console.error(`[Gemini] ❌ ${label} FAILED (AUTH_MODE=${GEMINI_AUTH_MODE}): ${err.message}`);
+    console.error('[Gemini]    This will cause all Gemini calls to fail.');
+    console.error('[Gemini]    Check: WIF config fields, task IAM role, GCP service account binding, ECS credentials endpoint.');
+    return false;
+  }
+}
+
+// Always run credential check — on ECS this validates WIF, on local dev it validates ADC.
+// Errors are non-fatal at startup but will cause every Gemini call to fail.
+verifyCredentials().catch(() => {});
+
+/**
+ * Call Gemini with automatic retry on transient errors (503, overloaded, network).
+ * Each call is raced against a model-appropriate timeout to prevent ADC/WIF auth hangs.
+ * Auth errors and bad-request errors are surfaced immediately (no retry).
+ * @param {string} prompt
+ * @param {string} model   - MODEL_PRO or MODEL_FLASH
+ * @param {string} caller  - human-readable label for the calling service (appears in logs)
+ */
+async function _generate(prompt, model, caller = 'unknown') {
+  // Centralized pre-flight guardrail — every Gemini call goes through here, so
+  // one check covers all callers (refineReport, PDF formatters, translators).
+  assertNoLeakage(prompt, caller);
+  const tag = `[Gemini/${model}/${caller}][auth=${GEMINI_AUTH_MODE}]`;
+  const MAX_RETRIES = 3;
+  const timeoutMs = model === MODEL_PRO ? GEMINI_CALL_TIMEOUT_PRO_MS : GEMINI_CALL_TIMEOUT_FLASH_MS;
+  let lastError;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = attempt * 5000;
+      console.log(`${tag} Retry ${attempt}/${MAX_RETRIES - 1} in ${delay / 1000}s…`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    try {
+      console.log(`${tag} generateContent attempt ${attempt + 1}/${MAX_RETRIES} — timeout=${timeoutMs / 1000}s`);
+
+      let timeoutHandle;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`Gemini call timed out after ${timeoutMs / 1000}s (possible ADC/WIF auth hang)`)),
+          timeoutMs
+        );
+      });
+
+      const callPromise = ai.models.generateContent({ model, contents: prompt });
+
+      let response;
+      try {
+        response = await Promise.race([callPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+
+      console.log(`${tag} generateContent succeeded on attempt ${attempt + 1}`);
+      return response.text;
+    } catch (err) {
+      lastError = err;
+
+      // Auth errors are permanent — fail fast with a clear message.
+      const isAuthError =
+        err.message?.includes('401')              ||
+        err.message?.includes('403')              ||
+        err.message?.includes('API_KEY_INVALID')  ||
+        err.message?.includes('UNAUTHENTICATED')  ||
+        err.message?.includes('PERMISSION_DENIED')||
+        err.message?.includes('Invalid API key')  ||
+        err.message?.includes('API key not valid')||
+        err.message?.includes('invalid_grant')    ||
+        err.code === 'GEMINI_AUTH_FAILED';
+      if (isAuthError) {
+        const authErr = new Error(
+          `Gemini authentication failed (AUTH_MODE=${GEMINI_AUTH_MODE}) — check WIF config or ADC credentials. Original: ${err.message}`
+        );
+        authErr.code = 'GEMINI_AUTH_FAILED';
+        console.error(`${tag} Auth error on attempt ${attempt + 1} — not retrying:`, err.message);
+        throw authErr;
+      }
+
+      // Quota / rate-limit errors: fail fast — retrying on the same model won't help.
+      // Callers should switch to the Flash model instead.
+      const isQuotaError =
+        err.message?.includes('RESOURCE_EXHAUSTED') ||
+        err.message?.includes('Quota exceeded')     ||
+        err.message?.includes('quota exceeded')     ||
+        err.message?.includes('rate limit')         ||
+        err.message?.includes('Rate limit exceeded')||
+        err.message?.includes('too many requests')  ||
+        err.message?.includes('Too many requests')  ||
+        err.message?.includes('429');
+      if (isQuotaError) {
+        const quotaErr = new Error(`Gemini ${model} quota exhausted: ${err.message}`);
+        quotaErr.code = 'GEMINI_QUOTA_EXHAUSTED';
+        quotaErr.model = model;
+        console.warn(`${tag} Quota exhausted — not retrying, caller should switch models`);
+        throw quotaErr;
+      }
+
+      const isTransient =
+        err.message?.includes('503')           ||
+        err.message?.includes('overloaded')    ||
+        err.message?.includes('UNAVAILABLE')   ||
+        err.message?.includes('fetch failed')  ||
+        err.message?.includes('ETIMEDOUT')     ||
+        err.message?.includes('ECONNRESET')    ||
+        err.message?.includes('network')       ||
+        err.message?.includes('timed out');    // our own timeout above is retryable
+      if (!isTransient) {
+        console.error(`${tag} Non-transient error on attempt ${attempt + 1} — not retrying:`, err.message);
+        throw err;
+      }
+      console.warn(`${tag} Transient error (attempt ${attempt + 1}):`, err.message);
+    }
+  }
+  throw lastError;
+}
+
+/** Returns true for quota / rate-limit failures from _generate(). */
+function _isQuotaError(err) {
+  return err?.code === 'GEMINI_QUOTA_EXHAUSTED' || err?.code === 'GEMINI_KEY_EXHAUSTED';
+}
+
+/**
+ * Try MODEL_PRO; on quota exhaustion switch immediately to MODEL_FLASH.
+ * On any other Pro failure also falls back to Flash.
+ * Throws only if Flash fails too.
+ * @param {string} prompt
+ * @param {string} caller - label passed through to _generate for log tagging
+ */
+async function _generateWithFallback(prompt, caller = 'unknown') {
+  try {
+    const result = await _generate(prompt, MODEL_PRO, caller);
+    return result;
+  } catch (proErr) {
+    if (_isQuotaError(proErr)) {
+      console.warn(`[Gemini/${caller}] Pro quota exhausted, switching to Flash`);
+    } else {
+      console.warn(`[Gemini/${caller}] Pro model failed (${proErr.message}), falling back to Flash…`);
+    }
+    const result = await _generate(prompt, MODEL_FLASH, caller);
+    console.log(`[Gemini/${caller}] Flash model succeeded`);
+    return result;
+  }
+}
+
+/** Parse JSON from a Gemini response, stripping accidental markdown fences. */
+function _parseJson(text) {
+  const cleaned = text.trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i,     '')
+    .replace(/\s*```$/i,     '')
+    .trim();
+  return JSON.parse(cleaned);
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Generate the main AI security report from all scanner results.
  */
 async function refineReport(_unused, psiReport, observatoryReport, url, zapReport = null, urlscanReport = null, webCheckReport = null) {
-  const apiKeys = getApiKeys();
+  const lighthouseResult  = psiReport?.lighthouseResult || {};
+  const categories        = lighthouseResult.categories || {};
+  const performanceScore  = categories.performance?.score        ? Math.round(categories.performance.score        * 100) : 'N/A';
+  const accessibilityScore= categories.accessibility?.score      ? Math.round(categories.accessibility.score      * 100) : 'N/A';
+  const bestPracticesScore= categories['best-practices']?.score  ? Math.round(categories['best-practices'].score  * 100) : 'N/A';
+  const seoScore          = categories.seo?.score                ? Math.round(categories.seo.score                * 100) : 'N/A';
 
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured. Please set GEMINI_API_KEY in environment variables.');
-  }
+  const observatoryGrade       = observatoryReport?.grade          || 'N/A';
+  const observatoryScore       = observatoryReport?.score          || 'N/A';
+  const observatoryTestsPassed = observatoryReport?.tests_passed   || 0;
+  const observatoryTestsFailed = observatoryReport?.tests_failed   || 0;
+  const observatoryTestsTotal  = observatoryReport?.tests_quantity || 0;
+  const hasObservatoryData     = observatoryReport && !observatoryReport.error;
 
-  let lastError = null;
-  const MAX_NETWORK_RETRIES = 3;
+  const hasZapData    = zapReport && !zapReport.error && zapReport.alerts;
+  const zapRiskCounts = zapReport?.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 };
+  const zapAlertCount = zapReport?.alerts?.length || 0;
+  const zapHighRisk   = zapReport?.alerts?.filter(a => a.risk === 'High')   || [];
+  const zapMediumRisk = zapReport?.alerts?.filter(a => a.risk === 'Medium') || [];
 
-  for (let networkRetry = 0; networkRetry < MAX_NETWORK_RETRIES; networkRetry++) {
-    if (networkRetry > 0) {
-      const delay = networkRetry * 5000; // 5s, 10s
-      console.log(`🔄 Network retry ${networkRetry}/${MAX_NETWORK_RETRIES - 1} - waiting ${delay / 1000}s before retrying all keys...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
+  const hasUrlscanData    = urlscanReport && !urlscanReport.error && urlscanReport.verdicts;
+  const urlscanVerdicts   = urlscanReport?.verdicts || {};
+  const urlscanPage       = urlscanReport?.page     || {};
+  const urlscanStats      = urlscanReport?.stats    || {};
+  const urlscanIsMalicious= urlscanVerdicts?.overall?.malicious || false;
+  const urlscanScore      = urlscanVerdicts?.overall?.score     || 0;
 
-    // Try each API key until one succeeds
-    for (let i = 0; i < apiKeys.length; i++) {
-      const apiKey = apiKeys[i];
-      const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
+  const hasWebCheckData   = webCheckReport && Object.keys(webCheckReport).length > 0;
+  const webCheckHeaders   = webCheckReport?.headers        || {};
+  const webCheckTls       = webCheckReport?.tls            || webCheckReport?.ssl || {};
+  const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
+  const webCheckFirewall  = webCheckReport?.firewall       || {};
+  const webCheckDns       = webCheckReport?.dns            || {};
+  const webCheckHsts      = webCheckReport?.hsts           || {};
+  const webCheckSecurityTxt= webCheckReport?.['security-txt'] || {};
+  const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
+  const webCheckCookies   = webCheckReport?.cookies        || {};
+  const webCheckCarbon    = webCheckReport?.carbon         || {};
+  const webCheckQuality   = webCheckReport?.quality        || {};
 
-      try {
-        console.log(`🔑 Attempting Gemini API with ${keyLabel} key (${i + 1}/${apiKeys.length})...`);
-
-        // Initialize Gemini AI with current API key
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-        // Extract PageSpeed scores
-        const lighthouseResult = psiReport?.lighthouseResult || {};
-        const categories = lighthouseResult.categories || {};
-        const performanceScore = categories.performance?.score ? Math.round(categories.performance.score * 100) : 'N/A';
-        const accessibilityScore = categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : 'N/A';
-        const bestPracticesScore = categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : 'N/A';
-        const seoScore = categories.seo?.score ? Math.round(categories.seo.score * 100) : 'N/A';
-
-        // Extract Observatory data
-        const observatoryGrade = observatoryReport?.grade || 'N/A';
-        const observatoryScore = observatoryReport?.score || 'N/A';
-        const observatoryTestsPassed = observatoryReport?.tests_passed || 0;
-        const observatoryTestsFailed = observatoryReport?.tests_failed || 0;
-        const observatoryTestsTotal = observatoryReport?.tests_quantity || 0;
-        const hasObservatoryData = observatoryReport && !observatoryReport.error;
-
-        // Extract ZAP data
-        const hasZapData = zapReport && !zapReport.error && zapReport.alerts;
-        const zapRiskCounts = zapReport?.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 };
-        const zapAlertCount = zapReport?.alerts?.length || 0;
-        const zapHighRisk = zapReport?.alerts?.filter(a => a.risk === 'High') || [];
-        const zapMediumRisk = zapReport?.alerts?.filter(a => a.risk === 'Medium') || [];
-
-        // Extract urlscan data
-        const hasUrlscanData = urlscanReport && !urlscanReport.error && urlscanReport.verdicts;
-        const urlscanVerdicts = urlscanReport?.verdicts || {};
-        const urlscanPage = urlscanReport?.page || {};
-        const urlscanStats = urlscanReport?.stats || {};
-        const urlscanIsMalicious = urlscanVerdicts?.overall?.malicious || false;
-        const urlscanScore = urlscanVerdicts?.overall?.score || 0;
-
-        // Extract WebCheck data
-        const hasWebCheckData = webCheckReport && Object.keys(webCheckReport).length > 0;
-        const webCheckHeaders = webCheckReport?.headers || {};
-        const webCheckTls = webCheckReport?.tls || webCheckReport?.ssl || {};
-        const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
-        const webCheckFirewall = webCheckReport?.firewall || {};
-        const webCheckDns = webCheckReport?.dns || {};
-        const webCheckHsts = webCheckReport?.hsts || {};
-        const webCheckSecurityTxt = webCheckReport?.['security-txt'] || {};
-        const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
-        const webCheckCookies = webCheckReport?.cookies || {};
-        const webCheckCarbon = webCheckReport?.carbon || {};
-        const webCheckQuality = webCheckReport?.quality || {};
-
-        // Build the prompt for Gemini
-        // NOTE: url is always "REDACTED" when called correctly via sanitizeScanForLLM().
-        // The prompt header deliberately omits the live URL to prevent identity leakage.
-        const prompt = `You are a cybersecurity and web performance expert. Analyze the following security scan reports for a web target.
+  // NOTE: url is always "REDACTED" when called correctly via sanitizeScanForLLM().
+  // The prompt header deliberately omits the live URL to prevent identity leakage.
+  const prompt = `You are a cybersecurity and web performance expert. Analyze the following security scan reports for a web target.
 
 Performance Analysis Report:
 - Performance Score: ${performanceScore}/100
@@ -142,7 +426,7 @@ ${hasZapData ? `Vulnerability Scan Report:
 - Medium Risk Vulnerabilities: ${zapRiskCounts.Medium}
 - Low Risk Vulnerabilities: ${zapRiskCounts.Low}
 - Informational: ${zapRiskCounts.Informational}
-${zapHighRisk.length > 0 ? `- High Risk Issues: ${zapHighRisk.slice(0, 5).map(a => a.alert).join(', ')}` : ''}
+${zapHighRisk.length   > 0 ? `- High Risk Issues: ${zapHighRisk.slice(0, 5).map(a => a.alert).join(', ')}`   : ''}
 ${zapMediumRisk.length > 0 ? `- Medium Risk Issues: ${zapMediumRisk.slice(0, 5).map(a => a.alert).join(', ')}` : ''}` : 'Vulnerability Scan: Not available or still in progress'}
 
 ${hasUrlscanData ? `Threat & Reputation Analysis:
@@ -211,103 +495,68 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Do NOT mention the names of any specific third-party tools or services used to collect the data
 - Ensure ALL scores (Performance, Accessibility, Best Practices, SEO, Security Grade, vulnerability counts, and web security configuration findings if available) are mentioned in the analysis`;
 
-        // Generate the refined report
-        assertNoLeakage(prompt, 'refineReport');
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const refinedReport = response.text();
-
-        console.log(`✅ Successfully generated report using ${keyLabel} key`);
-        return refinedReport;
-
-      } catch (error) {
-        lastError = error;
-        console.error(`❌ ${keyLabel} key failed:`, error.message);
-
-        // Check if it's a rate limit or overload error
-        const isRateLimitError = error.message?.includes('overloaded') ||
-          error.message?.includes('503') ||
-          error.message?.includes('quota') ||
-          error.message?.includes('rate limit');
-
-        const isAuthError = error.message?.includes('API key') ||
-          error.message?.includes('401') ||
-          error.message?.includes('403');
-
-        if (isAuthError) {
-          console.warn(`⚠️  ${keyLabel} key has authentication issues, skipping to next key...`);
-        } else if (isRateLimitError) {
-          console.warn(`⚠️  ${keyLabel} key is rate limited or overloaded, trying next key...`);
-        } else {
-          console.warn(`⚠️  ${keyLabel} key encountered error, trying next key...`);
-        }
-
-        // If this is the last key, throw the error
-        if (i === apiKeys.length - 1) {
-          console.error('❌ All Gemini API keys failed');
-          break;
-        }
-
-        // Wait a bit before trying the next key (500ms)
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
+  let report;
+  try {
+    report = await _generate(prompt, MODEL_PRO, 'refineReport');
+    console.log('✅ [Gemini] AI security report generated (pro)');
+  } catch (proErr) {
+    if (_isQuotaError(proErr)) {
+      console.warn('[Gemini/refineReport] Pro quota exhausted, switching to Flash');
+    } else {
+      console.warn(`[Gemini/refineReport] Pro model failed (${proErr.message}), falling back to Flash…`);
     }
-
-    // All keys failed this round - check if it's a network error worth retrying
-    const isNetworkError = lastError?.message?.includes('fetch failed') ||
-      lastError?.message?.includes('ECONNREFUSED') ||
-      lastError?.message?.includes('ETIMEDOUT') ||
-      lastError?.message?.includes('ENOTFOUND') ||
-      lastError?.message?.includes('network');
-    const isAuthError = lastError?.message?.includes('API key') ||
-      lastError?.message?.includes('401') || lastError?.message?.includes('403');
-
-    if (isNetworkError && !isAuthError && networkRetry < MAX_NETWORK_RETRIES - 1) {
-      console.warn(`⚠️ All keys failed with network error, will retry...`);
-      continue; // retry the outer loop
-    }
-
-    break; // non-network error or last retry, stop
-  } // end of networkRetry loop
-
-  // All API keys and retries failed, throw the last error
-  console.error('💥 All Gemini API keys exhausted');
-
-  if (lastError?.message?.includes('API key') || lastError?.message?.includes('401') || lastError?.message?.includes('403')) {
-    throw new Error('Gemini API authentication failed for all configured keys. Please check your API keys.');
-  } else if (lastError?.message?.includes('overloaded') || lastError?.message?.includes('503')) {
-    throw new Error('All Gemini API keys are currently overloaded or rate limited. Please try again later or add more API keys.');
-  } else {
-    throw new Error(`Gemini service error: ${lastError?.message || 'Unknown error'}`);
+    report = await _generate(prompt, MODEL_FLASH, 'refineReport');
+    console.log('[Gemini/refineReport] Flash report generated successfully');
   }
+  return report;
 }
 
 /**
- * Format a markdown report into clean plain text for PDF generation
- * @param {string} markdownReport - The markdown-formatted report
- * @returns {Promise<string>} - Clean plain text formatted for PDF
+ * Translate an array of texts using Gemini AI (JSON key-mapping for reliable 1:1 output).
+ */
+async function translateText(texts, targetLang) {
+  if (!texts || texts.length === 0) return [];
+
+  const langName  = targetLang === 'ja' ? 'Japanese' : 'English';
+  const sourceLang= targetLang === 'ja' ? 'English'  : 'Japanese';
+
+  // Sanitize texts to strip URLs / IPs before sending to Gemini (M-07)
+  const safeTexts = sanitizeTextsForLLM(texts);
+
+  const inputObj = {};
+  safeTexts.forEach((t, i) => { inputObj[i] = t; });
+
+  const prompt = `Translate the following texts from ${sourceLang} to ${langName}.
+
+INPUT (JSON object with numeric keys):
+${JSON.stringify(inputObj, null, 2)}
+
+CRITICAL RULES:
+1. Return ONLY a valid JSON object
+2. Use the SAME numeric keys as the input
+3. Each value should be the translation of the corresponding input value
+4. Preserve emojis and special characters
+5. Do NOT add any text before or after the JSON
+
+OUTPUT (JSON object only):`;
+
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateText');
+  const translatedObj = _parseJson(raw);
+
+  return texts.map((orig, i) => {
+    const v = translatedObj[i] ?? translatedObj[String(i)];
+    if (v !== undefined) return String(v);
+    console.warn(`[Gemini] Missing translation for index ${i}, using original`);
+    return orig;
+  });
+}
+
+/**
+ * Format a markdown report into clean plain text for PDF generation.
+ * Falls back to basic stripping if Gemini is unavailable.
  */
 async function formatReportForPdf(markdownReport) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    // Fallback: basic markdown stripping if no API keys
-    return stripMarkdownBasic(markdownReport);
-  }
-
-  let lastError = null;
-
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`📄 Formatting report for PDF using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      const prompt = `Convert the following markdown report into clean, professionally formatted plain text suitable for a PDF document.
+  const prompt = `Convert the following markdown report into clean, professionally formatted plain text suitable for a PDF document.
 
 RULES:
 1. Remove all markdown syntax (# headers, ** bold, - bullets, etc.)
@@ -324,86 +573,32 @@ ${markdownReport}
 
 OUTPUT (clean plain text only):`;
 
-      assertNoLeakage(prompt, 'formatReportForPdf');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const formattedText = response.text().trim();
-
-      console.log(`✅ Successfully formatted report for PDF using ${keyLabel} key`);
-      return formattedText;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for PDF formatting:`, error.message);
-
-      if (i === apiKeys.length - 1) {
-        break;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+  try {
+    return (await _generate(prompt, MODEL_FLASH, 'formatReportForPdf')).trim();
+  } catch (err) {
+    console.warn('[Gemini] formatReportForPdf failed, falling back to basic stripping:', err.message);
+    return stripMarkdownBasic(markdownReport);
   }
-
-  // Fallback to basic stripping if all keys fail
-  console.warn('⚠️ All Gemini keys failed, using basic markdown stripping');
-  return stripMarkdownBasic(markdownReport);
 }
 
 /**
- * Basic markdown stripping fallback
- * @param {string} text - Markdown text
- * @returns {string} - Plain text
- */
-function stripMarkdownBasic(text) {
-  return text
-    // Remove headers
-    .replace(/^#{1,6}\s+/gm, '')
-    // Remove bold/italic
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/_([^_]+)_/g, '$1')
-    // Convert bullets to indented text
-    .replace(/^[-*]\s+/gm, '  > ')
-    // Remove code blocks
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/`([^`]+)`/g, '$1')
-    // Clean up extra whitespace
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-/**
- * Format scan data into structured bilingual JSON for PDF
- * @param {Object} scanResult - The complete scan result
- * @param {Object} [options]
- * @param {Array<Object>} [options.scanHistoryRows] - Scan history rows (pre-formatted dates/user display); each item:
- *   { dateEn, dateJa, executedByEn, executedByJa, status }
- * @returns {Promise<Object>} - Structured bilingual data
+ * Format scan data into structured bilingual JSON for PDF.
  */
 async function formatScanDataForPdf(scanResult, options = {}) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured');
-  }
-
-  // Extract all scan data
-  // Derive overall risk from ZAP findings and urlscan verdict
-  const zapHighCount = scanResult.zapResult?.riskCounts?.High || 0;
+  const zapHighCount   = scanResult.zapResult?.riskCounts?.High || 0;
   const zapMediumCount = scanResult.zapResult?.riskCounts?.Medium || 0;
   const urlscanMalicious = scanResult.urlscanResult?.verdicts?.overall?.malicious || false;
   const overallRisk = (zapHighCount > 0 || urlscanMalicious) ? 'High' : zapMediumCount > 0 ? 'Medium' : 'Low';
 
-  const categories = scanResult.pagespeedResult?.lighthouseResult?.categories || {};
-  const performanceScore = Math.round((categories.performance?.score || 0) * 100);
-  const accessibilityScore = Math.round((categories.accessibility?.score || 0) * 100);
-  const bestPracticesScore = Math.round((categories['best-practices']?.score || 0) * 100);
-  const seoScore = Math.round((categories.seo?.score || 0) * 100);
+  const categories        = scanResult.pagespeedResult?.lighthouseResult?.categories || {};
+  const performanceScore  = Math.round((categories.performance?.score       || 0) * 100);
+  const accessibilityScore= Math.round((categories.accessibility?.score     || 0) * 100);
+  const bestPracticesScore= Math.round((categories['best-practices']?.score || 0) * 100);
+  const seoScore          = Math.round((categories.seo?.score               || 0) * 100);
 
-  const obs = scanResult.observatoryResult || {};
-  const zap = scanResult.zapResult || {};
-  const urlscan = scanResult.urlscanResult || {};
+  const obs      = scanResult.observatoryResult || {};
+  const zap      = scanResult.zapResult        || {};
+  const urlscan  = scanResult.urlscanResult    || {};
   const webCheck = scanResult.webCheckResult?.fullResults || {};
 
   const scanHistoryRows = Array.isArray(options.scanHistoryRows) ? options.scanHistoryRows : [];
@@ -450,19 +645,7 @@ WEBCHECK ANALYSIS:
 - Technologies: ${webCheck['tech-stack']?.technologies?.slice(0, 5).map(t => t.name || t).join(', ') || 'N/A'}
 `;
 
-  let lastError = null;
-
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`📊 Formatting scan data for PDF using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      const prompt = `Convert this security scan data into a structured JSON format for a professional bilingual PDF report (English and Japanese).
+  const prompt = `Convert this security scan data into a structured JSON format for a professional bilingual PDF report (English and Japanese).
 
 SCAN DATA:
 ${scanDataText}
@@ -577,83 +760,40 @@ IMPORTANT RULES:
   - Do NOT invent rows that are not in the input
 `;
 
-      assertNoLeakage(scanDataText, 'formatScanDataForPdf');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let jsonText = response.text().trim();
+  const raw = await _generateWithFallback(prompt, 'formatScanDataForPdf');
+  const parsed = _parseJson(raw);
 
-      // Clean up JSON
-      jsonText = jsonText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const parsed = JSON.parse(jsonText);
-
-      // Manually add detailedAlerts to ZAP section (Gemini might not return it)
-      // This ensures we always have the vulnerability details for the PDF
-      const zapSection = parsed.sections?.find(s => s.id === 'zap');
-      if (zapSection && zap.alerts && zap.alerts.length > 0) {
-        zapSection.detailedAlerts = zap.alerts.map(a => ({
-          name: a.alert,
-          risk: a.risk,
-          confidence: a.confidence,
-          description: a.description || 'No description available',
-          solution: a.solution || 'No solution provided',
-          reference: a.reference || '',
-          cweid: a.cweid,
-          wascid: a.wascid,
-          totalOccurrences: a.totalOccurrences || 0
-        }));
-        console.log(`📊 Added ${zapSection.detailedAlerts.length} detailed alerts to ZAP section`);
-      }
-
-      console.log(`✅ Successfully formatted scan data using ${keyLabel} key`);
-      return parsed;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for scan data formatting:`, error.message);
-
-      if (i === apiKeys.length - 1) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+  // Always inject full detailedAlerts — Gemini might truncate them
+  const zapSection = parsed.sections?.find(s => s.id === 'zap');
+  if (zapSection && zap.alerts && zap.alerts.length > 0) {
+    zapSection.detailedAlerts = zap.alerts.map(a => ({
+      name:             a.alert,
+      risk:             a.risk,
+      confidence:       a.confidence,
+      description:      a.description      || 'No description available',
+      solution:         a.solution         || 'No solution provided',
+      reference:        a.reference        || '',
+      cweid:            a.cweid,
+      wascid:           a.wascid,
+      totalOccurrences: a.totalOccurrences || 0,
+    }));
+    console.log(`[Gemini] Added ${zapSection.detailedAlerts.length} detailed alerts to ZAP section`);
   }
 
-  throw new Error(`Scan data formatting failed: ${lastError?.message}`);
+  console.log('✅ [Gemini] Scan data formatted for PDF');
+  return parsed;
 }
 
 /**
  * Format scan history into structured bilingual JSON for PDF.
- * Used when scanData formatting fails to include scanHistory.
- * @param {Array<Object>} scanHistoryRows - Each item: { dateEn, dateJa, executedByEn, executedByJa, status }
- * @returns {Promise<Object>} - { title, headers, rows } bilingual
  */
 async function formatScanHistoryForPdf(scanHistoryRows) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured');
-  }
-
   const rows = Array.isArray(scanHistoryRows) ? scanHistoryRows : [];
 
-  let lastError = null;
+  // Sanitize executor emails before sending to Gemini (M-01)
+  const safeRows = sanitizeHistoryRowsForLLM(rows);
 
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`📋 Formatting scan history for PDF using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Sanitize executor emails before sending to Gemini (M-01)
-      const safeRows = sanitizeHistoryRowsForLLM(rows);
-      const prompt = `Generate the Scan History table content for a professional bilingual PDF report (English and Japanese).
+  const prompt = `Generate the Scan History table content for a professional bilingual PDF report (English and Japanese).
 
 INPUT (JSON array):
 ${JSON.stringify(safeRows, null, 2)}
@@ -682,195 +822,25 @@ CRITICAL RULES:
    - cancelled/stopped -> Cancelled / 停止
 5. Do NOT add any text outside of the JSON.`;
 
-      assertNoLeakage(prompt, 'formatScanHistoryForPdf');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let jsonText = response.text().trim();
+  const raw = await _generateWithFallback(prompt, 'formatScanHistoryForPdf');
+  const parsed = _parseJson(raw);
 
-      jsonText = jsonText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const parsed = JSON.parse(jsonText);
-
-      if (!parsed || typeof parsed !== 'object') {
-        throw new Error('Invalid scanHistory response - not an object');
-      }
-      if (!parsed.title || !parsed.headers || !parsed.rows) {
-        throw new Error('Invalid scanHistory response - missing title/headers/rows');
-      }
-
-      console.log(`✅ Successfully formatted scan history using ${keyLabel} key`);
-      return parsed;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for scan history formatting:`, error.message);
-      if (i === apiKeys.length - 1) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+  if (!parsed?.title || !parsed?.headers || !parsed?.rows) {
+    throw new Error('Invalid scanHistory response — missing title/headers/rows');
   }
 
-  throw new Error(`Scan history formatting failed: ${lastError?.message}`);
+  console.log('✅ [Gemini] Scan history formatted for PDF');
+  return parsed;
 }
 
 /**
- * Validate and clean content blocks within a section
- * MINIMAL validation - only remove truly invalid content (empty/null)
- * DO NOT filter based on capitalization or text patterns
- * @param {Array} content - Array of content blocks
- * @returns {Array} - Cleaned content blocks
- */
-function validateContentBlocks(content) {
-  if (!Array.isArray(content)) return [];
-
-  const validContent = [];
-
-  for (const block of content) {
-    if (!block || typeof block !== 'object') continue;
-
-    // Validate paragraph blocks
-    if (block.type === 'paragraph') {
-      // Only skip if truly empty
-      if (!block.text || typeof block.text !== 'string' || block.text.trim().length === 0) {
-        console.warn('⚠️  Skipping empty paragraph block');
-        continue;
-      }
-
-      // Keep ALL non-empty paragraphs - Gemini should generate them correctly
-      validContent.push(block);
-    }
-    // Validate bullet blocks
-    else if (block.type === 'bullets') {
-      if (!Array.isArray(block.items) || block.items.length === 0) {
-        console.warn('⚠️  Skipping empty bullets block');
-        continue;
-      }
-
-      // Only filter out truly empty items
-      const validItems = block.items.filter(item => {
-        return item && typeof item === 'string' && item.trim().length > 0;
-      });
-
-      if (validItems.length > 0) {
-        validContent.push({
-          ...block,
-          items: validItems
-        });
-      } else {
-        console.warn('⚠️  Skipping bullets block with no valid items');
-      }
-    }
-    // Validate bold_text blocks
-    else if (block.type === 'bold_text') {
-      if (!block.label || !block.text) {
-        console.warn('⚠️  Skipping invalid bold_text block');
-        continue;
-      }
-      validContent.push(block);
-    }
-    // Unknown type - keep it anyway
-    else {
-      validContent.push(block);
-    }
-  }
-
-  return validContent;
-}
-
-/**
- * Clean duplicate sections and overlapping content from parsed JSON
- * @param {Object} parsed - The parsed JSON from Gemini
- * @returns {Object} - Cleaned JSON structure
- */
-function cleanDuplicateSections(parsed) {
-  if (!parsed || !parsed.sections || !Array.isArray(parsed.sections)) {
-    return parsed;
-  }
-
-  const seenHeadings = new Set();
-  const uniqueSections = [];
-
-  for (const section of parsed.sections) {
-    // Must have heading
-    if (!section.heading || typeof section.heading !== 'string' || section.heading.trim().length === 0) {
-      console.warn('⚠️  Skipping section with no heading');
-      continue;
-    }
-
-    // Check for duplicate headings (case-insensitive)
-    const headingLower = section.heading.toLowerCase().trim();
-    if (seenHeadings.has(headingLower)) {
-      console.warn(`⚠️  Duplicate section detected and removed: "${section.heading}"`);
-      continue; // Skip duplicate
-    }
-
-    // Must have valid type
-    if (!section.type || !['paragraph', 'bullets', 'mixed'].includes(section.type)) {
-      console.warn(`⚠️  Skipping section with invalid type: "${section.heading}"`);
-      continue;
-    }
-
-    // Must have content array
-    if (!Array.isArray(section.content) || section.content.length === 0) {
-      console.warn(`⚠️  Skipping section with no content: "${section.heading}"`);
-      continue;
-    }
-
-    // Validate and clean content blocks
-    const validatedContent = validateContentBlocks(section.content);
-
-    if (validatedContent.length === 0) {
-      console.warn(`⚠️  Skipping section with no valid content: "${section.heading}"`);
-      continue;
-    }
-
-    // Add cleaned section
-    seenHeadings.add(headingLower);
-    uniqueSections.push({
-      ...section,
-      content: validatedContent
-    });
-  }
-
-  console.log(`🧹 Cleaned sections: ${parsed.sections.length} → ${uniqueSections.length}`);
-
-  return {
-    ...parsed,
-    sections: uniqueSections
-  };
-}
-
-/**
- * Format AI analysis into structured JSON for PDF
- * @param {string} markdownReport - The markdown AI report
- * @returns {Promise<Object>} - Structured analysis data
+ * Format AI analysis into structured JSON for PDF.
  */
 async function formatAiAnalysisForPdf(markdownReport) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured');
-  }
-
-  let lastError = null;
-
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`📝 Formatting AI analysis for PDF using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Strip any URLs / IPs that Gemini may have embedded in the stored report
-      // during the original refineReport() call — prevents a second-pass re-leak.
-      const cleanMarkdownReport = sanitizeRefinedReportForLLM(markdownReport);
-      const prompt = `Convert this security analysis report into a structured JSON format for a professional PDF document.
+  // Strip any URLs / IPs that Gemini may have embedded in the stored report
+  // during the original refineReport() call — prevents a second-pass re-leak.
+  const cleanMarkdownReport = sanitizeRefinedReportForLLM(markdownReport);
+  const prompt = `Convert this security analysis report into a structured JSON format for a professional PDF document.
 
 REPORT:
 ${cleanMarkdownReport}
@@ -937,69 +907,21 @@ EXAMPLE OF COMPLETE VS INCOMPLETE:
 ✅ CORRECT: "The website uses Cloudflare for content delivery, security (WAF), and TLS/SSL management."
 ❌ WRONG: "The website uses Cloudflare for content delivery, security (WAF), and"`;
 
-
-
-
-
-      assertNoLeakage(prompt, 'formatAiAnalysisForPdf');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let jsonText = response.text().trim();
-
-      jsonText = jsonText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const parsed = JSON.parse(jsonText);
-
-      // Clean and validate the structure
-      const cleaned = cleanDuplicateSections(parsed);
-
-      console.log(`✅ Successfully formatted AI analysis using ${keyLabel} key`);
-      return cleaned;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for AI analysis formatting:`, error.message);
-
-      if (i === apiKeys.length - 1) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  throw new Error(`AI analysis formatting failed: ${lastError?.message}`);
+  const raw = await _generateWithFallback(prompt, 'formatAiAnalysisForPdf');
+  const parsed = _parseJson(raw);
+  const cleaned = cleanDuplicateSections(parsed);
+  console.log('✅ [Gemini] AI analysis formatted for PDF');
+  return cleaned;
 }
 
 /**
- * Translate formatted AI analysis to Japanese
- * @param {Object} formattedAnalysis - The structured English analysis
- * @returns {Promise<Object>} - Same structure in Japanese
+ * Translate formatted AI analysis to Japanese (kept for backwards compatibility).
  */
 async function translateAiAnalysisToJapanese(formattedAnalysis) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured');
-  }
-
-  let lastError = null;
-
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`🌐 Translating AI analysis to Japanese using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Sanitize the formatted analysis to strip any embedded URLs/IPs before
-      // sending to Gemini for translation (C-07, C-08 — compound re-leakage).
-      const safeAnalysisText = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
-      const prompt = `Translate this security analysis JSON from English to Japanese. Keep the exact same structure, only translate the text content.
+  // Sanitize the formatted analysis to strip any embedded URLs/IPs before
+  // sending to Gemini for translation (C-07, C-08 — compound re-leakage).
+  const safeAnalysisText = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
+  const prompt = `Translate this security analysis JSON from English to Japanese. Keep the exact same structure, only translate the text content.
 
 INPUT JSON:
 ${safeAnalysisText}
@@ -1039,74 +961,25 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 22. Count sections: output must match input exactly (same number of sections)
 23. Confirm ALL translated content is complete and readable
 
-EXAMPLE OF COMPLETE VS INCOMPLETE TRANSLATION:
-✅ CORRECT: "このサイトは、コンテンツ配信、セキュリティ（WAF）、およびTLS/SSL管理にCloudflareを利用しています。"
-❌ WRONG: "このサイトは、コンテンツ配信、セキュリティ（WAF）、および"
-
 OUTPUT (Japanese JSON only):`;
 
-      assertNoLeakage(prompt, 'translateAiAnalysisToJapanese');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let jsonText = response.text().trim();
-
-      jsonText = jsonText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const parsed = JSON.parse(jsonText);
-
-      // Clean and validate the Japanese structure too
-      const cleaned = cleanDuplicateSections(parsed);
-
-      console.log(`✅ Successfully translated AI analysis to Japanese using ${keyLabel} key`);
-      return cleaned;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for Japanese translation:`, error.message);
-
-      if (i === apiKeys.length - 1) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  throw new Error(`Japanese translation failed: ${lastError?.message}`);
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateAiAnalysisToJapanese');
+  const parsed = _parseJson(raw);
+  const cleaned = cleanDuplicateSections(parsed);
+  console.log('✅ [Gemini] AI analysis translated to Japanese');
+  return cleaned;
 }
 
 /**
- * Translate both AI analysis AND vulnerability details to Japanese in a SINGLE API call
- * This reduces API costs by combining two translations into one
- * @param {Object} formattedAnalysis - The formatted AI analysis object
- * @param {Array} vulnerabilities - Array of vulnerability objects
- * @returns {Promise<Object>} - Object with { aiAnalysis, vulnerabilities }
+ * Translate both AI analysis and vulnerability details to Japanese in a single call.
  */
 async function translateToJapanese(formattedAnalysis, vulnerabilities) {
-  const apiKeys = getApiKeys();
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured');
-  }
+  // Sanitize both inputs to strip embedded URLs/IPs before translation
+  // (C-07 / C-08 — AI report + vuln detail compound re-leakage).
+  const safeAnalysisJson = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
+  const safeVulnJson     = sanitizeRefinedReportForLLM(JSON.stringify(vulnerabilities, null, 2));
 
-  let lastError = null;
-
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`🌐 Translating AI analysis + vulnerabilities to Japanese using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Sanitize both inputs to strip embedded URLs/IPs before translation
-      // (C-07 / C-08 — AI report + vuln detail compound re-leakage).
-      const safeAnalysisJson = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
-      const safeVulnJson     = sanitizeRefinedReportForLLM(JSON.stringify(vulnerabilities, null, 2));
-
-      const prompt = `You are translating a security report from English to Japanese. You need to translate TWO things in a SINGLE response:
+  const prompt = `You are translating a security report from English to Japanese. You need to translate TWO things in a SINGLE response:
 
 1. AI Security Analysis (JSON object)
 2. Vulnerability Details (JSON array)
@@ -1150,169 +1023,86 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 16. Ensure ALL translated content is complete and readable
 17. Double-check JSON structure is valid
 
-EXAMPLE OF COMPLETE VS INCOMPLETE TRANSLATION:
-✅ CORRECT: "このサイトは、コンテンツ配信、セキュリティ（WAF）、およびTLS/SSL管理にCloudflareを利用しています。"
-❌ WRONG: "このサイトは、コンテンツ配信、セキュリティ（WAF）、および"
-
 OUTPUT (Japanese JSON object only):`;
 
-      assertNoLeakage(prompt, 'translateToJapanese');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let jsonText = response.text().trim();
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateToJapanese');
+  const parsed = _parseJson(raw);
 
-      jsonText = jsonText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const parsed = JSON.parse(jsonText);
-
-      if (!parsed.aiAnalysis || !parsed.vulnerabilities) {
-        throw new Error('Invalid response structure - missing aiAnalysis or vulnerabilities');
-      }
-
-      // Clean and validate the Japanese AI analysis
-      const cleanedAiAnalysis = cleanDuplicateSections(parsed.aiAnalysis);
-
-      console.log(`✅ Successfully translated AI analysis + ${parsed.vulnerabilities.length} vulnerabilities to Japanese using ${keyLabel} key`);
-      return {
-        aiAnalysis: cleanedAiAnalysis,
-        vulnerabilities: parsed.vulnerabilities
-      };
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for Japanese translation:`, error.message);
-
-      if (i === apiKeys.length - 1) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+  if (!parsed.aiAnalysis || !parsed.vulnerabilities) {
+    throw new Error('Invalid response structure — missing aiAnalysis or vulnerabilities');
   }
 
-  throw new Error(`Japanese translation failed: ${lastError?.message}`);
+  const cleanedAiAnalysis = cleanDuplicateSections(parsed.aiAnalysis);
+  console.log(`✅ [Gemini] Translated AI analysis + ${parsed.vulnerabilities.length} vulnerabilities to Japanese`);
+  return { aiAnalysis: cleanedAiAnalysis, vulnerabilities: parsed.vulnerabilities };
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function stripMarkdownBasic(text) {
+  return text
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g,     '$1')
+    .replace(/__([^_]+)__/g,     '$1')
+    .replace(/_([^_]+)_/g,       '$1')
+    .replace(/^[-*]\s+/gm,       '  > ')
+    .replace(/```[\s\S]*?```/g,  '')
+    .replace(/`([^`]+)`/g,       '$1')
+    .replace(/\n{3,}/g,          '\n\n')
+    .trim();
+}
+
+function validateContentBlocks(content) {
+  if (!Array.isArray(content)) return [];
+  const valid = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'paragraph') {
+      if (!block.text?.trim()) continue;
+      valid.push(block);
+    } else if (block.type === 'bullets') {
+      const items = (block.items || []).filter(i => i && typeof i === 'string' && i.trim());
+      if (items.length) valid.push({ ...block, items });
+    } else if (block.type === 'bold_text') {
+      if (!block.label || !block.text) continue;
+      valid.push(block);
+    } else {
+      valid.push(block);
+    }
+  }
+  return valid;
+}
+
+function cleanDuplicateSections(parsed) {
+  if (!parsed?.sections) return parsed;
+  const seen = new Set();
+  const unique = [];
+  for (const section of parsed.sections) {
+    if (!section.heading?.trim() || !section.type || !Array.isArray(section.content)) continue;
+    const key = section.heading.toLowerCase().trim();
+    if (seen.has(key)) continue;
+    if (!['paragraph', 'bullets', 'mixed'].includes(section.type)) continue;
+    const content = validateContentBlocks(section.content);
+    if (!content.length) continue;
+    seen.add(key);
+    unique.push({ ...section, content });
+  }
+  console.log(`[Gemini] cleanDuplicateSections: ${parsed.sections.length} → ${unique.length}`);
+  return { ...parsed, sections: unique };
+}
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
+
 module.exports = {
+  GEMINI_AUTH_MODE: () => GEMINI_AUTH_MODE, // getter — value is set during init
   refineReport,
   translateText,
   formatReportForPdf,
   formatScanDataForPdf,
   formatScanHistoryForPdf,
   formatAiAnalysisForPdf,
-  translateAiAnalysisToJapanese,  // Keep for backwards compatibility
-  translateToJapanese  // NEW: Combined translation function
+  translateAiAnalysisToJapanese,
+  translateToJapanese,
+  verifyCredentials,
 };
-
-/**
- * Translate an array of texts using Gemini AI
- * Uses JSON format for reliable 1:1 text mapping
- * @param {string[]} texts - Array of texts to translate
- * @param {string} targetLang - Target language ('en' for English, 'ja' for Japanese)
- * @returns {Promise<string[]>} - Array of translated texts
- */
-async function translateText(texts, targetLang) {
-  const apiKeys = getApiKeys();
-
-  if (apiKeys.length === 0) {
-    throw new Error('No Gemini API keys configured. Please set GEMINI_API_KEY in environment variables.');
-  }
-
-  if (!texts || texts.length === 0) {
-    return [];
-  }
-
-  const langName = targetLang === 'ja' ? 'Japanese' : 'English';
-  const sourceLang = targetLang === 'ja' ? 'English' : 'Japanese';
-
-  let lastError = null;
-
-  // Try each API key until one succeeds
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
-    const keyLabel = i === 0 ? 'primary' : `fallback #${i}`;
-
-    try {
-      console.log(`🌐 Translating ${texts.length} texts to ${langName} using ${keyLabel} key...`);
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
-      // Sanitize texts to strip URLs / IPs before sending to Gemini (M-07)
-      const safeTexts = sanitizeTextsForLLM(texts);
-
-      // Build input as JSON object with numeric keys
-      const inputObj = {};
-      safeTexts.forEach((text, idx) => {
-        inputObj[idx] = text;
-      });
-
-      const prompt = `Translate the following texts from ${sourceLang} to ${langName}.
-
-INPUT (JSON object with numeric keys):
-${JSON.stringify(inputObj, null, 2)}
-
-CRITICAL RULES:
-1. Return ONLY a valid JSON object
-2. Use the SAME numeric keys as the input
-3. Each value should be the translation of the corresponding input value
-4. Preserve emojis and special characters
-5. Do NOT add any text before or after the JSON
-
-OUTPUT (JSON object only):`;
-
-      assertNoLeakage(prompt, 'translateText');
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let translatedText = response.text().trim();
-
-      // Clean up response - remove markdown code blocks if present
-      translatedText = translatedText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      // Parse JSON response
-      let translatedObj;
-      try {
-        translatedObj = JSON.parse(translatedText);
-      } catch (parseError) {
-        console.error('❌ Failed to parse Gemini JSON response:', translatedText.substring(0, 200));
-        throw new Error('Invalid JSON response from Gemini');
-      }
-
-      // Build result array in correct order
-      const translations = [];
-      for (let j = 0; j < texts.length; j++) {
-        if (translatedObj[j] !== undefined) {
-          translations.push(String(translatedObj[j]));
-        } else if (translatedObj[String(j)] !== undefined) {
-          translations.push(String(translatedObj[String(j)]));
-        } else {
-          // Fallback to original if translation missing
-          console.warn(`⚠️ Missing translation for index ${j}, using original`);
-          translations.push(texts[j]);
-        }
-      }
-
-      console.log(`✅ Successfully translated ${translations.length} texts using ${keyLabel} key`);
-      return translations;
-
-    } catch (error) {
-      lastError = error;
-      console.error(`❌ ${keyLabel} key failed for translation:`, error.message);
-
-      if (i === apiKeys.length - 1) {
-        break;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  }
-
-  console.error('💥 All Gemini API keys exhausted for translation');
-  throw new Error(`Translation failed: ${lastError?.message || 'Unknown error'}`);
-}
-

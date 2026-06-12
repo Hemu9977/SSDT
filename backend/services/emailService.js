@@ -149,10 +149,7 @@ const sendScanCompletionEmail = async (email, userName, scanDetails) => {
               </tr>
             </table>
           </div>
-          <p style="font-size: 15px; line-height: 1.6; color: #cccccc;">Log in to FORTEXA to view the full report, download a PDF, or export raw scan data.</p>
-          <div style="text-align: center; margin: 25px 0;">
-            <a href="${dashboardLink}" style="background-color: #FF6B00; color: #ffffff; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block; letter-spacing: 0.5px;">View Report</a>
-          </div>
+          <p style="font-size: 15px; line-height: 1.6; color: #cccccc;">Log in to FORTEXA and visit your <strong style="color: #FFA366;">Profile</strong> page to view the full report, download a PDF, or export raw scan data.</p>
         </div>
         <div style="text-align: center; padding-top: 20px; border-top: 1px solid #2a2a2a; margin-top: 20px;">
           <p style="font-size: 13px; color: #555555; margin: 0;">Thank you for using FORTEXA.<br><span style="color: #FF6B00; font-weight: bold;">The FORTEXA Team</span></p>

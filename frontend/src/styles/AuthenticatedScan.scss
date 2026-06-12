@@ -146,11 +146,11 @@
 
   // ========== Step Content ==========
   .step-content {
-    background: rgba(0, 0, 0, 0.65);
+    background: transparent;
     border-radius: 12px;
     padding: 2.5rem;
     border: 2px solid var(--accent);
-    box-shadow: 0 0 20px var(--accent-dim);
+    box-shadow: none;
     margin-bottom: 2rem;
 
     h2 {

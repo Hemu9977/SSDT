@@ -9,11 +9,13 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNotifications } from '../contexts/NotificationContext';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScanCompletionPopup.scss';
 
 const ScanCompletionPopup = () => {
   const { notifications, removeNotification, markAsRead } = useNotifications();
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const handleViewReport = (notification) => {
     removeNotification(notification.id);
@@ -63,15 +65,12 @@ const ScanCompletionPopup = () => {
               </div>
 
               <div className="notification-text">
-                <h4 className="notification-title">Scan Completed</h4>
+                <h4 className="notification-title">{t('scanCompleted')}</h4>
                 <p className="notification-message">
-                  Your {notification.scanType || 'security scan'} for{' '}
-                  <span className="notification-url">
-                    {notification.targetUrl
-                      ? new URL(notification.targetUrl).hostname
-                      : 'target URL'}
-                  </span>{' '}
-                  has completed successfully.
+                  {t('scanCompletedMessage', {
+                    scanType: notification.scanType || t('securityScan'),
+                    target: notification.targetUrl ? new URL(notification.targetUrl).hostname : t('targetUrl'),
+                  })}
                 </p>
               </div>
             </div>
@@ -81,13 +80,13 @@ const ScanCompletionPopup = () => {
                 className="notification-btn notification-btn-secondary"
                 onClick={() => handleDismiss(notification)}
               >
-                Dismiss
+                {t('dismiss')}
               </button>
               <button
                 className="notification-btn notification-btn-primary"
                 onClick={() => handleViewReport(notification)}
               >
-                View Report
+                {t('viewReport')}
               </button>
             </div>
           </motion.div>

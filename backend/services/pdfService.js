@@ -136,25 +136,6 @@ function sanitizeTextForPdf(input, lang) {
   return s.trim();
 }
 
-function isGeminiKeyExhaustedError(err) {
-  if (!err) return false;
-  if (err.code === 'GEMINI_KEY_EXHAUSTED') return true;
-  const msg = String(err.message || '').toLowerCase();
-  return (
-    msg.includes('no gemini api keys configured') ||
-    msg.includes('resource_exhausted') ||
-    msg.includes('quota') ||
-    msg.includes('too many requests') ||
-    msg.includes('429')
-  );
-}
-
-function throwGeminiKeyExhausted(err) {
-  const e = new Error('Gemini key is exhausted');
-  e.code = 'GEMINI_KEY_EXHAUSTED';
-  e.details = err?.message;
-  throw e;
-}
 
 function getRiskColor(risk) {
   if (!risk) return COLORS.textLight;
@@ -350,8 +331,21 @@ async function ensureGeminiScanHistory(scanData, scanHistoryRows) {
     }
     return formatted;
   } catch (e) {
-    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-    throw e;
+    // Gemini unavailable — build a static fallback scan history table so the
+    // PDF is still generated rather than returning a 500 to the user.
+    console.warn('[PDF] ensureGeminiScanHistory: Gemini failed, using static fallback:', e.message);
+    const fallbackHistory = {
+      title: { en: 'Scan History', ja: '診断履歴' },
+      headers: { en: ['Date', 'Executed by', 'Status'], ja: ['日付', '実行ユーザー', 'ステータス'] },
+      rows: {
+        en: (scanHistoryRows || []).map(r => [r.dateEn || '', r.executedByEn || '', r.status || '']),
+        ja: (scanHistoryRows || []).map(r => [r.dateJa || '', r.executedByJa || '', r.status || ''])
+      }
+    };
+    if (scanData && typeof scanData === 'object') {
+      scanData.scanHistory = fallbackHistory;
+    }
+    return fallbackHistory;
   }
 }
 
@@ -881,8 +875,17 @@ function renderTemplateContentBlock(ctx, block) {
 }
 
 function renderAiAnalysisSection(ctx, aiAnalysis, lang) {
-  if (!aiAnalysis) return;
-  addTemplateSectionHeader(ctx, sanitizeTextForPdf(aiAnalysis.title || (lang === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis'), lang));
+  const sectionTitle = lang === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis';
+  if (!aiAnalysis) {
+    addTemplateSectionHeader(ctx, sectionTitle);
+    const notice = lang === 'ja'
+      ? 'AIによる分析はモデルのクォータ制限により生成できませんでした。すべてのスキャン結果と検出内容は以下に記載されています。'
+      : 'AI analysis could not be generated due to model quota limitations. All scan findings and security results are included below.';
+    writeFlowText(ctx, notice, { lineGap: 3, fontSize: 10, color: COLORS.textLight });
+    ctx.doc.moveDown(0.5);
+    return;
+  }
+  addTemplateSectionHeader(ctx, sanitizeTextForPdf(aiAnalysis.title || sectionTitle, lang));
   (aiAnalysis.sections || []).forEach(section => {
     ensureSpace(ctx, 70);
     if (section.heading) {
@@ -1151,12 +1154,11 @@ async function generatePdfReport(scanResult) {
   let scanData;
   try   { scanData = await formatScanDataForPdf(llmSafeScan, { scanHistoryRows }); }
   catch (e) {
-    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-    console.warn('⚠️ Gemini scan data failed, using fallback');
+    console.warn('[PDF] Gemini scan data formatting failed, using fallback:', e.message);
     scanData = buildFallbackScanDataForPdf(scanResult);
   }
 
-  // Ensure scanHistory is always Gemini-generated even if scanData fallback path is used.
+  // Ensure scanHistory is always populated even if scanData fallback path is used.
   await ensureGeminiScanHistory(scanData, scanHistoryRows);
 
   const zapSection = scanData.sections?.find(s => s.id === 'zap');
@@ -1167,16 +1169,18 @@ async function generatePdfReport(scanResult) {
   // Step 2 – AI analysis (EN)
   let aiAnalysisEn = null;
   if (scanResult.refinedReport) {
-    try { aiAnalysisEn = await formatAiAnalysisForPdf(scanResult.refinedReport); }
-    catch (e) {
-      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-      console.error('⚠️ AI analysis format failed:', e.message);
+    try {
+      aiAnalysisEn = await formatAiAnalysisForPdf(scanResult.refinedReport);
+      console.log('[PDF] Using Gemini-generated report');
+    } catch (e) {
+      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      // aiAnalysisEn stays null — PDF renders without AI narrative section
     }
   }
 
   await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
 
-  // Step 3 – translate to JA
+  // Step 3 – translate to JA (static fallback if Gemini unavailable)
   const vulnsEn = zapSection?.detailedAlerts || [];
   let aiAnalysisJa = null, vulnsJa = [];
 
@@ -1185,16 +1189,16 @@ async function generatePdfReport(scanResult) {
       const ja = await translateToJapanese(aiAnalysisEn || {}, vulnsEn);
       aiAnalysisJa = ja.aiAnalysis;
       vulnsJa      = ja.vulnerabilities;
+      if (aiAnalysisJa && !containsJapanese(JSON.stringify(aiAnalysisJa))) {
+        console.warn('[PDF] JA translation did not produce Japanese text, using static fallback');
+        aiAnalysisJa = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+        vulnsJa = vulnsEn;
+      }
     } catch (e) {
-      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-      console.error('❌ JA translation failed:', e.message);
-      throw e;
+      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      aiAnalysisJa = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+      vulnsJa = vulnsEn;
     }
-  }
-  if (aiAnalysisJa && !containsJapanese(JSON.stringify(aiAnalysisJa))) {
-    const err = new Error('Japanese translation output did not contain Japanese text');
-    err.code = 'JA_TRANSLATION_INVALID';
-    throw err;
   }
 
   const scanHistory = scanData?.scanHistory || null;
@@ -1240,6 +1244,7 @@ async function generatePdfReport(scanResult) {
   doc.addPage();
   renderTemplateReport(doc, scanData, aiAnalysisJa, vulnsJa, 'ja', tsJa);
   doc.end();
+  console.log('[PDF] PDF generation completed successfully');
   return buf;
 }
 
@@ -1258,7 +1263,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   let scanData;
   try   { scanData = await formatScanDataForPdf(llmSafeScan, { scanHistoryRows }); }
   catch (e) {
-    if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
+    console.warn('[PDF] Gemini scan data formatting failed, using fallback:', e.message);
     scanData = buildFallbackScanDataForPdf(scanResult);
   }
 
@@ -1271,10 +1276,12 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
 
   let aiAnalysis = null;
   if (scanResult.refinedReport) {
-    try { aiAnalysis = await formatAiAnalysisForPdf(scanResult.refinedReport); }
-    catch (e) {
-      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-      console.error('⚠️ AI analysis failed:', e.message);
+    try {
+      aiAnalysis = await formatAiAnalysisForPdf(scanResult.refinedReport);
+      console.log('[PDF] Using Gemini-generated report');
+    } catch (e) {
+      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      // aiAnalysis stays null — PDF renders without AI narrative section
     }
   }
 
@@ -1287,16 +1294,16 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
       const ja = await translateToJapanese(aiAnalysis || {}, vulnsEn);
       aiToUse    = ja.aiAnalysis;
       vulnsToUse = ja.vulnerabilities;
+      if (aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
+        console.warn('[PDF] JA translation did not produce Japanese text, using static fallback');
+        aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+        vulnsToUse = vulnsEn;
+      }
     } catch (e) {
-      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-      console.error('❌ JA translation failed:', e.message);
-      throw e;
+      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+      vulnsToUse = vulnsEn;
     }
-  }
-  if (isJa && aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
-    const err = new Error('Japanese translation output did not contain Japanese text');
-    err.code = 'JA_TRANSLATION_INVALID';
-    throw err;
   }
 
   const disclaimer = getDisclaimerContent(lang);
@@ -1341,6 +1348,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   const buf = collectBuffer(doc);
   renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts);
   doc.end();
+  console.log('[PDF] PDF generation completed successfully');
   return buf;
 }
 
@@ -1395,9 +1403,8 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
       const ja   = await translateToJapanese({}, vulnerabilities);
       vulnsToUse = ja.vulnerabilities.map((v, i) => ({ ...v, urls: vulnerabilities[i]?.urls || [] }));
     } catch (e) {
-      if (isGeminiKeyExhaustedError(e)) throwGeminiKeyExhausted(e);
-      console.error('❌ JA translation failed:', e.message);
-      throw e;
+      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      // vulnsToUse stays as English vulnerabilities — ZAP PDF still includes all findings
     }
   }
 
