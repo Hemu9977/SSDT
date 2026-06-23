@@ -454,7 +454,8 @@ function buildFallbackScanDataForPdf(scanResult) {
           solution:    a.solution    || 'No solution provided',
           reference:   a.reference   || '',
           cweid: a.cweid, wascid: a.wascid,
-          totalOccurrences: a.totalOccurrences || 0
+          totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
+          sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || []
         }))
       },
       {
@@ -544,7 +545,8 @@ async function fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel) {
       solution:    a.solution    || 'No solution provided',
       reference:   a.reference   || '',
       cweid: a.cweid, wascid: a.wascid,
-      totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0
+      totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
+      sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || []
     }));
     console.log(`✅ Loaded ${zapSection.detailedAlerts.length} plan-filtered alerts from GridFS`);
   } catch (e) {
@@ -962,7 +964,19 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
       writeFlowText(ctx, v.solution, { lineGap: 2, fontSize: 9, color: COLORS.text });
       doc.moveDown(0.2);
     }
-        if (v.reference) {
+    if (v.sampleUrls && v.sampleUrls.length > 0) {
+      ensureSpace(ctx, 30);
+      doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.warning)
+         .text(lang === 'ja' ? '影響を受けるURL (一部):' : 'Affected URLs (Sample):');
+      v.sampleUrls.forEach((urlObj) => {
+          const urlStr = typeof urlObj === 'string' ? urlObj : urlObj.uri || urlObj.url || String(urlObj);
+          if (urlStr) {
+             writeFlowText(ctx, `• ${urlStr}`, { lineGap: 2, fontSize: 8, color: COLORS.text });
+          }
+      });
+      doc.moveDown(0.2);
+    }
+    if (v.reference) {
       ensureSpace(ctx, 16);
       doc.font('NotoSans').fontSize(8).fillColor(COLORS.textLight)
           .text(`${lang === 'ja' ? '参考情報' : 'References'}: ${sanitizeTextForPdf(v.reference, lang)}`);
@@ -1188,7 +1202,10 @@ async function generatePdfReport(scanResult) {
     try {
       const ja = await translateToJapanese(aiAnalysisEn || {}, vulnsEn);
       aiAnalysisJa = ja.aiAnalysis;
-      vulnsJa      = ja.vulnerabilities;
+      vulnsJa      = ja.vulnerabilities.map((v, i) => ({
+        ...v,
+        sampleUrls: vulnsEn[i]?.sampleUrls || []
+      }));
       if (aiAnalysisJa && !containsJapanese(JSON.stringify(aiAnalysisJa))) {
         console.warn('[PDF] JA translation did not produce Japanese text, using static fallback');
         aiAnalysisJa = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
@@ -1293,7 +1310,10 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     try {
       const ja = await translateToJapanese(aiAnalysis || {}, vulnsEn);
       aiToUse    = ja.aiAnalysis;
-      vulnsToUse = ja.vulnerabilities;
+      vulnsToUse = ja.vulnerabilities.map((v, i) => ({
+        ...v,
+        sampleUrls: vulnsEn[i]?.sampleUrls || []
+      }));
       if (aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
         console.warn('[PDF] JA translation did not produce Japanese text, using static fallback');
         aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
@@ -1379,6 +1399,7 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
           reference:   a.reference   || '',
           cweid: a.cweid, wascid: a.wascid,
           totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
+          sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
           urls: [] // occurrence URLs contain target domain — stripped before Gemini translation
         }));
       } catch (e) { console.warn(`⚠️ GridFS fetch failed: ${e.message}`); }
@@ -1392,7 +1413,9 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
       description: a.description || 'No description available',
       solution:    a.solution    || 'No solution provided',
       reference: a.reference || '', cweid: a.cweid, wascid: a.wascid,
-      totalOccurrences: a.totalOccurrences || 0, urls: [] // occurrence URLs stripped
+      totalOccurrences: a.totalOccurrences || 0, 
+      sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
+      urls: [] // occurrence URLs stripped
     }));
   }
 
@@ -1401,7 +1424,11 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
     await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
     try {
       const ja   = await translateToJapanese({}, vulnerabilities);
-      vulnsToUse = ja.vulnerabilities.map((v, i) => ({ ...v, urls: vulnerabilities[i]?.urls || [] }));
+      vulnsToUse = ja.vulnerabilities.map((v, i) => ({ 
+        ...v, 
+        urls: vulnerabilities[i]?.urls || [],
+        sampleUrls: vulnerabilities[i]?.sampleUrls || []
+      }));
     } catch (e) {
       console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
       // vulnsToUse stays as English vulnerabilities — ZAP PDF still includes all findings

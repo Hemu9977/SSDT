@@ -76,14 +76,14 @@ let _wifAuthClient = null; // holds the AwsClient on ECS so verifyCredentials() 
 
 if (!IS_ECS && process.env.GEMINI_API_KEY) {
   const _rawKey = process.env.GEMINI_API_KEY;
-  if (_rawKey.startsWith('AIza')) {
+  if (_rawKey.startsWith('AIza') || _rawKey.startsWith('AQ')) {
     GEMINI_AUTH_MODE = 'AI_STUDIO';
     ai = new GoogleGenAI({ apiKey: _rawKey });
     console.log(`[Gemini] AUTH_MODE=AI_STUDIO (local dev, GEMINI_API_KEY) endpoint=generativelanguage.googleapis.com`);
     console.log(`[Gemini]   pro=${MODEL_PRO}  flash=${MODEL_FLASH}`);
   } else {
     GEMINI_AUTH_MODE = 'VERTEX_ADC';
-    console.error(`[Gemini] ❌ GEMINI_API_KEY is set but format is invalid (must start with "AIza"). Got: "${_rawKey.slice(0, 12)}…"`);
+    console.error(`[Gemini] ❌ GEMINI_API_KEY is set but format is invalid (must start with "AIza" or "AQ"). Got: "${_rawKey.slice(0, 12)}…"`);
     console.error(`[Gemini]    Falling back to Vertex AI / ambient ADC.`);
     ai = new GoogleGenAI({ vertexai: true, project: VERTEX_PROJECT, location: VERTEX_LOCATION });
     console.log(`[Gemini] AUTH_MODE=VERTEX_ADC (fallback — invalid API key) endpoint=${VERTEX_LOCATION}-aiplatform.googleapis.com`);
@@ -226,14 +226,17 @@ async function _generate(prompt, model, caller = 'unknown') {
   // one check covers all callers (refineReport, PDF formatters, translators).
   assertNoLeakage(prompt, caller);
   const tag = `[Gemini/${model}/${caller}][auth=${GEMINI_AUTH_MODE}]`;
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = 5;
   const timeoutMs = model === MODEL_PRO ? GEMINI_CALL_TIMEOUT_PRO_MS : GEMINI_CALL_TIMEOUT_FLASH_MS;
   let lastError;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      const delay = attempt * 5000;
-      console.log(`${tag} Retry ${attempt}/${MAX_RETRIES - 1} in ${delay / 1000}s…`);
+      // Exponential backoff with full jitter: base 10s, cap 90s.
+      // 503 UNAVAILABLE = Gemini under high demand; needs longer wait than a simple linear ramp.
+      const base = Math.min(10000 * Math.pow(2, attempt - 1), 90000);
+      const delay = Math.floor(base * (0.5 + Math.random() * 0.5)); // 50–100% of base
+      console.log(`${tag} Retry ${attempt}/${MAX_RETRIES - 1} in ${(delay / 1000).toFixed(1)}s… (backoff attempt ${attempt})`);
       await new Promise(r => setTimeout(r, delay));
     }
     try {
@@ -719,7 +722,8 @@ Return a JSON object with this EXACT structure:
         reference: a.reference || '',
         cweid: a.cweid,
         wascid: a.wascid,
-        totalOccurrences: a.totalOccurrences || 0
+        totalOccurrences: a.totalOccurrences || 0,
+        sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || []
       })))}
     },
     {
@@ -775,7 +779,8 @@ IMPORTANT RULES:
       reference:        a.reference        || '',
       cweid:            a.cweid,
       wascid:           a.wascid,
-      totalOccurrences: a.totalOccurrences || 0,
+      totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
+      sampleUrls:       a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
     }));
     console.log(`[Gemini] Added ${zapSection.detailedAlerts.length} detailed alerts to ZAP section`);
   }
