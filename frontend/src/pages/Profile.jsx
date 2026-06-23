@@ -1,12 +1,36 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useTranslation } from '../contexts/TranslationContext';
+import { useUser } from '../contexts/UserContext';
 import '../styles/Profile.scss';
 
 import { API_BASE } from '../config/api';
+
+// Plan definitions — source of truth for the UI
+const PLANS = {
+  monthly: [
+    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: '/月', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: '/月', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: '/月', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+  ],
+  annual: [
+    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: '/年', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: '/年', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: '/年', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+  ],
+  onetime: [
+    { planType: 'trial1', billingCycle: 'onetime', price: '¥20,000', period: '', accounts: 1, scans: 1, targets: 1, severity: 'critical-high' },
+    { planType: 'trial2', billingCycle: 'onetime', price: '¥30,000', period: '', accounts: 1, scans: 2, targets: 1, severity: 'all' },
+  ],
+};
+
+const PLAN_NAMES = { light: 'Light', basic: 'Basic', pro: 'Pro', trial1: 'Trial 1', trial2: 'Trial 2' };
+const BILLING_LABELS = { monthly: 'Monthly', annual: 'Annual', onetime: 'One-Time Trial' };
+const PAYMENT_POLL_MAX_ATTEMPTS = 12;
+const PAYMENT_POLL_INTERVAL_MS = 2000;
 
 const Profile = () => {
   const [profile, setProfile] = useState(null);
@@ -15,57 +39,114 @@ const Profile = () => {
   const [editing, setEditing] = useState(false);
   const [formData, setFormData] = useState({ name: '', bio: '' });
   const [saveMessage, setSaveMessage] = useState('');
-  const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false);
-  const [downgradeDialogOpen, setDowngradeDialogOpen] = useState(false);
+  const [selectedBilling, setSelectedBilling] = useState('monthly');
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentMessage, setPaymentMessage] = useState(null);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
   const { t, currentLang } = useTranslation();
+  const { refreshUser } = useUser();
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const isPlanActive = (data) => {
+    const org = data?.user?.organization;
+    return Boolean(org && org.subscriptionStatus === 'active' && org.planType);
+  };
 
   const fetchProfile = async () => {
     const token = localStorage.getItem('token');
-    console.log('🔍 Profile: Token exists?', !!token);
 
     if (!token) {
-      console.log('❌ Profile: No token found, redirecting to login');
       navigate('/login');
       return;
     }
 
     try {
-      console.log('📡 Profile: Fetching from', `${API_BASE}/api/profile`);
       const res = await fetch(`${API_BASE}/api/profile`, {
-        headers: {
-          'x-auth-token': token
-        }
+        headers: { 'x-auth-token': token }
       });
-
-      console.log('📡 Profile: Response status:', res.status);
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
-        console.error('❌ Profile: Error response:', errorData);
-
         if (res.status === 401) {
-          // Token is invalid or expired - clear it and redirect to login
-          console.log('🔑 Profile: Token invalid/expired, clearing and redirecting...');
           localStorage.removeItem('token');
           setError(t('sessionExpiredLoginAgain'));
           setTimeout(() => navigate('/login'), 2000);
           setLoading(false);
           return;
         }
-
         throw new Error(errorData.message || t('failedFetchProfile'));
       }
 
       const data = await res.json();
-      console.log('✅ Profile: Data received', data.user?.name);
       setProfile(data);
       setFormData({ name: data.user.name, bio: data.user.bio || '' });
+      refreshUser();
       setLoading(false);
+      return data;
     } catch (err) {
-      console.error('❌ Profile fetch error:', err);
       setError(err.message || t('failedLoadProfile'));
       setLoading(false);
+      return null;
+    }
+  };
+
+  const refreshActivationStatus = async () => {
+    setPaymentLoading(true);
+    setPaymentMessage({ type: 'info', text: t('checkingPlanStatus') });
+
+    const data = await fetchProfile();
+    const activated = isPlanActive(data);
+
+    setPaymentMessage({
+      type: activated ? 'success' : 'info',
+      text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+    });
+    setPaymentLoading(false);
+  };
+
+  const waitForPlanActivation = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) return false;
+
+    for (let attempt = 1; attempt <= PAYMENT_POLL_MAX_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch(`${API_BASE}/api/profile`, {
+          headers: { 'x-auth-token': token }
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (isPlanActive(data)) return true;
+        }
+      } catch (err) {
+        // Ignore transient polling errors and continue retrying.
+      }
+
+      if (attempt < PAYMENT_POLL_MAX_ATTEMPTS) {
+        await sleep(PAYMENT_POLL_INTERVAL_MS);
+      }
+    }
+
+    return false;
+  };
+
+  const syncCheckoutSession = async (sessionId) => {
+    const token = localStorage.getItem('token');
+    if (!token || !sessionId) return false;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/stripe/sync-checkout-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+        body: JSON.stringify({ sessionId })
+      });
+
+      return res.ok;
+    } catch (err) {
+      return false;
     }
   };
 
@@ -73,6 +154,43 @@ const Profile = () => {
     fetchProfile();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Handle Stripe return — ?payment=success or ?payment=cancelled
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const payment = params.get('payment');
+    const sessionId = params.get('session_id');
+    if (payment === 'success') {
+      window.history.replaceState({}, '', '/profile');
+
+      const activatePlan = async () => {
+        setPaymentLoading(true);
+        setPaymentMessage({ type: 'info', text: t('paymentProcessing') });
+
+        const synced = await syncCheckoutSession(sessionId);
+        let latestProfile = await fetchProfile();
+        let activated = isPlanActive(latestProfile);
+
+        if (!activated && !synced) {
+          activated = await waitForPlanActivation();
+          latestProfile = await fetchProfile();
+          activated = activated || isPlanActive(latestProfile);
+        }
+
+        setPaymentMessage({
+          type: activated ? 'success' : 'info',
+          text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+        });
+        setPaymentLoading(false);
+      };
+
+      activatePlan();
+    } else if (payment === 'cancelled') {
+      setPaymentMessage({ type: 'info', text: t('paymentCancelled') });
+      window.history.replaceState({}, '', '/profile');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search]);
 
   const handleEdit = () => {
     setEditing(true);
@@ -87,105 +205,65 @@ const Profile = () => {
 
   const handleSave = async () => {
     const token = localStorage.getItem('token');
-
     try {
       const res = await fetch(`${API_BASE}/api/profile`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-auth-token': token
-        },
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
         body: JSON.stringify(formData)
       });
-
-      if (!res.ok) {
-        throw new Error(t('failedUpdateProfile'));
-      }
-
+      if (!res.ok) throw new Error(t('failedUpdateProfile'));
       const data = await res.json();
-
-      // Update profile state
-      setProfile(prev => ({
-        ...prev,
-        user: { ...prev.user, name: data.user.name, bio: data.user.bio }
-      }));
-
+      setProfile(prev => ({ ...prev, user: { ...prev.user, name: data.user.name, bio: data.user.bio } }));
       setEditing(false);
       setSaveMessage(t('profileUpdated'));
-
-      // Clear success message after 3 seconds
       setTimeout(() => setSaveMessage(''), 3000);
     } catch (err) {
-      console.error('Profile update error:', err);
       setSaveMessage(t('failedUpdateProfile'));
     }
   };
 
-  const handleUpgradeToPro = () => {
-    setUpgradeDialogOpen(true);
-  };
-
-  const confirmUpgrade = async () => {
-    setUpgradeDialogOpen(false);
+  const startCheckout = async (planType, billingCycle) => {
+    setPaymentLoading(true);
+    setPaymentMessage(null);
     const token = localStorage.getItem('token');
-
     try {
-      const res = await fetch(`${API_BASE}/api/profile/upgrade-to-pro`, {
+      const res = await fetch(`${API_BASE}/api/stripe/create-checkout-session`, {
         method: 'POST',
-        headers: {
-          'x-auth-token': token
-        }
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+        body: JSON.stringify({ planType, billingCycle })
       });
-
       const data = await res.json();
-
-      if (data.success) {
-        console.log('Successfully upgraded to Pro:', data.message);
-        // Hard refresh the page to reflect changes immediately
-        window.location.reload();
-      } else {
-        console.log('Upgrade failed:', data.message || 'Failed to upgrade to Pro');
-      }
+      if (!res.ok) throw new Error(data.error || t('checkoutFailed'));
+      window.location.href = data.url;
     } catch (err) {
-      console.error('Upgrade error:', err);
+      setPaymentMessage({ type: 'error', text: err.message || t('checkoutFailed') });
+      setPaymentLoading(false);
     }
   };
 
-  const handleDowngradeToFree = () => {
-    setDowngradeDialogOpen(true);
-  };
-
-  const confirmDowngrade = async () => {
-    setDowngradeDialogOpen(false);
+  const cancelSubscription = async () => {
+    setCancelDialogOpen(false);
     const token = localStorage.getItem('token');
-
     try {
-      const res = await fetch(`${API_BASE}/api/profile/downgrade-to-free`, {
+      const res = await fetch(`${API_BASE}/api/stripe/cancel-subscription`, {
         method: 'POST',
-        headers: {
-          'x-auth-token': token
-        }
+        headers: { 'x-auth-token': token }
       });
-
       const data = await res.json();
-
       if (data.success) {
-        console.log('Successfully downgraded to Free account:', data.message);
-        // Hard refresh the page to reflect changes immediately
-        window.location.reload();
+        setPaymentMessage({ type: 'success', text: t('subscriptionCancelled') });
+        fetchProfile();
       } else {
-        console.log('Downgrade failed:', data.message || 'Failed to downgrade to Free');
+        throw new Error(data.error || 'Failed to cancel subscription');
       }
     } catch (err) {
-      console.error('Downgrade error:', err);
+      setPaymentMessage({ type: 'error', text: err.message });
     }
   };
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString(currentLang === 'ja' ? 'ja-JP' : 'en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+      year: 'numeric', month: 'long', day: 'numeric'
     });
   };
 
@@ -194,11 +272,7 @@ const Profile = () => {
       <div className="profile-page">
         <ParticleBackground />
         <Header />
-        <main>
-          <div className="profile-container">
-            <div className="loading">{t('loadingProfile')}</div>
-          </div>
-        </main>
+        <main><div className="profile-container"><div className="loading">{t('loadingProfile')}</div></div></main>
       </div>
     );
   }
@@ -208,16 +282,18 @@ const Profile = () => {
       <div className="profile-page">
         <ParticleBackground />
         <Header />
-        <main>
-          <div className="profile-container">
-            <div className="error">{error}</div>
-          </div>
-        </main>
+        <main><div className="profile-container"><div className="error">{error}</div></div></main>
       </div>
     );
   }
 
   const { user, limits, recentScans } = profile;
+  const org = user.organization;
+  const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
+  const accountTypeClass = hasPlan ? 'paid' : user.accountType;
+  const accountTypeLabel = hasPlan
+    ? `${PLAN_NAMES[org.planType] || org.planType} (${BILLING_LABELS[org.billingCycle] || org.billingCycle})`
+    : user.accountType.toUpperCase();
 
   return (
     <div className="profile-page">
@@ -227,14 +303,36 @@ const Profile = () => {
         <div className="profile-container">
           <div className="profile-header">
             <h1>{t('myProfile')}</h1>
-            {user.isPro && (
-              <span className="pro-badge">{t('pro')}</span>
-            )}
+            {user.isPro && <span className="pro-badge">{PLAN_NAMES[org?.planType] || t('pro')}</span>}
           </div>
 
+          {/* Profile save feedback */}
           {saveMessage && (
             <div className={`save-message ${saveMessage.includes('Failed') ? 'error' : 'success'}`}>
               {saveMessage}
+            </div>
+          )}
+
+          {/* Payment feedback banner */}
+          {paymentMessage && (
+            <div className={`save-message ${paymentMessage.type === 'success' ? 'success' : paymentMessage.type === 'error' ? 'error' : 'info'}`}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{paymentMessage.text}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {paymentMessage.type === 'info' && (
+                  <button
+                    onClick={refreshActivationStatus}
+                    disabled={paymentLoading}
+                    className="payment-refresh-btn"
+                  >
+                    {paymentLoading ? t('checkingPlanStatus') : t('refreshPlanStatus')}
+                  </button>
+                )}
+                <button
+                  onClick={() => setPaymentMessage(null)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: '1.2rem', lineHeight: 1, padding: '0 0.25rem' }}
+                >×</button>
+              </div>
             </div>
           )}
 
@@ -256,49 +354,31 @@ const Profile = () => {
               <div className="info-row">
                 <label>{t('name')}:</label>
                 {editing ? (
-                  <input
-                    type="text"
-                    value={formData.name}
+                  <input type="text" value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="edit-input"
-                  />
-                ) : (
-                  <span>{user.name}</span>
-                )}
+                    className="edit-input" />
+                ) : <span>{user.name}</span>}
               </div>
-
               <div className="info-row">
                 <label>{t('email')}:</label>
                 <span>{user.email}</span>
               </div>
-
               <div className="info-row">
                 <label>{t('bio')}:</label>
                 {editing ? (
-                  <textarea
-                    value={formData.bio}
+                  <textarea value={formData.bio}
                     onChange={(e) => setFormData({ ...formData, bio: e.target.value })}
-                    className="edit-textarea"
-                    placeholder={t('bioPlaceholder')}
-                    maxLength={500}
-                  />
-                ) : (
-                  <span>{user.bio || t('noBioAdded')}</span>
-                )}
+                    className="edit-textarea" placeholder={t('bioPlaceholder')} maxLength={500} />
+                ) : <span>{user.bio || t('noBioAdded')}</span>}
               </div>
-
               <div className="info-row">
                 <label>{t('accountType')}:</label>
-                <span className={`account-type ${user.accountType}`}>
-                  {user.accountType.toUpperCase()}
-                </span>
+                <span className={`account-type ${accountTypeClass}`}>{accountTypeLabel}</span>
               </div>
-
               <div className="info-row">
                 <label>{t('memberSince')}:</label>
                 <span>{formatDate(user.createdAt)}</span>
               </div>
-
               <div className="info-row">
                 <label>{t('lastLogin')}:</label>
                 <span>{formatDate(user.lastLoginAt)}</span>
@@ -335,16 +415,10 @@ const Profile = () => {
             {recentScans.length > 0 ? (
               <div className="recent-scans">
                 {recentScans.map((scan) => (
-                  <div
-                    key={scan._id}
-                    className="scan-item clickable"
+                  <div key={scan._id} className="scan-item clickable"
                     onClick={() => navigate(`/scan/${scan.analysisId}`)}
-                    style={{
-                      cursor: 'pointer',
-                      transition: 'all 0.2s ease'
-                    }}
-                    title={t('clickViewScanResults', { status: scan.status })}
-                  >
+                    style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
+                    title={t('clickViewScanResults', { status: scan.status })}>
                     <div className="scan-target">{scan.target}</div>
                     <div className="scan-details">
                       {scan.triggerSource === 'scheduled' && (
@@ -364,65 +438,183 @@ const Profile = () => {
             )}
           </div>
 
-          {/* Upgrade to Pro (only for free users) */}
-          {!user.isPro && (
-            <div className="profile-section pro-upgrade-section">
-              <h2>{t('upgradeToPro')}</h2>
-              <div className="pro-features">
-                <p>{t('unlockPremiumFeatures')}</p>
-                <ul>
-                  <li>{t('unlimitedScans')}</li>
-                  <li>{t('largerFileLimit')}</li>
-                  <li>{t('priorityQueue')}</li>
-                  <li>{t('advancedAnalyticsReports')}</li>
-                  <li>{t('apiAccessComingSoon')}</li>
-                </ul>
-                <button onClick={handleUpgradeToPro} className="btn-upgrade">
-                  {t('upgradePrice')}
-                </button>
-                <p className="upgrade-note">
-                  {t('paymentComingSoon')}
-                </p>
+          {/* ── Active Plan Section ─────────────────────────────────────────── */}
+          {hasPlan && (
+            <div className="profile-section pro-info-section">
+              <h2>{t('currentPlanTitle')}</h2>
+              <div className="pro-info">
+                {/* Plan name + status row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem' }}>
+                  <div>
+                    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '2px' }}>
+                      {PLAN_NAMES[org.planType] || org.planType}
+                    </div>
+                    <div style={{ color: 'var(--foreground-darker)', textTransform: 'capitalize', marginTop: '0.25rem' }}>
+                      {BILLING_LABELS[org.billingCycle] || org.billingCycle}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--foreground-darker)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '0.25rem' }}>
+                      {t('planStatus')}
+                    </div>
+                    <div style={{
+                      fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px',
+                      color: org.subscriptionStatus === 'active' ? '#00d084' : org.subscriptionStatus === 'past_due' ? '#ffb900' : '#e81123'
+                    }}>
+                      {org.subscriptionStatus === 'active' ? t('planStatusActive')
+                        : org.subscriptionStatus === 'past_due' ? t('planStatusPastDue')
+                        : org.subscriptionStatus}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Scan usage progress bar */}
+                {org.scanLimit > 0 && (
+                  <div className="limit-progress-container">
+                    <div className="limit-progress-text">
+                      {t('scansUsedLabel')}: <strong>{org.scansUsed} / {org.scanLimit}</strong>
+                    </div>
+                    <div className="limit-progress-track">
+                      <div className="limit-progress-fill"
+                        style={{ width: `${Math.min(100, (org.scansUsed / org.scanLimit) * 100)}%` }} />
+                    </div>
+                  </div>
+                )}
+
+                {/* One-time scans remaining */}
+                {org.billingCycle === 'onetime' && (
+                  <p style={{ margin: '1rem 0', color: 'var(--foreground-darker)' }}>
+                    {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.oneTimeRemainingScans}</strong>
+                  </p>
+                )}
+
+                {/* Seats */}
+                {org.seatsAllowed > 1 && (
+                  <p style={{ margin: '0.5rem 0', color: 'var(--foreground-darker)' }}>
+                    {t('seatsUsedLabel')}: <strong style={{ color: 'var(--foreground)' }}>{org.seatsUsed} / {org.seatsAllowed}</strong>
+                  </p>
+                )}
+
+                {/* Expiry */}
+                {org.expiresAt && (
+                  <p className="expiry-date" style={{ fontSize: '1rem', margin: '1rem 0' }}>
+                    {t('planExpiresLabel')}: <strong>{formatDate(org.expiresAt)}</strong>
+                  </p>
+                )}
+
+                {/* Cancel button — only for recurring subscriptions */}
+                {org.billingCycle !== 'onetime' && (
+                  <>
+                    <button onClick={() => setCancelDialogOpen(true)} className="btn-downgrade">
+                      {t('cancelProSubscription')}
+                    </button>
+                    <p className="downgrade-note">{t('cancelSubscriptionNote')}</p>
+                  </>
+                )}
               </div>
             </div>
           )}
 
-          {/* Pro Account Info (only for pro users) */}
-          {user.isPro && user.proExpiresAt && (
-            <div className="profile-section pro-info-section">
-              <h2>{t('proSubscription')}</h2>
-              <div className="pro-info">
-                <p>{t('proActiveUntil')}</p>
-                <p className="expiry-date">{formatDate(user.proExpiresAt)}</p>
-                <button onClick={handleDowngradeToFree} className="btn-downgrade">
-                  {t('cancelProReturnFree')}
-                </button>
-                <p className="downgrade-note">
-                  {t('prototypeNote')}
-                </p>
+          {/* ── Plan Selection (for users without an active plan) ────────────── */}
+          {!hasPlan && (
+            <div className="profile-section pro-upgrade-section">
+              <h2>{t('choosePlan')}</h2>
+
+              {/* Billing cycle tabs */}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '2rem', flexWrap: 'wrap' }}>
+                {['monthly', 'annual', 'onetime'].map(bc => (
+                  <button key={bc} onClick={() => setSelectedBilling(bc)} style={{
+                    padding: '0.5rem 1.25rem',
+                    borderRadius: '2rem',
+                    border: selectedBilling === bc ? '2px solid var(--accent)' : '1px solid rgba(255,255,255,0.2)',
+                    background: selectedBilling === bc ? 'var(--accent)' : 'transparent',
+                    color: selectedBilling === bc ? 'var(--background)' : 'var(--foreground)',
+                    cursor: 'pointer',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    fontSize: '0.8rem',
+                    letterSpacing: '1px',
+                    transition: 'all 0.2s',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem'
+                  }}>
+                    {BILLING_LABELS[bc]}
+                    {bc === 'annual' && (
+                      <span style={{
+                        fontSize: '0.7rem', fontWeight: 800,
+                        color: selectedBilling === bc ? 'rgba(0,0,0,0.6)' : '#00d084',
+                        background: selectedBilling === bc ? 'rgba(0,0,0,0.15)' : 'rgba(0,208,132,0.15)',
+                        padding: '0.1rem 0.4rem', borderRadius: '4px'
+                      }}>17% OFF</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {/* Plan cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
+                {PLANS[selectedBilling].map(plan => (
+                  <div key={plan.planType} style={{
+                    border: plan.planType === 'pro' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
+                    borderRadius: '1.5rem',
+                    padding: '2rem 1.5rem',
+                    background: plan.planType === 'pro' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem',
+                    position: 'relative',
+                    boxShadow: plan.planType === 'pro' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
+                  }}>
+                    {plan.planType === 'pro' && (
+                      <div style={{
+                        position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
+                        background: 'var(--accent)', color: 'var(--background)',
+                        fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
+                        borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
+                        whiteSpace: 'nowrap'
+                      }}>Most Popular</div>
+                    )}
+
+                    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'pro' ? '0.5rem' : 0 }}>
+                      {PLAN_NAMES[plan.planType]}
+                    </div>
+
+                    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
+                      {plan.price}
+                      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period}</span>
+                    </div>
+
+                    <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <li>✓ {plan.accounts} {plan.accounts === 1 ? 'account' : 'accounts'}</li>
+                      <li>✓ {plan.scans} scan{plan.scans !== 1 ? 's' : ''}/month per target</li>
+                      <li>✓ {plan.targets} target{plan.targets !== 1 ? 's' : ''}/month</li>
+                      <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
+                        ✓ {plan.severity === 'all' ? 'All severity levels' : 'Critical + High only'}
+                      </li>
+                    </ul>
+
+                    <button
+                      onClick={() => startCheckout(plan.planType, plan.billingCycle)}
+                      disabled={paymentLoading}
+                      className="btn-upgrade"
+                      style={{ marginTop: 'auto', opacity: paymentLoading ? 0.7 : 1 }}
+                    >
+                      {paymentLoading ? t('startingCheckout') : t('selectPlan')}
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           )}
         </div>
       </main>
 
-      {/* Upgrade Confirmation Dialog */}
+      {/* Cancel subscription confirmation dialog */}
       <ConfirmDialog
-        isOpen={upgradeDialogOpen}
-        onConfirm={confirmUpgrade}
-        onCancel={() => setUpgradeDialogOpen(false)}
-        title={t('upgradeToPro')}
-        message={t('upgradeConfirmMessage')}
-        confirmText={t('upgradeNow')}
-        cancelText={t('cancel')}
-        type="upgrade"
-      />
-
-      {/* Downgrade Confirmation Dialog */}
-      <ConfirmDialog
-        isOpen={downgradeDialogOpen}
-        onConfirm={confirmDowngrade}
-        onCancel={() => setDowngradeDialogOpen(false)}
+        isOpen={cancelDialogOpen}
+        onConfirm={cancelSubscription}
+        onCancel={() => setCancelDialogOpen(false)}
         title={t('cancelProSubscription')}
         message={t('downgradeConfirmMessage')}
         confirmText={t('cancelSubscription')}
