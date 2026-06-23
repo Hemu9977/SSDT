@@ -6,13 +6,18 @@ import React, { useState, useEffect } from 'react';
 import '../styles/ZapReportEnhanced.scss';
 
 import { API_BASE } from '../config/api';
+import { useTranslation } from '../contexts/TranslationContext';
 
-const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
+const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLang = 'en' }) => {
+    const { t } = useTranslation();
     const [expandedAlerts, setExpandedAlerts] = useState(new Set());
     const [downloadingDetailed, setDownloadingDetailed] = useState(false);
     const [pdfDropdownOpen, setPdfDropdownOpen] = useState(false);
     const [downloadingPdf, setDownloadingPdf] = useState(false);
     const [pdfLang, setPdfLang] = useState(null); // Track which language is downloading
+    const [translatedAlerts, setTranslatedAlerts] = useState(null);
+    const [isTranslating, setIsTranslating] = useState(false);
+    const translateFetchedRef = React.useRef(false); // tracks if fetch was initiated for current scan+lang
 
     // Close PDF dropdown when clicking outside
     useEffect(() => {
@@ -24,6 +29,51 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
         document.addEventListener('click', handleClickOutside);
         return () => document.removeEventListener('click', handleClickOutside);
     }, [pdfDropdownOpen]);
+
+    // Translate dynamic ZAP alert content (names, descriptions, solutions) via Gemini.
+    // Uses a ref guard + AbortController to prevent double-fetch in React StrictMode.
+    useEffect(() => {
+        if (currentLang !== 'ja') {
+            setTranslatedAlerts(null);
+            translateFetchedRef.current = false;
+            return;
+        }
+        if (!zapData?.alerts?.length) return;
+        if (translateFetchedRef.current) return; // already fetching or fetched for this scan
+
+        translateFetchedRef.current = true;
+        const controller = new AbortController();
+        const alerts = zapData.alerts;
+        // Flat text array: [name0, desc0, sol0, name1, desc1, sol1, ...]
+        const texts = alerts.flatMap(a => [a.alert, a.description, a.solution]);
+
+        setIsTranslating(true);
+        fetch(`${API_BASE}/api/translate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-auth-token': localStorage.getItem('token')
+            },
+            body: JSON.stringify({ texts, targetLang: 'ja' }),
+            signal: controller.signal
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.translated) return;
+                const translated = data.translated;
+                const result = alerts.map((a, i) => ({
+                    ...a,
+                    alert: translated[i * 3] || a.alert,
+                    description: translated[i * 3 + 1] || a.description,
+                    solution: translated[i * 3 + 2] || a.solution,
+                }));
+                setTranslatedAlerts(result);
+            })
+            .catch(err => { if (err.name !== 'AbortError') console.error('ZAP translation error:', err); })
+            .finally(() => setIsTranslating(false));
+
+        return () => { controller.abort(); translateFetchedRef.current = false; };
+    }, [currentLang, zapData?.alerts]);
 
     if (!zapData || !zapData.alerts) {
         return null;
@@ -61,7 +111,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
             document.body.removeChild(a);
         } catch (error) {
             console.error('Download error:', error);
-            alert('Failed to download detailed report');
+            alert(t('failedDownloadDetailedReport'));
         } finally {
             setDownloadingDetailed(false);
         }
@@ -81,14 +131,14 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
                 if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                    alert('Gemini key is exhausted');
+                    alert(t('geminiKeyExhausted'));
                     throw new Error('Gemini key is exhausted');
                 }
                 if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
-                    alert('English PDF must contain English only');
+                    alert(t('englishPdfOnly'));
                     throw new Error(errorData.error || 'English-only validation failed');
                 }
-                throw new Error(errorData.error || 'PDF download failed');
+                throw new Error(errorData.error || t('pdfDownloadFailed'));
             }
 
             const blob = await response.blob();
@@ -102,7 +152,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
             document.body.removeChild(a);
         } catch (error) {
             console.error('PDF download error:', error);
-            alert(`Failed to download PDF report: ${error.message}`);
+            alert(t('failedDownloadPdfReport', { message: error.message }));
         } finally {
             setDownloadingPdf(false);
             setPdfLang(null);
@@ -127,23 +177,32 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
         }
     };
 
+    const riskLabels = {
+        'High': t('high'),
+        'Medium': t('medium'),
+        'Low': t('low'),
+        'Informational': t('informational'),
+    };
+
+    const displayAlerts = (currentLang === 'ja' && translatedAlerts) ? translatedAlerts : zapData.alerts;
+
     return (
         <div className="zap-report-enhanced">
             <div className="report-header">
-                <h3>⚡ Vulnerability Analysis Results</h3>
+                <h3>⚡ {t('vulnerabilityAnalysisResults')}</h3>
                 <div className="report-stats">
                     <span className="stat">
-                        <strong>{zapData.totalAlerts}</strong> Alert Types
+                        <strong>{zapData.totalAlerts}</strong> {t('alertTypes')}
                     </span>
                     <span className="stat">
-                        <strong>{zapData.totalOccurrences}</strong> Total Occurrences
+                        <strong>{zapData.totalOccurrences}</strong> {t('totalOccurrences')}
                     </span>
                     <button
                         onClick={downloadDetailedReport}
                         disabled={downloadingDetailed}
                         className="download-btn"
                     >
-                        {downloadingDetailed ? 'Downloading...' : '📥 JSON Report'}
+                        {downloadingDetailed ? t('downloading') : `📥 ${t('jsonReport')}`}
                     </button>
 
                     {/* PDF Download Dropdown */}
@@ -156,7 +215,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                             disabled={downloadingPdf}
                             className="download-btn pdf-btn"
                         >
-                            {downloadingPdf ? `Generating ${pdfLang?.toUpperCase()}...` : '📄 PDF Report ▼'}
+                            {downloadingPdf ? t('generatingLang', { lang: pdfLang?.toUpperCase() }) : `📄 ${t('pdfReport')} ▼`}
                         </button>
                         {pdfDropdownOpen && (
                             <div className="zap-pdf-dropdown">
@@ -164,7 +223,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                                     onClick={() => downloadPdfReport('en')}
                                     className="dropdown-item"
                                 >
-                                    🇺🇸 English PDF
+                                    🇺🇸 {t('englishPdf')}
                                 </button>
                                 <button
                                     onClick={() => downloadPdfReport('ja')}
@@ -183,15 +242,20 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                 {Object.entries(zapData.riskCounts || {}).map(([risk, count]) => (
                     count > 0 && (
                         <div key={risk} className={`risk-badge risk-${risk.toLowerCase()}`}>
-                            {getRiskIcon(risk)} {risk}: {count}
+                            {getRiskIcon(risk)} {riskLabels[risk] || risk}: {count}
                         </div>
                     )
                 ))}
             </div>
 
+            {/* Translation status */}
+            {isTranslating && (
+                <p style={{ color: 'var(--accent)', padding: '0.5rem 0' }}>🌐 {t('translatingVulnerabilityData')}</p>
+            )}
+
             {/* Alert List */}
             <div className="alerts-list">
-                {zapData.alerts.map((alert, idx) => {
+                {displayAlerts.map((alert, idx) => {
                     const isExpanded = expandedAlerts.has(alert.alert);
 
                     return (
@@ -205,12 +269,12 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                                     <span className="alert-icon">{getRiskIcon(alert.risk)}</span>
                                     <span className="alert-name">{alert.alert}</span>
                                     <span className="occurrence-count">
-                                        {alert.totalOccurrences} occurrence{alert.totalOccurrences !== 1 ? 's' : ''}
+                                        {alert.totalOccurrences} {alert.totalOccurrences !== 1 ? t('occurrences') : t('occurrence')}
                                     </span>
                                 </div>
                                 <div className="alert-meta">
                                     <span className={`risk-label risk-${alert.risk.toLowerCase()}`}>
-                                        {alert.risk}
+                                        {riskLabels[alert.risk] || alert.risk}
                                     </span>
                                     <span className="expand-icon">
                                         {isExpanded ? '▼' : '▶'}
@@ -221,17 +285,17 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                             {isExpanded && (
                                 <div className="alert-details">
                                     <div className="detail-section">
-                                        <h4>Description</h4>
+                                        <h4>{t('description')}</h4>
                                         <p>{alert.description}</p>
                                     </div>
 
                                     <div className="detail-section">
-                                        <h4>Solution</h4>
+                                        <h4>{t('solution')}</h4>
                                         <p>{alert.solution}</p>
                                     </div>
 
                                     <div className="detail-section">
-                                        <h4>Affected URLs ({alert.sampleUrls.length} shown{alert.hasMoreUrls ? ', more in full report' : ''})</h4>
+                                        <h4>{t('affectedUrls', { count: alert.sampleUrls.length, more: alert.hasMoreUrls ? t('moreInFullReport') : '' })}</h4>
                                         <ul className="url-list">
                                             {alert.sampleUrls.map((url, urlIdx) => (
                                                 <li key={urlIdx} className="url-item">
@@ -249,8 +313,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                                         </ul>
                                         {alert.hasMoreUrls && (
                                             <p className="more-urls-notice">
-                                                ⚠️ This vulnerability affects {alert.totalOccurrences} URLs total.
-                                                Download the full report to see all affected URLs.
+                                                ⚠️ {t('vulnerabilityAffectsUrls', { count: alert.totalOccurrences })}
                                             </p>
                                         )}
                                     </div>
@@ -261,9 +324,9 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap' }) => {
                 })}
             </div>
 
-            {zapData.alerts.length === 0 && (
+            {displayAlerts.length === 0 && (
                 <div className="no-alerts">
-                    ✅ No security vulnerabilities detected. Great job!
+                    ✅ {t('noVulnerabilities')}
                 </div>
             )}
         </div>

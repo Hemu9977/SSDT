@@ -111,25 +111,33 @@ const AuthenticatedScanPanel = () => {
     return () => document.removeEventListener('click', handleClickOutside);
   }, [pdfDropdownOpen]);
 
+  const reportTranslateFetchedRef = React.useRef(false);
+
   // Reset AI report translation when a new scan begins
   useEffect(() => {
     setTranslatedReport(null);
     setIsTranslatingReport(false);
+    reportTranslateFetchedRef.current = false;
   }, [report?.analysisId]);
 
   // Translate the AI-generated security report when the user switches to Japanese.
   // Uses Gemini via POST /api/translate because the report is dynamic markdown content.
+  // ref guard avoids stale closure — translatedReport never needs to be in the dep array.
   useEffect(() => {
-    if (currentLang !== 'ja') return;
+    if (currentLang !== 'ja') return; // don't clear translatedReport — keep cache for next JA toggle
     if (!report?.refinedReport) return;
-    if (translatedReport !== null) return; // already translated for this scan
+    if (reportTranslateFetchedRef.current) return; // already fetching or fetched
 
+    reportTranslateFetchedRef.current = true;
     const controller = new AbortController();
     setIsTranslatingReport(true);
 
     fetch(`${API_BASE}/api/translate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-auth-token': localStorage.getItem('token'),
+      },
       body: JSON.stringify({ texts: [report.refinedReport], targetLang: 'ja' }),
       signal: controller.signal,
     })
@@ -138,8 +146,8 @@ const AuthenticatedScanPanel = () => {
       .catch(err => { if (err.name !== 'AbortError') console.error('[AI Report] Translation failed:', err.message); })
       .finally(() => setIsTranslatingReport(false));
 
-    return () => controller.abort();
-  }, [currentLang, report?.refinedReport, translatedReport]);
+    return () => { controller.abort(); reportTranslateFetchedRef.current = false; };
+  }, [currentLang, report?.refinedReport]);
 
   // Resume scan on page refresh (like normal scan)
   useEffect(() => {
@@ -1447,6 +1455,7 @@ const AuthenticatedScanPanel = () => {
                       zapData={backendZapData}
                       scanId={report?.scanId || report?.analysisId}
                       apiPrefix="/api/zap-auth"
+                      currentLang={currentLang}
                     />
                   )}
 
@@ -1474,38 +1483,36 @@ const AuthenticatedScanPanel = () => {
                       </summary>
                       <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
                         <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
-                          <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>Security Verdict</h5>
-                          <p><b>Overall:</b> <span style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084', fontWeight: 'bold' }}>{report.urlscanData.verdicts?.overall?.malicious ? 'MALICIOUS' : 'CLEAN'}</span></p>
-                          <p><b>Threat Score:</b> {report.urlscanData.verdicts?.overall?.score || 0}</p>
-                          {report.urlscanData.verdicts?.urlscan?.score > 0 && (<p><b>URLScan Score:</b> {report.urlscanData.verdicts.urlscan.score}</p>)}
-                          {report.urlscanData.verdicts?.engines?.malicious > 0 && (<p><b>Engine Detections:</b> <span style={{ color: '#e81123' }}>{report.urlscanData.verdicts.engines.malicious} malicious</span></p>)}
-                          {report.urlscanData.verdicts?.community?.score > 0 && (<p><b>Community Score:</b> {report.urlscanData.verdicts.community.score}</p>)}
+                          <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>🛡️ {t('urlscanSecurityVerdict')}</h5>
+                          <p><b>{t('urlscanOverall')}:</b> <span style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084', fontWeight: 'bold' }}>{report.urlscanData.verdicts?.overall?.malicious ? t('urlscanMalicious') : t('urlscanClean')}</span></p>
+                          <p><b>{t('urlscanThreatScore')}:</b> {report.urlscanData.verdicts?.overall?.score || 0}</p>
+                          {report.urlscanData.verdicts?.urlscan?.score > 0 && (<p><b>{t('urlscanUrlscanScore')}:</b> {report.urlscanData.verdicts.urlscan.score}</p>)}
+                          {report.urlscanData.verdicts?.engines?.malicious > 0 && (<p><b>{t('urlscanEngineDetections')}:</b> <span style={{ color: '#e81123' }}>{t('urlscanMaliciousCount', { count: report.urlscanData.verdicts.engines.malicious })}</span></p>)}
+                          {report.urlscanData.verdicts?.community?.score > 0 && (<p><b>{t('urlscanCommunityScore')}:</b> {report.urlscanData.verdicts.community.score}</p>)}
                         </div>
                         {report.urlscanData.page && (
                           <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
-                            <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>Page Information</h5>
-                            <p><b>Domain:</b> {report.urlscanData.page.domain || 'N/A'}</p>
-                            <p><b>IP Address:</b> {report.urlscanData.page.ip || 'N/A'}</p>
-                            <p><b>Country:</b> {report.urlscanData.page.country || 'N/A'}</p>
-                            <p><b>Server:</b> {report.urlscanData.page.server || 'N/A'}</p>
-                            {report.urlscanData.page.tlsIssuer && (<p><b>TLS Issuer:</b> {report.urlscanData.page.tlsIssuer}</p>)}
-                            {report.urlscanData.page.tlsValidDays && (<p><b>TLS Valid Days:</b> {report.urlscanData.page.tlsValidDays}</p>)}
+                            <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📄 {t('urlscanPageInformation')}</h5>
+                            <p><b>{t('urlscanDomain')}:</b> {report.urlscanData.page.domain || 'N/A'}</p>
+                            <p><b>{t('urlscanIpAddress')}:</b> {report.urlscanData.page.ip || 'N/A'}</p>
+                            <p><b>{t('urlscanCountry')}:</b> {report.urlscanData.page.country || 'N/A'}</p>
+                            <p><b>{t('urlscanServer')}:</b> {report.urlscanData.page.server || 'N/A'}</p>
+                            {report.urlscanData.page.tlsIssuer && (<p><b>{t('urlscanTlsIssuer')}:</b> {report.urlscanData.page.tlsIssuer}</p>)}
+                            {report.urlscanData.page.tlsValidDays && (<p><b>{t('urlscanTlsValidDays')}:</b> {report.urlscanData.page.tlsValidDays}</p>)}
                           </div>
                         )}
                         {report.urlscanData.stats && (
                           <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
-                            <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>Network Statistics</h5>
-                            <p><b>HTTP Requests:</b> {report.urlscanData.stats.requests || 0}</p>
-                            <p><b>Unique IPs:</b> {report.urlscanData.stats.uniqIPs || 0}</p>
-                            <p><b>Unique Countries:</b> {report.urlscanData.stats.uniqCountries || 0}</p>
-                            <p><b>Data Transferred:</b> {report.urlscanData.stats.dataLength ? `${(report.urlscanData.stats.dataLength / 1024).toFixed(1)} KB` : 'N/A'}</p>
+                            <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📊 {t('urlscanNetworkStatistics')}</h5>
+                            <p><b>{t('urlscanHttpRequests')}:</b> {report.urlscanData.stats.requests || 0}</p>
+                            <p><b>{t('urlscanUniqueIps')}:</b> {report.urlscanData.stats.uniqIPs || 0}</p>
+                            <p><b>{t('urlscanUniqueCountries')}:</b> {report.urlscanData.stats.uniqCountries || 0}</p>
+                            <p><b>{t('urlscanDataTransferred')}:</b> {report.urlscanData.stats.dataLength ? `${(report.urlscanData.stats.dataLength / 1024).toFixed(1)} KB` : 'N/A'}</p>
                           </div>
                         )}
-                        {report.urlscanData.reportUrl && (
-                          <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px', textAlign: 'center' }}>
-                            <a href={report.urlscanData.reportUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline', fontWeight: 'bold', fontSize: '1rem' }}>View Full URLScan.io Report</a>
-                          </div>
-                        )}
+                        <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.82rem', color: '#888', borderLeft: '3px solid var(--accent)' }}>
+                          ✅ {t('urlscanAllDataShown')}
+                        </div>
                       </div>
                     </details>
                   )}
@@ -1513,18 +1520,50 @@ const AuthenticatedScanPanel = () => {
                   {/* Observatory Summary */}
                   {observatoryData ? (
                     <div className="report-summary" style={{ marginTop: '2rem' }}>
-                      <h4>{t('mozillaObservatorySecurityConfiguration')}</h4>
-                      <p><b>Security Grade:</b> <span style={{ color: getObservatoryGradeColor(observatoryData.grade), fontWeight: 'bold', fontSize: '1.2rem' }}>{observatoryData.grade}</span></p>
-                      <p><b>Score:</b> {observatoryData.score}/100</p>
-                      <p><b>Tests Passed:</b> {observatoryData.tests_passed}/{observatoryData.tests_quantity}</p>
-                      <p><b>Tests Failed:</b> {observatoryData.tests_failed}/{observatoryData.tests_quantity}</p>
-                      <p><b>View Full Report:</b>{' '}<a href={`https://developer.mozilla.org/en-US/observatory/analyze?host=${report?.target ? encodeURIComponent(new URL(report.target).hostname) : ''}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline', fontWeight: 'bold' }}>Mozilla Observatory Report</a></p>
+                      <h4>🔒 {t('mozillaObservatorySecurityConfiguration')}</h4>
+                      <p><b>{t('obsSecurityGrade')}:</b> <span style={{ color: getObservatoryGradeColor(observatoryData.grade), fontWeight: 'bold', fontSize: '1.2rem' }}>{observatoryData.grade}</span></p>
+                      <p><b>{t('obsScore')}:</b> {observatoryData.score}/100</p>
+                      <p><b>{t('obsTestsPassed')}:</b> <span style={{ color: '#00d084', fontWeight: 'bold' }}>{observatoryData.tests_passed}/{observatoryData.tests_quantity}</span></p>
+                      <p><b>{t('obsTestsFailed')}:</b> <span style={{ color: observatoryData.tests_failed > 0 ? '#e81123' : '#00d084', fontWeight: 'bold' }}>{observatoryData.tests_failed}/{observatoryData.tests_quantity}</span></p>
+
+                      {/* Grade interpretation */}
+                      {(() => {
+                        const g = (observatoryData.grade || '').charAt(0);
+                        const gradeMap = {
+                          'A': { label: t('obsGradeA'), color: '#00d084', icon: '✅' },
+                          'B': { label: t('obsGradeB'), color: '#00d084', icon: '🟢' },
+                          'C': { label: t('obsGradeC'), color: '#ffb900', icon: '⚠️' },
+                          'D': { label: t('obsGradeD'), color: '#ff8c00', icon: '🔴' },
+                          'F': { label: t('obsGradeF'), color: '#e81123', icon: '🔴' },
+                        };
+                        const info = gradeMap[g];
+                        if (!info) return null;
+                        return (
+                          <div style={{ background: theme === 'light' ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.4)', border: `1px solid ${info.color}`, borderRadius: '6px', padding: '0.75rem 1rem', marginTop: '0.5rem' }}>
+                            <p style={{ margin: 0, fontWeight: 'bold', color: info.color }}>{info.icon} {info.label}</p>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Remediation guidance for poor grades */}
+                      {observatoryData.tests_failed > 0 && (
+                        <div style={{ background: theme === 'light' ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.4)', border: '1px solid #ffb900', borderRadius: '6px', padding: '0.75rem 1rem', marginTop: '0.75rem' }}>
+                          <p style={{ margin: '0 0 0.4rem 0', fontWeight: 'bold' }}>💡 {t('obsRecommendedFixes')}</p>
+                          <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.875rem', lineHeight: '1.7' }}>
+                            <li><b>Content-Security-Policy (CSP)</b> — {t('obsCspDesc')}</li>
+                            <li><b>Strict-Transport-Security (HSTS)</b> — {t('obsHstsDesc')}</li>
+                            <li><b>X-Content-Type-Options: nosniff</b> — {t('obsXctoDesc')}</li>
+                            <li><b>X-Frame-Options / CSP frame-ancestors</b> — {t('obsXfoDesc')}</li>
+                            <li><b>Referrer-Policy</b> — {t('obsRpDesc')}</li>
+                            <li><b>Permissions-Policy</b> — {t('obsPpDesc')}</li>
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="report-summary" style={{ marginTop: '2rem', opacity: 0.7 }}>
-                      <h4>{t('mozillaObservatorySecurityConfiguration')}</h4>
-                      <p style={{ color: '#888' }}><i>Observatory scan data not available for this URL.</i></p>
-                      <p><b>Manual Scan:</b>{' '}<a href={`https://developer.mozilla.org/en-US/observatory/analyze?host=${report?.target ? encodeURIComponent(new URL(report.target).hostname) : ''}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', textDecoration: 'underline', fontWeight: 'bold' }}>Run Mozilla Observatory Scan</a></p>
+                      <h4>🔒 {t('mozillaObservatorySecurityConfiguration')}</h4>
+                      <p style={{ color: '#888' }}><i>{t('obsNoData')}</i></p>
                     </div>
                   )}
 
