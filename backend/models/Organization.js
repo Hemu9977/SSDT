@@ -30,6 +30,7 @@ const OrganizationSchema = new mongoose.Schema({
   targetScanCounts: { type: Map, of: Number, default: {} },
   oneTimeRemainingScans: { type: Number, default: 0 },
   stripeSubscriptionId: { type: String, default: null },
+  stripeCheckoutSessionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },
   lastScanReset: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }

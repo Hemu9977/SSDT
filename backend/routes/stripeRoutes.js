@@ -99,7 +99,7 @@ router.post('/create-checkout-session', auth, async (req, res) => {
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
       mode: isOnetime ? 'payment' : 'subscription',
-      success_url: `${frontendBase}/profile?payment=success&plan=${key}`,
+      success_url: `${frontendBase}/profile?payment=success&plan=${key}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${frontendBase}/profile?payment=cancelled`,
       metadata: {
         userId: user._id.toString(),
@@ -154,6 +154,44 @@ router.get('/subscription', auth, async (req, res) => {
   } catch (err) {
     console.error('❌ Subscription fetch error:', err.message);
     res.status(500).json({ error: 'Failed to fetch subscription' });
+  }
+});
+
+// ─── POST /api/stripe/sync-checkout-session ──────────────────────────────────
+// Lets the profile page confirm the just-completed Checkout session immediately
+// after Stripe redirects back, instead of relying only on webhook timing.
+router.post('/sync-checkout-session', auth, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'sessionId is required' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const metadataUserId = session.metadata?.userId;
+
+    if (!metadataUserId || metadataUserId !== req.user.id) {
+      return res.status(403).json({ error: 'Checkout session does not belong to this user' });
+    }
+
+    const isComplete = session.status === 'complete';
+    const isPaid = session.payment_status === 'paid' || session.mode === 'subscription';
+
+    if (!isComplete || !isPaid) {
+      return res.status(409).json({
+        error: 'Checkout session is not fully paid yet',
+        status: session.status,
+        paymentStatus: session.payment_status
+      });
+    }
+
+    await handleCheckoutComplete(session);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Checkout session sync error:', err.message);
+    res.status(500).json({ error: 'Failed to sync checkout session' });
   }
 });
 
@@ -354,9 +392,17 @@ async function handleCheckoutComplete(session) {
     // so org is fully configured before anything is written to DB
   }
 
+  if (org.stripeCheckoutSessionId === session.id && org.subscriptionStatus === 'active') {
+    user.stripePending = false;
+    await user.save();
+    console.log(`♻️  [webhook] Checkout session ${session.id} already applied for Org ${org._id}.`);
+    return;
+  }
+
   org.planType = planType || null;
   org.billingCycle = billingCycle || null;
   org.subscriptionStatus = 'active';
+  org.stripeCheckoutSessionId = session.id;
 
   if (billingCycle === 'onetime') {
     org.seatsAllowed = 1;
