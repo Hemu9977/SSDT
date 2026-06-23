@@ -1,10 +1,8 @@
 import React, { useRef, useEffect } from 'react';
-import { useUser } from '../contexts/UserContext';
 import '../styles/ParticleBackground.scss';
 
 const ParticleBackground = () => {
   const canvasRef = useRef(null);
-  const { isPro } = useUser();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -48,15 +46,9 @@ const ParticleBackground = () => {
         const isDarkMode = document.body.classList.contains('dark');
         let color, alpha;
 
-        if (isPro) {
-          // Purple for PRO
-          color = isDarkMode ? '#c084fc' : '#a855f7';
-          alpha = isDarkMode ? 0.8 : 0.6;
-        } else {
-          // Orange for default - darker for light theme
-          color = isDarkMode ? '#FF6B00' : '#CC5500';
-          alpha = isDarkMode ? 0.8 : 0.7;
-        }
+        // Orange for all plans - darker for light theme
+        color = isDarkMode ? '#FF6B00' : '#CC5500';
+        alpha = isDarkMode ? 0.8 : 0.7;
 
         ctx.fillStyle = `rgba(${parseInt(color.slice(1, 3), 16)}, ${parseInt(color.slice(3, 5), 16)}, ${parseInt(color.slice(5, 7), 16)}, ${alpha})`;
         ctx.beginPath();
@@ -112,7 +104,7 @@ const ParticleBackground = () => {
       window.removeEventListener('mousemove', handleMouseMove);
       cancelAnimationFrame(animationFrameId);
     };
-  }, [isPro]);
+  }, []);
 
   return <canvas ref={canvasRef} className="particle-canvas" />;
 };

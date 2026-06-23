@@ -12,6 +12,7 @@ import OTPVerification from './pages/auth/OTPVerification';
 import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import Profile from './pages/Profile';
+import Dashboard from './pages/Dashboard';
 import ScanViewer from './pages/ScanViewer';
 import ScheduledScans from './pages/ScheduledScans';
 import JoinOrganization from './pages/JoinOrganization';
@@ -22,9 +23,7 @@ import { UserProvider, useUser } from './contexts/UserContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 function AppContent() {
   const [showSplash, setShowSplash] = useState(true);
-  const { isPro, loading } = useUser();
-
-  console.log('🎨 App: isPro =', isPro, ', loading =', loading);
+  const { loading } = useUser();
 
   const handleSplashComplete = () => {
     setShowSplash(false);
@@ -35,9 +34,8 @@ function AppContent() {
     return <SplashScreen onEnter={handleSplashComplete} />;
   }
 
-  // Show main application after splash with PRO theme if applicable
   return (
-    <div className={isPro ? 'pro-theme' : ''}>
+    <div>
       <TranslationProvider>
         <BrowserRouter>
           <Routes>
@@ -47,6 +45,7 @@ function AppContent() {
             <Route path="/verify-otp" element={<OTPVerification />} />
             <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/scan/:analysisId" element={<ScanViewer />} />
             <Route path="/schedules" element={<ScheduledScans />} />

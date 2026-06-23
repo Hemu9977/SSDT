@@ -139,11 +139,11 @@ const ScheduledScans = () => {
   const isAuthTheme = isPro && (urlScanType === 'authenticated' || urlScanType === 'auth');
 
   return (
-    <div className={`landing-page ${isAuthTheme || isPro ? 'pro-theme' : ''}`}>
+    <div className="landing-page">
       <ParticleBackground />
       <Header />
       <main>
-        <div className={`schedules-page ${isAuthTheme || isPro ? 'pro-theme' : ''}`}>
+        <div className="schedules-page">
           {/* Header */}
           <div className="schedules-header">
             <div className="schedules-header__left">
@@ -211,7 +211,7 @@ const ScheduledScans = () => {
                   return (
                     <motion.div
                       key={schedule.id}
-                      className={`schedule-card ${isAuthTheme ? 'pro-theme' : ''}`}
+                      className="schedule-card"
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -20 }}
