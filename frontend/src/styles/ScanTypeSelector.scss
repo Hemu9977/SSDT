@@ -93,42 +93,6 @@
       }
     }
 
-    &--auth {
-      &.pro-mode {
-        border-color: #a855f7;
-        box-shadow: 0 0 20px rgba(168, 85, 247, 0.3);
-
-        &::before {
-          background: linear-gradient(135deg, #a855f7, #c084fc);
-        }
-
-        &:hover {
-          box-shadow: 0 8px 30px rgba(168, 85, 247, 0.5), 0 0 60px rgba(168, 85, 247, 0.3);
-          border-color: #c084fc;
-
-          .card-icon {
-            box-shadow: 0 0 30px rgba(168, 85, 247, 0.6);
-          }
-
-          .card-button {
-            background: #c084fc;
-          }
-        }
-
-        .card-icon {
-          background: linear-gradient(135deg, #a855f7, #c084fc);
-          box-shadow: 0 0 20px rgba(168, 85, 247, 0.4);
-        }
-
-        .card-button {
-          background: #a855f7;
-
-          &:hover {
-            background: #c084fc;
-          }
-        }
-      }
-    }
 
     > * {
       position: relative;

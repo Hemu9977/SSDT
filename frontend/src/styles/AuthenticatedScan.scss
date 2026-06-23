@@ -37,14 +37,6 @@
   --accent-light: #ff8c00;
   --accent-gradient: linear-gradient(135deg, #FF6B00, #ff8c00);
 
-  // PRO Style Override
-  &.pro-mode {
-    --accent: #a855f7; // Premium Purple
-    --accent-glow: rgba(168, 85, 247, 0.4);
-    --accent-dim: rgba(168, 85, 247, 0.1);
-    --accent-light: #c084fc;
-    --accent-gradient: linear-gradient(135deg, #a855f7, #c084fc);
-  }
 
   .panel-content {
     max-width: 900px;

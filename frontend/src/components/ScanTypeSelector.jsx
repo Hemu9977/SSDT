@@ -1,12 +1,10 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useUser } from '../contexts/UserContext';
 import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScanTypeSelector.scss';
 
 const ScanTypeSelector = () => {
   const navigate = useNavigate();
-  const { isPro } = useUser();
   const { t } = useTranslation();
 
   const handleScanTypeSelection = (scanType) => {
@@ -120,10 +118,10 @@ const ScanTypeSelector = () => {
 
           {/* Authenticated Scan Card */}
           <div
-            className={`scan-type-card scan-type-card--auth ${isPro ? 'pro-mode' : ''}`}
+            className="scan-type-card scan-type-card--auth"
             onClick={() => handleScanTypeSelection('auth')}
           >
-            <div className={`card-icon card-icon--auth ${isPro ? 'pro-mode' : ''}`}>
+            <div className="card-icon card-icon--auth">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 fill="none"

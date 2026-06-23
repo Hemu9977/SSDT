@@ -1,11 +1,9 @@
 import { useState } from 'react';
-import { useUser } from '../contexts/UserContext';
 import ParticleBackground from './ParticleBackground';
 import '../styles/SplashScreen.scss';
 
 const SplashScreen = ({ onEnter }) => {
   const [showButton, setShowButton] = useState(true);
-  const { isPro } = useUser();
 
   const handleEnter = () => {
     // Play the sound
@@ -26,13 +24,13 @@ const SplashScreen = ({ onEnter }) => {
   };
 
   return (
-    <div id="splash-screen" className={isPro ? 'pro-splash' : ''}>
+    <div id="splash-screen">
       <ParticleBackground />
       <div className="splash-content">
         <img
           src={`${process.env.PUBLIC_URL}/logo.png`}
           alt="SSDT Security Scanner Logo"
-          className={`splash-logo ${isPro ? 'pro-logo' : ''}`}
+          className="splash-logo"
         />
         <h1 className="splash-title">Fortexa</h1>
         <p className="splash-subtitle">Security Scanner Detection Tool</p>
