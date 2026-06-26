@@ -1,4 +1,4 @@
-.scan-form-container {
+﻿.scan-form-container {
   padding: 20px;
   margin: 20px 0;
 
@@ -104,7 +104,7 @@
     }
 
     .progress-text {
-      color: #d1d5db;
+      color: var(--foreground-darker);
       font-size: 14px;
       margin: 0;
       text-align: center;

@@ -1,4 +1,4 @@
-/* ============================================
+﻿/* ============================================
    CLEAN NEON BUTTON STYLES
    File: frontend/src/styles/NeonButtons.scss
    ============================================ */
@@ -73,7 +73,7 @@
 }
 
 .analyze-form button:disabled {
-  color: #555 !important;
+  color: var(--foreground) !important;
   border-color: #555 !important;
   opacity: 0.4 !important;
   cursor: not-allowed !important;
@@ -114,7 +114,7 @@
 }
 
 .auth-form button:disabled {
-  color: #555 !important;
+  color: var(--foreground) !important;
   border-color: #555 !important;
   opacity: 0.4 !important;
   cursor: not-allowed !important;

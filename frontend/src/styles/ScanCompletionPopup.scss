@@ -1,4 +1,4 @@
-/* ==========================================
+﻿/* ==========================================
    ScanCompletionPopup – Notification Styles
    Matches both Light and Dark (Pro) styles
    ========================================== */
@@ -71,12 +71,12 @@
   margin: 0;
   font-size: 15px;
   line-height: 1.5;
-  color: var(--text-secondary, #4b5563);
+  color: var(--foreground-darker);
   
   [data-theme='dark'] &,
   .dark &,
   .pro-theme & {
-    color: #9ca3af;
+    color: var(--foreground-darker);
   }
 }
 
@@ -147,7 +147,7 @@
 
 .notification-btn-secondary {
   background: transparent;
-  color: var(--text-secondary, #4b5563);
+  color: var(--foreground-darker);
   border: 1px solid var(--border-color, rgba(0, 0, 0, 0.1));
   margin-right: 12px;
 
@@ -158,7 +158,7 @@
   [data-theme='dark'] &,
   .dark &,
   .pro-theme & {
-    color: #9ca3af;
+    color: var(--foreground-darker);
     border-color: rgba(255, 255, 255, 0.1);
 
     &:hover {

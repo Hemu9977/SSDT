@@ -1,4 +1,4 @@
-// ScheduledScans Page Styles - SSDT Theme
+﻿// ScheduledScans Page Styles - SSDT Theme
 
 .schedules-page {
   padding: 2rem;
@@ -496,12 +496,12 @@
 
 /* Light Theme Overrides */
 body.light {
-  .schedules-subtitle { color: #4b5563; }
+  .schedules-subtitle { color: var(--foreground-darker); }
   
   .schedule-card {
     &__target { color: #005f73; }
     &__detail {
-      color: #4b5563;
+      color: var(--foreground-darker);
       strong { color: #CC5500; }
     }
   }

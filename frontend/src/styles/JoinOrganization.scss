@@ -1,4 +1,4 @@
-// JoinOrganization.scss — Invite acceptance page styling
+﻿// JoinOrganization.scss — Invite acceptance page styling
 // Consistent with FORTEXA hacking-theme (orange + dark grey)
 
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;500;600&display=swap');
@@ -61,7 +61,7 @@
 .join-invite-label {
   font-family: 'Inter', sans-serif;
   font-size: 0.8rem;
-  color: #888;
+  color: var(--foreground-darker);
   text-transform: uppercase;
   letter-spacing: 1.5px;
   margin: 0 0 0.3rem;
@@ -90,7 +90,7 @@
 // ── Loading ────────────────────────────────────────────────────────────────
 .join-loading {
   text-align: center;
-  color: #888;
+  color: var(--foreground-darker);
   font-family: 'Inter', sans-serif;
 
   p { margin-top: 1rem; }
@@ -137,7 +137,7 @@
 
   p {
     font-family: 'Inter', sans-serif;
-    color: #999;
+    color: var(--foreground-darker);
     font-size: 0.9rem;
     margin-bottom: 1.5rem;
     line-height: 1.5;
@@ -175,7 +175,7 @@
 
   .join-subtitle {
     font-family: 'Inter', sans-serif;
-    color: #999;
+    color: var(--foreground-darker);
     font-size: 0.9rem;
     margin-bottom: 1.25rem;
   }
@@ -198,7 +198,7 @@
 .join-email-notice {
   font-family: 'Inter', sans-serif;
   font-size: 0.8rem;
-  color: #888;
+  color: var(--foreground-darker);
   margin-bottom: 1.25rem;
 
   strong { color: #FFA366; }
@@ -207,7 +207,7 @@
 .join-subtitle {
   font-family: 'Inter', sans-serif;
   font-size: 0.85rem;
-  color: #888;
+  color: var(--foreground-darker);
   margin-bottom: 1.25rem;
 
   strong { color: #FFA366; }
@@ -221,7 +221,7 @@
     font-family: 'Inter', sans-serif;
     font-size: 0.78rem;
     font-weight: 600;
-    color: #aaa;
+    color: var(--foreground-darker);
     text-transform: uppercase;
     letter-spacing: 0.8px;
     margin-bottom: 0.4rem;
@@ -297,7 +297,7 @@
 .join-btn--link {
   background: none;
   border: none;
-  color: #666;
+  color: var(--foreground-darker);
   font-family: 'Inter', sans-serif;
   font-size: 0.85rem;
   cursor: pointer;

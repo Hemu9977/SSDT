@@ -6,7 +6,7 @@
   --background-light: #ffffff;
   --background-lighter: #f9f9f9;
   --foreground: #1a1a1a;
-  --foreground-darker: #555555;
+  --foreground-darker: #000000;
   --outline: #dcdcdc;
   --outline-darker: #cccccc;
   --accent: #FF6B00;
@@ -18,6 +18,10 @@
   --header-height: 4rem;
   --section-padding: 2rem;
   --max-width: 1200px;
+
+  /* Panel Background – opaque enough to block particle canvas (z-index:-1) */
+  --panel-bg: rgba(240, 240, 240, 0.97);
+  --panel-bg-tinted: rgba(240, 240, 240, 0.95); /* for orange-tinted warning boxes */
 
   /* Card Styling Variables */
   --card-border: 2px solid var(--accent);
@@ -36,7 +40,9 @@ body.dark {
   --background-light: #111111;
   --background-lighter: #1d1d1d;
   --foreground: #f8f8f8;
-  --foreground-darker: #c7c7c7;
+  --foreground-darker: #ffffff;
+  --panel-bg: rgba(10, 10, 10, 0.94);
+  --panel-bg-tinted: rgba(10, 10, 10, 0.92);
   --outline: #2d2d2d;
   --outline-darker: #222222;
   --accent: #FF6B00;
