@@ -616,7 +616,7 @@ const AuthenticatedScanPanel = () => {
       <div className="panel-content">
         {/* Security Disclaimer */}
         <div className="security-disclaimer">
-          ðŸ”’ {t('securityDisclaimer')}
+          {'🔒'} {t('securityDisclaimer')}
         </div>
 
         {/* Step Indicators */}
@@ -656,6 +656,16 @@ const AuthenticatedScanPanel = () => {
             <p className="step-description">
               {t('enterTargetAndLoginUrls')}
             </p>
+
+            <div className="auth-scan-note">
+              <div className="auth-scan-note__title">⚠ {t('authScanNoteTitle')}</div>
+              <ul className="auth-scan-note__list">
+                <li>{t('authScanNoteCaptcha')}</li>
+                <li>{t('authScanNoteMFA')}</li>
+                <li>{t('authScanNoteOAuth')}</li>
+                <li>{t('authScanNoteWAF')}</li>
+              </ul>
+            </div>
 
             <div className="form-group">
               <label htmlFor="targetUrl">{t('targetWebsiteUrl')}</label>
@@ -760,7 +770,7 @@ const AuthenticatedScanPanel = () => {
                     setSelectedSubmitButton
                   )}
                   <div className="submit-button-hint">
-                    ðŸ’¡ <strong>{t('tip')}</strong> {t('tryDifferentSubmitButton')}
+                    {'💡'} <strong>{t('tip')}</strong> {t('tryDifferentSubmitButton')}
                   </div>
                 </div>
               )}
@@ -827,7 +837,7 @@ const AuthenticatedScanPanel = () => {
               <div className={`test-result ${testResult.authenticated ? 'test-success' : 'test-fail'}`}>
                 {testResult.authenticated ? (
                   <>
-                    <strong>âœ… {t('loginSuccessful')}</strong>
+                    <strong>{'✅'} {t('loginSuccessful')}</strong>
                     <p>{t('credentialsVerified')}</p>
                     {testResult.postLoginUrl && (
                       <p>
@@ -857,7 +867,7 @@ const AuthenticatedScanPanel = () => {
             {/* Test Result */}
             {testResult && testResult.authenticated && (
               <div className="test-result test-success">
-                <strong>âœ… {t('authenticationVerified')}</strong>
+                <strong>{'✅'} {t('authenticationVerified')}</strong>
                 <p>{t('readyToStartAuthenticatedSecurityScan')}</p>
               </div>
             )}
@@ -894,7 +904,7 @@ const AuthenticatedScanPanel = () => {
           </div>
         )}
 
-        {/* Step 4: Scanning  +  Step 5: Results â€” unified progressive view */}
+        {/* Step 4: Scanning  +  Step 5: Results — unified progressive view */}
         {(step === 4 || step === 5) && (
           <div className="step-content">
             <h2>{step === 5 ? t('scanComplete') : t('scanningInProgress')}</h2>
@@ -927,7 +937,7 @@ const AuthenticatedScanPanel = () => {
 
             {/* AI Report Section */}
             <div className="ai-report-section" style={{
-              background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)',
+              background: 'var(--panel-bg)',
               padding: '1.5rem',
               marginBottom: '2rem',
               borderRadius: '8px',
@@ -960,7 +970,7 @@ const AuthenticatedScanPanel = () => {
               )}
             </div>
 
-            {/* Score Cards Grid â€” matches Hero.jsx exactly */}
+            {/* Score Cards Grid — matches Hero.jsx exactly */}
             {(() => {
               // Helper functions (same as Hero.jsx)
               const getScoreClass = (score) => score >= 90 ? 'score-good' : score >= 50 ? 'score-medium' : 'score-poor';
@@ -1008,7 +1018,7 @@ const AuthenticatedScanPanel = () => {
 
               return (
                 <>
-                  <h3 className="report-title">ðŸ“Š {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
+                  <h3 className="report-title">{'📊'} {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
 
                   <div className="score-cards-grid">
                     {/* OWASP ZAP (Authenticated) */}
@@ -1098,7 +1108,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">{webCheckReport.ssl.issuer?.O || t('unknownIssuer')}</p>
                         </>
                       ) : (
-                          <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{webCheckError ? t('failed') : t('pending')}</div>
+                          <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{webCheckError ? t('failed') : t('pending')}</div>
                       )}
                     </div>
 
@@ -1118,7 +1128,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">{t('headersPresent')}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1133,9 +1143,9 @@ const AuthenticatedScanPanel = () => {
                         if (techArray && techArray.length > 0) {
                           return (<><span className="score-card__value score-card__value--safe">{techArray.length}</span><p className="score-card__label">{t('technologiesDetected')}</p></>);
                         } else if (techData && !techData.error) {
-                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('noTechnologiesDetected')}</div>;
+                          return <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{t('noTechnologiesDetected')}</div>;
                         } else {
-                          return <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{techData?.error ? t('scanFailed') : t('pending')}</div>;
+                          return <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{techData?.error ? t('scanFailed') : t('pending')}</div>;
                         }
                       })()}
                     </div>
@@ -1153,7 +1163,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">WAF Status</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1170,7 +1180,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Score: {webCheckReport.tls.tlsInfo?.score || 0}/100</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1185,7 +1195,7 @@ const AuthenticatedScanPanel = () => {
                           return (<><span className={`score-card__value score-card__value--${perfScore >= 90 ? 'safe' : perfScore >= 50 ? 'medium' : 'high'}`}>{perfScore}</span><p className="score-card__label">Optimization Score</p></>);
                         })()
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1200,9 +1210,9 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">MX Records Found</p>
                         </>
                       ) : webCheckReport?.['mail-config']?.skipped ? (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>No Mail Server</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>No Mail Server</div>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1217,7 +1227,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Domain Registered</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1234,7 +1244,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">{webCheckReport.hsts.hstsPreloaded ? 'Preloaded' : 'Not Preloaded'}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1250,7 +1260,7 @@ const AuthenticatedScanPanel = () => {
                           return (<><span className={`score-card__value score-card__value--${blockedCount === 0 ? 'safe' : 'high'}`}>{blockedCount === 0 ? 'Clean' : `${blockedCount} Found`}</span><p className="score-card__label">{blocklists.length} Lists Checked</p></>);
                         })()
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1265,7 +1275,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">{webCheckReport.carbon.co2?.grid?.grams ? `${webCheckReport.carbon.co2.grid.grams.toFixed(2)}g CO2` : 'Hosting'}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1275,13 +1285,13 @@ const AuthenticatedScanPanel = () => {
                       {webCheckLoading ? (
                         <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
                       ) : webCheckReport?.archives?.skipped ? (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Not Archived</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Not Archived</div>
                       ) : webCheckReport?.archives?.totalScans ? (
                         <><span className="score-card__value score-card__value--safe">{webCheckReport.archives.totalScans}</span><p className="score-card__label">Historical Snapshots</p></>
                       ) : webCheckReport?.archives?.error ? (
                         <div className="score-card__label" style={{ color: '#ffb900', marginTop: '10px' }}>Timeout</div>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1291,13 +1301,13 @@ const AuthenticatedScanPanel = () => {
                       {webCheckLoading ? (
                         <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
                       ) : webCheckReport?.sitemap?.skipped || webCheckReport?.sitemap?.error ? (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Not Found</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Not Found</div>
                       ) : webCheckReport?.sitemap?.urlset ? (
                         <><span className="score-card__value score-card__value--safe">{webCheckReport.sitemap.urlset?.url?.length || 'Found'}</span><p className="score-card__label">URLs in Sitemap</p></>
                       ) : webCheckReport?.sitemap ? (
                         <div className="score-card__value score-card__value--safe" style={{ fontSize: '1.2rem' }}>Found</div>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1314,7 +1324,7 @@ const AuthenticatedScanPanel = () => {
                           return (<><span className={`score-card__value score-card__value--${(hasOg || hasTwitter) ? 'safe' : 'medium'}`}>{(hasOg && hasTwitter) ? 'Complete' : (hasOg || hasTwitter) ? 'Partial' : 'Missing'}</span><p className="score-card__label">{hasOg ? 'OG' : ''}{hasOg && hasTwitter ? ' + ' : ''}{hasTwitter ? 'Twitter' : ''}</p></>);
                         })()
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1326,7 +1336,7 @@ const AuthenticatedScanPanel = () => {
                       ) : webCheckReport?.['linked-pages'] && !webCheckReport['linked-pages'].error ? (
                         <><span className="score-card__value score-card__value--safe">{webCheckReport['linked-pages'].internal?.length || webCheckReport['linked-pages'].links?.length || 0}</span><p className="score-card__label">Links Found</p></>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1341,7 +1351,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Redirect Hops</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1353,7 +1363,7 @@ const AuthenticatedScanPanel = () => {
                       ) : webCheckReport?.['dns-server'] && !webCheckReport['dns-server'].error ? (
                         <><span className="score-card__value score-card__value--safe" style={{ fontSize: '1.2rem' }}>{webCheckReport['dns-server'].dns?.length || 1}</span><p className="score-card__label">Servers Found</p></>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1368,7 +1378,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">DNSSEC Status</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>{t('pending')}</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>{t('pending')}</div>
                       )}
                     </div>
 
@@ -1383,7 +1393,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Security Policy</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1398,7 +1408,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Crawler Rules</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1413,7 +1423,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">{webCheckReport.status.responseTime ? `${webCheckReport.status.responseTime}ms` : 'HTTP Status'}</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
 
@@ -1428,7 +1438,7 @@ const AuthenticatedScanPanel = () => {
                           <p className="score-card__label">Global Rank</p>
                         </>
                       ) : (
-                        <div className="score-card__label" style={{ color: '#888', marginTop: '10px' }}>Pending</div>
+                        <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Pending</div>
                       )}
                     </div>
                   </div>
@@ -1478,11 +1488,11 @@ const AuthenticatedScanPanel = () => {
                   {/* URLScan.io Detailed Results */}
                   {report?.hasUrlscanResult && report?.urlscanData && (
                     <details style={{ marginBottom: '2rem' }}>
-                      <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px', border: '1px solid #00d084' }}>
+                      <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: 'var(--panel-bg)', borderRadius: '8px', border: '1px solid #00d084' }}>
                         {t('viewUrlscanAnalysis')}
                       </summary>
                       <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
-                        <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+                        <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                           <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>🛡️ {t('urlscanSecurityVerdict')}</h5>
                           <p><b>{t('urlscanOverall')}:</b> <span style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084', fontWeight: 'bold' }}>{report.urlscanData.verdicts?.overall?.malicious ? t('urlscanMalicious') : t('urlscanClean')}</span></p>
                           <p><b>{t('urlscanThreatScore')}:</b> {report.urlscanData.verdicts?.overall?.score || 0}</p>
@@ -1491,7 +1501,7 @@ const AuthenticatedScanPanel = () => {
                           {report.urlscanData.verdicts?.community?.score > 0 && (<p><b>{t('urlscanCommunityScore')}:</b> {report.urlscanData.verdicts.community.score}</p>)}
                         </div>
                         {report.urlscanData.page && (
-                          <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+                          <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                             <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📄 {t('urlscanPageInformation')}</h5>
                             <p><b>{t('urlscanDomain')}:</b> {report.urlscanData.page.domain || 'N/A'}</p>
                             <p><b>{t('urlscanIpAddress')}:</b> {report.urlscanData.page.ip || 'N/A'}</p>
@@ -1502,7 +1512,7 @@ const AuthenticatedScanPanel = () => {
                           </div>
                         )}
                         {report.urlscanData.stats && (
-                          <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+                          <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                             <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📊 {t('urlscanNetworkStatistics')}</h5>
                             <p><b>{t('urlscanHttpRequests')}:</b> {report.urlscanData.stats.requests || 0}</p>
                             <p><b>{t('urlscanUniqueIps')}:</b> {report.urlscanData.stats.uniqIPs || 0}</p>
@@ -1510,7 +1520,7 @@ const AuthenticatedScanPanel = () => {
                             <p><b>{t('urlscanDataTransferred')}:</b> {report.urlscanData.stats.dataLength ? `${(report.urlscanData.stats.dataLength / 1024).toFixed(1)} KB` : 'N/A'}</p>
                           </div>
                         )}
-                        <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.82rem', color: '#888', borderLeft: '3px solid var(--accent)' }}>
+                        <div style={{ background: 'var(--panel-bg)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.82rem', color: 'var(--foreground-darker)', borderLeft: '3px solid var(--accent)' }}>
                           ✅ {t('urlscanAllDataShown')}
                         </div>
                       </div>
@@ -1563,7 +1573,7 @@ const AuthenticatedScanPanel = () => {
                   ) : (
                     <div className="report-summary" style={{ marginTop: '2rem', opacity: 0.7 }}>
                       <h4>🔒 {t('mozillaObservatorySecurityConfiguration')}</h4>
-                      <p style={{ color: '#888' }}><i>{t('obsNoData')}</i></p>
+                      <p style={{ color: 'var(--foreground-darker)' }}><i>{t('obsNoData')}</i></p>
                     </div>
                   )}
 
