@@ -64,7 +64,7 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     // Reuse existing Stripe customer or create a new one
     let customerId = user.stripeCustomerId;
     const isOnetime = billingCycle === 'onetime';
-    const frontendBase = process.env.CLIENT_URL || 'http://localhost:3000';
+    const frontendBase = process.env.FRONTEND_URL || 'http://localhost:3000';
 
     // Verify existing customer
     if (customerId) {

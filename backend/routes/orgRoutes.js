@@ -98,7 +98,7 @@ router.post('/invite', auth, async (req, res) => {
       return res.json({
         success: true,
         message: 'Invite created. Email delivery failed — share the link manually.',
-        joinLink: `${process.env.CLIENT_URL || 'http://localhost:3000'}/join?token=${token}`,
+        joinLink: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/join?token=${token}`,
         emailDelivered: false
       });
     }
@@ -106,7 +106,7 @@ router.post('/invite', auth, async (req, res) => {
     res.json({
       success: true,
       message: `Invite sent to ${email}`,
-      joinLink: `${process.env.CLIENT_URL || 'http://localhost:3000'}/join?token=${token}`,
+      joinLink: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/join?token=${token}`,
       emailDelivered: true
     });
   } catch (err) {
