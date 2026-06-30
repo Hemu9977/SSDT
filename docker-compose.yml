@@ -110,7 +110,7 @@ services:
 
   # Local MongoDB for development
   mongodb:
-    image: mongo:latest
+    image: mongo:7
     container_name: mongodb-local
     restart: unless-stopped
     ports:
