@@ -7,6 +7,7 @@ const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 
 const { analyzeUrl } = require('../services/pagespeedService');
+const { consumeScan } = require('../services/planService');
 
 // @route   POST /api/pagespeed/analyze
 // @desc    Analyze a URL with PageSpeed Insights
@@ -15,7 +16,7 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
   const { url, strategy } = req.body;
 
   if (!url) {
-    if (req.refundScan) await req.refundScan();
+
     return res.status(400).json({ msg: 'URL is required' });
   }
 
@@ -23,6 +24,14 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
     console.log(`⚡ PageSpeed scan by user ${req.user.id} (Org: ${req.organization._id})`);
 
     const report = await analyzeUrl(url, strategy);
+
+    const limits = req.planUser.getAccountLimits(req.organization);
+    await consumeScan(req.organization._id, {
+      target: url,
+      scansPerTarget: limits.scansPerTarget,
+      targetsPerMonth: limits.targetsPerMonth
+    });
+    console.log(`[Billing] Scan completed - quota deducted: standalone-pagespeed-${url}`);
 
     res.json({
       success: true,

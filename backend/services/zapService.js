@@ -7,6 +7,7 @@ const ZapAlert = require('../models/ZapAlert');
 const gridfsService = require('./gridfsService');
 const cleanupService = require('./cleanupService');
 const { publishScanProgress } = require('./scanProgressService');
+const { finalizeSuccessfulScan } = require('./planService');
 
 // ============================================================================
 // ZAP API CONFIGURATION
@@ -1233,6 +1234,9 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     console.log(`   Total occurrences: ${summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0)}`);
     console.log(`   Risk breakdown: High=${riskCounts.High}, Medium=${riskCounts.Medium}, Low=${riskCounts.Low}, Info=${riskCounts.Informational}`);
 
+    // Deduct scan from user quota only upon successful completion
+    await finalizeSuccessfulScan(scanId).catch(e => console.error(`[ZAP][${scanId}] Failed to finalize scan quota:`, e.message));
+
     // Emit real-time progress: ZAP done
     await publishScanProgress(scanId, scanResult.userId, {
       status: 'combining',
@@ -1490,7 +1494,7 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
   try {
     // Update helper function with retry logic for long-running scans
     const updateProgress = async (phase, progress, additionalData = {}, maxRetries = 3) => {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           // First, get the current zapResult to merge with new data
           const currentScan = await ScanResult.findOne({ analysisId: scanId });
@@ -1523,8 +1527,31 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
             }
           );
           console.log(`📊 [BACKGROUND] ZAP Progress: ${phase} - ${progress}%`);
+
+          // Emit real-time WebSocket progress milestone (non-blocking, try/caught)
+          try {
+            publishScanProgress(scanId, userId, {
+              status: 'combining',
+              progress: Math.round(45 + (progress * 0.25)), // maps ZAP 0-100% → overall 45-70%
+              message: `ZAP: ${phase} (${progress}%)`,
+              zapResult: {
+                status: 'running',
+                phase,
+                progress,
+                ...additionalData
+              }
+            }).catch((err) => {
+              console.warn(`[BACKGROUND] ZAP failed to publish progress to Redis for ${scanId}:`, err.message);
+            });
+          } catch (pubErr) {
+            console.warn(`[BACKGROUND] ZAP failed to call publishScanProgress for ${scanId}:`, pubErr.message);
+          }
+
           return; // Success
         } catch (updateError) {
+          if (updateError.message === 'STOPPED_BY_USER') {
+            throw updateError;
+          }
           console.error(`Failed to update ZAP progress (attempt ${attempt}/${maxRetries}):`, updateError.message);
           if (attempt === maxRetries) {
             console.error('❌ All retry attempts failed. Progress update lost.');
@@ -1840,6 +1867,9 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
             break;
           }
         } catch (ajaxError) {
+          if (ajaxError.message === 'STOPPED_BY_USER') {
+            throw ajaxError;
+          }
           console.warn('⚠️ [BACKGROUND] AJAX spider status check failed:', ajaxError.message);
           break;
         }
@@ -1908,6 +1938,9 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
           message: `Processing ${recordsToScan} records...`
         });
       } catch (pscanError) {
+        if (pscanError.message === 'STOPPED_BY_USER') {
+          throw pscanError;
+        }
         console.warn('⚠️ Passive scan check error:', pscanError.message);
         break;
       }
@@ -2227,6 +2260,10 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     }
 
   } catch (error) {
+    if (error.message === 'STOPPED_BY_USER') {
+      console.log(`🛑 [BACKGROUND] ZAP scan for ${scanId} was successfully terminated due to user cancellation.`);
+      return;
+    }
     console.error('❌ [BACKGROUND] ZAP scan failed:', error.message);
 
     // If ZAP never became accessible (zapStarted=false), re-throw so BullMQ
@@ -2340,6 +2377,38 @@ async function stopZapScan(scanId, userId) {
       }
     } catch (err) {
       console.warn('⚠️ Could not stop active scans:', err.message);
+    }
+
+    // Cancel active/waiting BullMQ jobs
+    try {
+      const { getZapQueue } = require('../queues/zapQueue');
+      const zapQueue = getZapQueue();
+      if (zapQueue) {
+        const job = await zapQueue.getJob(`zap-${scanId}`);
+        if (job) {
+          console.log(`[BullMQ] Found job zap-${scanId} in zap-queue. Canceling.`);
+          try {
+            if (typeof job.discard === 'function') {
+              await job.discard();
+            }
+          } catch (_) {}
+          try {
+            await job.remove();
+          } catch (e) {
+            console.error(`[BullMQ] Failed to remove job zap-${scanId}:`, e.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[BullMQ] Error canceling zap-queue job for ${scanId}:`, err.message);
+    }
+
+    // Release AWS Fargate dynamic container if active
+    try {
+      const { releaseContainer } = require('./zapContainerManager');
+      await releaseContainer(scanId);
+    } catch (err) {
+      console.warn(`[zapService] Failed to release container for ${scanId}:`, err.message);
     }
 
     // Update database to mark scan as stopped
@@ -2564,6 +2633,61 @@ async function stopCombinedScan(scanId, userId) {
       }
     } catch (err) {
       console.warn('⚠️ Could not stop active scans:', err.message);
+    }
+
+    // Cancel active/waiting BullMQ jobs
+    try {
+      const { getScanQueue } = require('../queues/scanQueue');
+      const scanQueue = getScanQueue();
+      if (scanQueue) {
+        const job = await scanQueue.getJob(scanId);
+        if (job) {
+          console.log(`[BullMQ] Found job ${scanId} in scan-queue. Canceling.`);
+          try {
+            if (typeof job.discard === 'function') {
+              await job.discard();
+            }
+          } catch (_) {}
+          try {
+            await job.remove();
+          } catch (e) {
+            console.error(`[BullMQ] Failed to remove job ${scanId}:`, e.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[BullMQ] Error canceling scan-queue job for ${scanId}:`, err.message);
+    }
+
+    try {
+      const { getZapQueue } = require('../queues/zapQueue');
+      const zapQueue = getZapQueue();
+      if (zapQueue) {
+        const job = await zapQueue.getJob(`zap-${scanId}`);
+        if (job) {
+          console.log(`[BullMQ] Found job zap-${scanId} in zap-queue. Canceling.`);
+          try {
+            if (typeof job.discard === 'function') {
+              await job.discard();
+            }
+          } catch (_) {}
+          try {
+            await job.remove();
+          } catch (e) {
+            console.error(`[BullMQ] Failed to remove job zap-${scanId}:`, e.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[BullMQ] Error canceling zap-queue job for ${scanId}:`, err.message);
+    }
+
+    // Release AWS Fargate dynamic container if active
+    try {
+      const { releaseContainer } = require('./zapContainerManager');
+      await releaseContainer(scanId);
+    } catch (err) {
+      console.warn(`[zapService] Failed to release container for ${scanId}:`, err.message);
     }
 
     // Update database to mark scan as stopped

@@ -81,7 +81,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     const { url, quickMode = false } = req.body;
 
     if (!url) {
-      if (req.refundScan) await req.refundScan();
+
       return res.status(400).json({
         success: false,
         error: 'URL is required'
@@ -92,7 +92,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     try {
       new URL(url);
     } catch {
-      if (req.refundScan) await req.refundScan();
+
       return res.status(400).json({
         success: false,
         error: 'Invalid URL format'
@@ -122,6 +122,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
       },
       { upsert: true }
     );
+    console.log(`[Billing] Scan started: ${scanId}`);
 
     // Return immediately — provisioning + scan run in background.
     res.json({
@@ -164,7 +165,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
   } catch (error) {
     console.error('❌ ZAP scan error:', error);
     // Synchronous start failed before the scan was handed off — refund the slot.
-    if (req.refundScan) await req.refundScan();
+
     res.status(500).json({
       success: false,
       error: 'Failed to initiate ZAP scan',

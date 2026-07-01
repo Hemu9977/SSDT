@@ -13,7 +13,7 @@ const planCheck = require('../middleware/planCheck');
 const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { addScanJob } = require('../queues/scanQueue');
-const { getPublisher } = require('../config/redis');
+const { getPublisher, executeWithRetry } = require('../config/redis');
 
 /**
  * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for req.user.
@@ -131,15 +131,6 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       });
     }
 
-    // Check if scan is completed
-    if (scan.status !== 'completed') {
-      return res.status(400).json({
-        error: 'Scan not completed',
-        message: `Scan is currently ${scan.status}. Only completed scans can be loaded.`,
-        status: scan.status
-      });
-    }
-
     // Build response object similar to combined-analysis response
     const response = {
       success: true,
@@ -167,27 +158,54 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
     }
 
     // Add ZAP results with GridFS data if available — plan-filtered
-    if (scan.zapResult) {
+    const zapSource = scan.authScanResult || scan.zapResult;
+    if (zapSource) {
       const accessLevel = await resolveVulnAccessLevel(req.user.id);
-      response.zapData = getSanitizedZapData({ ...scan.zapResult }, accessLevel);
+      const zs = zapSource.status;
+      if (zs === 'completed' || zs === 'completed_partial') {
+        const rawZapData = {
+          status: zs,
+          riskCounts: zapSource.riskCounts || { High: 0, Medium: 0, Low: 0, Informational: 0 },
+          alerts: zapSource.alerts || [],
+          totalAlerts: zapSource.totalAlerts || 0,
+          totalOccurrences: zapSource.totalOccurrences || 0,
+          reportFiles: zapSource.reportFiles || [],
+          site: zapSource.site || scan.target,
+          urlsFound: zapSource.urlsFound || 0
+        };
+        response.zapData = getSanitizedZapData(rawZapData, accessLevel);
 
-      // Fetch detailed alerts from GridFS if available
-      if (scan.zapResult.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
-        const detailedAlertsFile = scan.zapResult.reportFiles.find(
-          f => f.filename && f.filename.includes('detailed_alerts')
-        );
-        if (detailedAlertsFile && detailedAlertsFile.fileId) {
-          try {
-            const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
-              ? 'zap_auth_reports' : 'zap_reports';
-            const buffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
-            const rawAlerts = JSON.parse(buffer.toString('utf-8'));
-            // Apply plan filter to the full GridFS alert list
-            response.zapData.detailedAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
-          } catch (gridfsErr) {
-            console.warn(`[LoadScan] Could not fetch ZAP detailed alerts: ${gridfsErr.message}`);
+        // Fetch detailed alerts from GridFS if available
+        if (zapSource.reportFiles && Array.isArray(zapSource.reportFiles)) {
+          const detailedAlertsFile = zapSource.reportFiles.find(
+            f => f.filename && f.filename.includes('detailed_alerts')
+          );
+          if (detailedAlertsFile && detailedAlertsFile.fileId) {
+            try {
+              const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
+                ? 'zap_auth_reports' : 'zap_reports';
+              const buffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
+              const rawAlerts = JSON.parse(buffer.toString('utf-8'));
+              response.zapData.detailedAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
+            } catch (gridfsErr) {
+              console.warn(`[LoadScan] Could not fetch ZAP detailed alerts: ${gridfsErr.message}`);
+            }
           }
         }
+      } else if (zs === 'running' || zs === 'pending') {
+        response.zapData = {
+          status: zs,
+          phase: zapSource.phase || 'queued',
+          progress: zapSource.progress || 0,
+          message: zapSource.message || 'ZAP scan in progress...',
+          urlsFound: zapSource.urlsFound || 0,
+          alertsFound: zapSource.alertsFound || 0
+        };
+      } else if (zs === 'failed') {
+        response.zapData = {
+          status: 'failed',
+          error: zapSource.error || 'ZAP scan failed'
+        };
       }
     }
 
@@ -213,7 +231,23 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       response.aiReport = scan.refinedReport;
     }
 
-    console.log(`📜 Loaded historical scan: ${analysisId} for user ${req.user.id}`);
+    // Build boolean flags matching combined-analysis flow
+    const hasZap = !!zapSource && (zapSource.status === 'completed' || zapSource.status === 'completed_partial');
+    const zapPending = !!zapSource && (zapSource.status === 'pending' || zapSource.status === 'running');
+
+    const hasWebCheck = !!scan.webCheckResult && ['completed', 'completed_partial', 'completed_with_errors'].includes(scan.webCheckResult.status);
+    const webCheckPending = !!scan.webCheckResult && ['pending', 'running', 'uploading'].includes(scan.webCheckResult.status);
+
+    response.hasPsiResult = !!scan.pagespeedResult && !scan.pagespeedResult.error;
+    response.hasObservatoryResult = !!scan.observatoryResult && !scan.observatoryResult.error;
+    response.hasUrlscanResult = !!scan.urlscanResult && !scan.urlscanResult.error;
+    response.hasZapResult = hasZap;
+    response.zapPending = zapPending;
+    response.hasWebCheckResult = hasWebCheck;
+    response.webCheckPending = webCheckPending;
+    response.hasRefinedReport = !!scan.refinedReport;
+
+    console.log(`📜 Loaded scan: ${analysisId} for user ${req.user.id} (status: ${scan.status})`);
     res.json(response);
 
   } catch (err) {
@@ -444,13 +478,13 @@ router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (r
 
     if (!url || typeof url !== 'string') {
       // Scan never starts — give the gated quota slot back.
-      if (req.refundScan) await req.refundScan();
+
       return res.status(400).json({ error: 'URL is required' });
     }
 
     const validation = isValidUrl(url);
     if (!validation.valid) {
-      if (req.refundScan) await req.refundScan();
+
       return res.status(400).json({ error: validation.error });
     }
 
@@ -466,6 +500,7 @@ router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (r
       status: 'queued',
       userId: req.user.id
     }).save();
+    console.log(`[Billing] Scan started: ${analysisId}`);
 
     // Enqueue the scan job — BullMQ worker picks it up and runs all scanners
     await addScanJob(analysisId, url, req.user.id);
@@ -480,7 +515,7 @@ router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (r
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
     // Scan failed to initiate — refund the gated quota slot.
-    if (req.refundScan) await req.refundScan();
+
     // Graceful error handling for duplicates if race condition occurs
     if (err.code === 11000) {
       return res.status(409).json({ error: 'Scan already in progress. Please wait and try again.' });
@@ -565,21 +600,35 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     } : null;
 
     let zapData = null;
-    if (scan.zapResult) {
-      const zs = scan.zapResult.status;
+    const zapSource = scan.authScanResult || scan.zapResult;
+    if (zapSource) {
+      const zs = zapSource.status;
       if (zs === 'completed' || zs === 'completed_partial') {
-        zapData = { status: zs,
-          riskCounts: scan.zapResult.riskCounts || {}, alerts: scan.zapResult.alerts || [],
-          totalAlerts: scan.zapResult.totalAlerts || 0, totalOccurrences: scan.zapResult.totalOccurrences || 0,
-          reportFiles: scan.zapResult.reportFiles || [], site: scan.zapResult.site || scan.target,
-          urlsFound: scan.zapResult.urlsFound || 0 };
+        zapData = {
+          status: zs,
+          riskCounts: zapSource.riskCounts || {},
+          alerts: zapSource.alerts || [],
+          totalAlerts: zapSource.totalAlerts || 0,
+          totalOccurrences: zapSource.totalOccurrences || 0,
+          reportFiles: zapSource.reportFiles || [],
+          site: zapSource.site || scan.target,
+          urlsFound: zapSource.urlsFound || 0
+        };
       } else if (zs === 'pending' || zs === 'running') {
-        zapData = { status: zs, phase: scan.zapResult.phase || 'queued', progress: scan.zapResult.progress || 0,
-          message: scan.zapResult.message || 'ZAP scan in progress...', urlsFound: scan.zapResult.urlsFound || 0,
-          alertsFound: scan.zapResult.alertsFound || 0 };
+        zapData = {
+          status: zs,
+          phase: zapSource.phase || 'queued',
+          progress: zapSource.progress || 0,
+          message: zapSource.message || 'ZAP scan in progress...',
+          urlsFound: zapSource.urlsFound || 0,
+          alertsFound: zapSource.alertsFound || 0
+        };
       } else if (zs === 'failed') {
-        zapData = { status: 'failed', error: scan.zapResult.error || 'ZAP scan failed',
-          message: scan.zapResult.message || 'Vulnerability scan encountered an error' };
+        zapData = {
+          status: 'failed',
+          error: zapSource.error || 'ZAP scan failed',
+          message: zapSource.message || 'Vulnerability scan encountered an error'
+        };
       }
     }
 
@@ -642,8 +691,8 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
       target: scan.target,
       hasPsiResult:        !!scan.pagespeedResult,
       hasObservatoryResult: !!scan.observatoryResult,
-      hasZapResult: !!scan.zapResult && (scan.zapResult.status === 'completed' || scan.zapResult.status === 'completed_partial'),
-      zapPending: !!scan.zapResult && (scan.zapResult.status === 'pending' || scan.zapResult.status === 'running'),
+      hasZapResult: !!zapSource && (zapSource.status === 'completed' || zapSource.status === 'completed_partial'),
+      zapPending: !!zapSource && (zapSource.status === 'pending' || zapSource.status === 'running'),
       hasUrlscanResult: !!scan.urlscanResult && !scan.urlscanResult.error,
       hasWebCheckResult: !!scan.webCheckResult && (scan.webCheckResult.status === 'completed' || scan.webCheckResult.status === 'completed_partial' || scan.webCheckResult.status === 'completed_with_errors'),
       webCheckPending: !!scan.webCheckResult && scan.webCheckResult.status === 'running',
@@ -848,21 +897,29 @@ router.post('/stop-scan/:id', auth, async (req, res) => {
 // across all ECS task instances (multi-container deployments).
 //
 // Key schema:
-//   pdf:job:{jobId}  → JSON metadata  (TTL: PDF_JOB_TTL_S)
-//   pdf:buf:{jobId}  → base64 PDF     (TTL: PDF_JOB_TTL_S)
+//   pdf:job:{jobId}    → JSON metadata  (TTL: PDF_JOB_TTL_S)
+//   pdf:buf:{jobId}    → base64 PDF     (TTL: PDF_JOB_TTL_S)
+//   pdf:active:{analysisId}:{lang} → jobId  (TTL: PDF_ACTIVE_TTL_S) — dedup
 //
 // Status lifecycle:  pending → processing → completed | failed
 //
 // Jobs are NOT deleted on download — TTL handles expiry after 24 hours.
 
-const PDF_JOB_TTL_S = 24 * 60 * 60; // 24 hours
+const PDF_JOB_TTL_S    = 24 * 60 * 60; // 24 hours
+const PDF_ACTIVE_TTL_S = 30 * 60;      // 30 minutes — dedup window
+const PDF_JOB_TIMEOUT_MS = 300000; // Increase timeout to allow slow AI + translation runs to finish (5 minutes)
 
-function _pdfMetaKey(jobId) { return `pdf:job:${jobId}`; }
-function _pdfBufKey(jobId)  { return `pdf:buf:${jobId}`; }
+function timeout(ms, message) {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
+}
+
+function _pdfMetaKey(jobId)              { return `pdf:job:${jobId}`; }
+function _pdfBufKey(jobId)               { return `pdf:buf:${jobId}`; }
+function _pdfActiveKey(analysisId, lang)  { return `pdf:active:${analysisId}:${lang}`; }
 
 async function _getPdfMeta(jobId) {
   try {
-    const raw = await getPublisher().get(_pdfMetaKey(jobId));
+    const raw = await executeWithRetry(() => getPublisher().get(_pdfMetaKey(jobId)));
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
     console.error(`[PDF] Redis GET meta failed for ${jobId}:`, err.message);
@@ -872,7 +929,7 @@ async function _getPdfMeta(jobId) {
 
 async function _setPdfMeta(jobId, meta) {
   try {
-    await getPublisher().set(_pdfMetaKey(jobId), JSON.stringify(meta), 'EX', PDF_JOB_TTL_S);
+    await executeWithRetry(() => getPublisher().set(_pdfMetaKey(jobId), JSON.stringify(meta), 'EX', PDF_JOB_TTL_S));
   } catch (err) {
     console.error(`[PDF] Redis SET meta failed for ${jobId}:`, err.message);
   }
@@ -880,7 +937,7 @@ async function _setPdfMeta(jobId, meta) {
 
 async function _setPdfBuffer(jobId, buffer) {
   try {
-    await getPublisher().set(_pdfBufKey(jobId), buffer.toString('base64'), 'EX', PDF_JOB_TTL_S);
+    await executeWithRetry(() => getPublisher().set(_pdfBufKey(jobId), buffer.toString('base64'), 'EX', PDF_JOB_TTL_S));
   } catch (err) {
     console.error(`[PDF] Redis SET buffer failed for ${jobId}:`, err.message);
   }
@@ -888,12 +945,29 @@ async function _setPdfBuffer(jobId, buffer) {
 
 async function _getPdfBuffer(jobId) {
   try {
-    const raw = await getPublisher().get(_pdfBufKey(jobId));
+    const raw = await executeWithRetry(() => getPublisher().get(_pdfBufKey(jobId)));
     return raw ? Buffer.from(raw, 'base64') : null;
   } catch (err) {
     console.error(`[PDF] Redis GET buffer failed for ${jobId}:`, err.message);
     return null;
   }
+}
+
+/**
+ * Validate that the scan has real data before attempting PDF generation.
+ * Returns null if valid, or an error string listing missing fields.
+ */
+function _validateScanDataForPdf(scan) {
+  const missing = [];
+  if (!scan.pagespeedResult && !scan.observatoryResult && !scan.urlscanResult &&
+      !scan.zapResult && !scan.webCheckResult) {
+    missing.push('all scan results (pagespeed, observatory, urlscan, zap, webCheck)');
+  }
+  // At least one concrete result set must exist
+  if (missing.length) {
+    return `[PDF] Cannot generate report. Missing fields:\n- ${missing.join('\n- ')}`;
+  }
+  return null;
 }
 
 // Start async PDF generation — returns a jobId immediately, client polls for result
@@ -904,6 +978,8 @@ router.post('/pdf-job', auth, async (req, res) => {
   }
   if (!analysisId) return res.status(400).json({ error: 'analysisId is required' });
 
+  console.log(`[PDF] Job requested  analysisId=${analysisId} lang=${lang} userId=${req.user.id}`);
+
   const scan = await ScanResult.findOne({ analysisId, userId: req.user.id });
   if (!scan) return res.status(404).json({ error: 'Scan not found or access denied' });
 
@@ -912,48 +988,118 @@ router.post('/pdf-job', auth, async (req, res) => {
     return res.status(400).json({ error: 'Scan is not yet complete', status: scan.status });
   }
 
+  // ── Validate scan has real data ─────────────────────────────────────────────
+  const validationError = _validateScanDataForPdf(scan);
+  if (validationError) {
+    console.error(validationError);
+    return res.status(400).json({ error: 'Scan has no usable data for PDF generation' });
+  }
+
+  // ── Deduplication: reuse existing in-progress job ───────────────────────────
+  try {
+    const activeKey = _pdfActiveKey(analysisId, lang);
+    const existingJobId = await executeWithRetry(() => getPublisher().get(activeKey));
+    if (existingJobId) {
+      const existingMeta = await _getPdfMeta(existingJobId);
+      if (existingMeta && (existingMeta.status === 'pending' || existingMeta.status === 'processing' || existingMeta.status === 'completed')) {
+        const isPendingOrProcessing = existingMeta.status === 'pending' || existingMeta.status === 'processing';
+        const isOrphaned = isPendingOrProcessing && (Date.now() - (existingMeta.lastUpdated || existingMeta.createdAt) > PDF_JOB_TIMEOUT_MS);
+        
+        if (isOrphaned) {
+          console.warn(`[PDF] Found orphaned job jobId=${existingJobId} status=${existingMeta.status} age=${Date.now() - existingMeta.createdAt}ms. Ignoring and creating new job.`);
+          try {
+            await _setPdfMeta(existingJobId, {
+              ...existingMeta,
+              status: 'failed',
+              error: 'PDF generation timed out (orphaned)',
+              failedAt: Date.now(),
+              lastUpdated: Date.now()
+            });
+          } catch (_) {}
+        } else {
+          console.log(`[PDF] Reusing existing job  jobId=${existingJobId} status=${existingMeta.status} analysisId=${analysisId} lang=${lang}`);
+          return res.json({ jobId: existingJobId });
+        }
+      }
+    }
+  } catch (dedupErr) {
+    console.warn(`[PDF] Dedup check failed (non-fatal):`, dedupErr.message);
+  }
+
   const jobId = crypto.randomUUID();
+  const nowTs = Date.now();
   const meta = {
     status: 'pending',
     lang,
     analysisId,
     userId: req.user.id,
-    createdAt: Date.now(),
+    createdAt: nowTs,
+    lastUpdated: nowTs
   };
   await _setPdfMeta(jobId, meta);
-  console.log(`[PDF] Job created  jobId=${jobId} lang=${lang} analysisId=${analysisId}`);
 
-  // Fire-and-forget — update Redis as generation progresses
+  // Store active-job key for deduplication
+  try {
+    await executeWithRetry(() => getPublisher().set(_pdfActiveKey(analysisId, lang), jobId, 'EX', PDF_ACTIVE_TTL_S));
+  } catch (_) { /* dedup is best-effort */ }
+
+  console.log(`[PDF] Job created  jobId=${jobId} lang=${lang} analysisId=${analysisId} userId=${req.user.id}`);
+
+  // Fire-and-forget — update Redis as generation progresses.
+  // The .catch() at the end ensures unhandled rejections never silently kill jobs.
   (async () => {
     try {
+      console.log(`[PDF] Loading scan data  jobId=${jobId} analysisId=${analysisId}`);
+
       // Hydrate full WebCheck results from GridFS if needed
       if (scan.webCheckResult && !scan.webCheckResult.fullResults && scan.webCheckResult.resultsFileId) {
         const full = await getFullResults(scan.webCheckResult);
         if (full) scan.webCheckResult.fullResults = full;
       }
 
-      // Mark processing so polls return 202, not 404, during generation
-      await _setPdfMeta(jobId, { ...meta, status: 'processing' });
-      console.log(`[PDF] Job processing  jobId=${jobId} lang=${lang.toUpperCase()}`);
+      console.log(`[PDF] Scan data validated  jobId=${jobId} analysisId=${analysisId}`);
 
-      const buffer = await generateSingleLanguagePdf(scan, lang);
+      // Mark processing so polls return 202, not 404, during generation
+      await _setPdfMeta(jobId, { ...meta, status: 'processing', lastUpdated: Date.now() });
+      console.log(`[PDF] Job processing  jobId=${jobId} lang=${lang.toUpperCase()} analysisId=${analysisId}`);
+
+      console.log(`[PDF] Starting Gemini analysis  jobId=${jobId} analysisId=${analysisId}`);
+      const pdfAccessLevel = await resolveVulnAccessLevel(req.user.id);
+      const buffer = await Promise.race([
+        generateSingleLanguagePdf(scan, lang, pdfAccessLevel),
+        timeout(PDF_JOB_TIMEOUT_MS, 'PDF generation timed out after 120 seconds')
+      ]);
       const filename = `security_report_${lang.toUpperCase()}_${scan.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
+
+      console.log(`[PDF] Generating document  jobId=${jobId} analysisId=${analysisId}`);
 
       // Store buffer then update metadata (order matters — poll checks meta first)
       await _setPdfBuffer(jobId, buffer);
-      await _setPdfMeta(jobId, { ...meta, status: 'completed', filename, completedAt: Date.now() });
-      console.log(`[PDF] Job completed  jobId=${jobId} bytes=${buffer.length} filename=${filename}`);
+      await _setPdfMeta(jobId, { ...meta, status: 'completed', filename, completedAt: Date.now(), lastUpdated: Date.now() });
+      console.log(`[PDF] PDF completed  jobId=${jobId} bytes=${buffer.length} filename=${filename} analysisId=${analysisId}`);
     } catch (err) {
-      console.error(`[PDF] Job failed  jobId=${jobId} error=${err.message}`);
-      await _setPdfMeta(jobId, {
-        ...meta,
-        status: 'failed',
-        error: err.message,
-        errorCode: err.code,
-        failedAt: Date.now(),
-      });
+      console.error(`[PDF] PDF failed  jobId=${jobId} analysisId=${analysisId} error=${err.message}`);
+      console.error(`[PDF] PDF failed stack  jobId=${jobId}:`, err.stack);
+      // Double-safe: wrap the Redis SET in its own try/catch so we never lose the error
+      try {
+        await _setPdfMeta(jobId, {
+          ...meta,
+          status: 'failed',
+          error: err.message,
+          errorCode: err.code,
+          failedAt: Date.now(),
+          lastUpdated: Date.now()
+        });
+      } catch (redisErr) {
+        console.error(`[PDF] CRITICAL: Could not persist failure state  jobId=${jobId} redisError=${redisErr.message}`);
+      }
     }
-  })();
+  })().catch(outerErr => {
+    // This catches truly unexpected errors that escape even the inner try/catch
+    // (e.g. if the async IIFE setup itself throws before entering the try block)
+    console.error(`[PDF] UNHANDLED IIFE ERROR  jobId=${jobId} analysisId=${analysisId} error=${outerErr.message}`);
+    _setPdfMeta(jobId, { ...meta, status: 'failed', error: 'Internal error during PDF generation', failedAt: Date.now(), lastUpdated: Date.now() }).catch(() => {});
+  });
 
   res.json({ jobId });
 });
@@ -976,6 +1122,18 @@ router.get('/pdf-job/:jobId', auth, async (req, res) => {
   }
 
   if (meta.status === 'pending' || meta.status === 'processing') {
+    const age = Date.now() - (meta.lastUpdated || meta.createdAt);
+    if (age > PDF_JOB_TIMEOUT_MS) {
+      console.warn(`[PDF] Job ${jobId} is active (status=${meta.status}) but timed out (age=${age}ms). Transitioning to failed.`);
+      const failedMeta = {
+        ...meta,
+        status: 'failed',
+        error: 'PDF generation timed out (orphaned)',
+        failedAt: Date.now()
+      };
+      await _setPdfMeta(jobId, failedMeta);
+      return res.status(500).json({ status: 'failed', error: failedMeta.error });
+    }
     return res.status(202).json({ status: meta.status });
   }
 

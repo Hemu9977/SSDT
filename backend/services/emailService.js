@@ -113,10 +113,24 @@ const sendResetPasswordEmail = async (email, resetToken) => {
 
 const sendScanCompletionEmail = async (email, userName, scanDetails) => {
   const { scanType, targetUrl, scanId, completedAt, dashboardLink } = scanDetails;
-  const formattedTime = new Date(completedAt).toLocaleString('en-US', {
+  const dateObj = new Date(completedAt);
+  const formattedIST = dateObj.toLocaleString('en-US', {
+    timeZone: 'Asia/Kolkata',
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+  const formattedJST = dateObj.toLocaleString('en-US', {
+    timeZone: 'Asia/Tokyo',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+  const formattedUTC = dateObj.toLocaleString('en-US', {
+    timeZone: 'UTC',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZoneName: 'short',
+  });
+  const formattedTime = `${formattedIST} IST / ${formattedJST} JST (${formattedUTC})`;
   try {
     await sendEmail(email, 'FORTEXA – Your Security Scan Results Are Ready', `
       <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0a0a; padding: 30px; border-radius: 8px; border: 1px solid #3a1a00;">

@@ -30,7 +30,7 @@ const { startAsyncWebCheckScan } = require('./webCheckService');
 const { refineReport } = require('./geminiService');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
 
-const { consumeScan } = require('./planService');
+const { checkScanQuota } = require('./planService');
 
 let schedulerTask = null;
 let isProcessing = false;
@@ -123,7 +123,12 @@ async function executeSingleSchedule(schedule) {
   }
 
   // Validate plan limits before execution
-  const result = await consumeScan(user.organizationId);
+  const limits = user.getAccountLimits ? user.getAccountLimits() : {};
+  const result = await checkScanQuota(user.organizationId, {
+    target: schedule.targetUrl,
+    scansPerTarget: limits.scansPerTarget,
+    targetsPerMonth: limits.targetsPerMonth
+  });
   if (!result) {
     console.log(`[Scheduler] Schedule ${schedule._id}: Plan limit exceeded or inactive`);
     schedule.status = 'failed';

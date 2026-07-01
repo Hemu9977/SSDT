@@ -173,9 +173,13 @@ router.post('/', auth, async (req, res) => {
 
     console.log(`📅 Schedule created: ${schedule._id} for ${targetUrl} (user: ${req.user.id})`);
 
-    // 📧 Ensure user is notified about their new schedule via email
     const displayTime = schedule.nextRun 
-      ? schedule.nextRun.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) 
+      ? schedule.nextRun.toLocaleString('en-US', {
+          timeZone: schedule.timezone || 'Asia/Kolkata',
+          dateStyle: 'medium',
+          timeStyle: 'short',
+          timeZoneName: 'short'
+        }) 
       : 'As soon as possible';
     
     // Trigger notification asynchronously (don't await so we don't block response)

@@ -10,6 +10,7 @@ const axios = require('axios');
 const http = require('http');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('./gridfsService');
+const { finalizeSuccessfulScan } = require('./planService');
 
 // ============================================================================
 // ZAP AUTH API CONFIGURATION
@@ -344,6 +345,14 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
 
   const updateProgress = async (phase, progress, additionalData = {}) => {
     try {
+      const currentScan = await ScanResult.findOne({ analysisId: scanId });
+
+      // --- TERMINAL STATE CHECK: If scan was stopped/failed, EXIT BACKGROUND PROCESS ---
+      if (currentScan && ['stopped', 'failed'].includes(currentScan.status)) {
+        console.log(`🛑 [ZAP-AUTH] Scan ${scanId} detected as ${currentScan.status}. Terminating background worker.`);
+        throw new Error('STOPPED_BY_USER');
+      }
+
       const updateFields = {
         'authScanResult.phase': phase,
         'authScanResult.progress': progress,
@@ -357,7 +366,23 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         { $set: updateFields }
       );
       console.log(`[ZAP-AUTH] Progress: ${phase} - ${progress}%`);
+
+      // Emit real-time WebSocket progress milestone (non-blocking)
+      try {
+        const { publishScanProgress } = require('./scanProgressService');
+        publishScanProgress(scanId, userId, {
+          status: currentScan ? currentScan.status : 'running',
+          progress: progress,
+          phase: phase,
+          zapResult: { status: 'running', phase, progress, ...additionalData }
+        }).catch(() => {});
+      } catch (wsErr) {
+        console.error('[ZAP-AUTH] Failed to emit WebSocket progress:', wsErr.message);
+      }
     } catch (updateError) {
+      if (updateError.message === 'STOPPED_BY_USER') {
+        throw updateError;
+      }
       console.error('[ZAP-AUTH] Failed to update progress:', updateError.message);
     }
   };
@@ -529,7 +554,10 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
             message: `AJAX Spider: Discovering dynamic content...`
           });
           console.log(`[ZAP-AUTH] AJAX spider: ${ajaxStatus}`);
-        } catch (_) {
+        } catch (err) {
+          if (err.message === 'STOPPED_BY_USER') {
+            throw err;
+          }
           break;
         }
       }
@@ -656,6 +684,9 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         });
         console.log(`[ZAP-AUTH] Active scan: ${scanProgress}% | Alerts: ${currentAlerts} | Stuck: ${stuckCount}`);
       } catch (scanError) {
+        if (scanError.message === 'STOPPED_BY_USER') {
+          throw scanError;
+        }
         console.warn(`[ZAP-AUTH] Active scan status error: ${scanError.message}`);
       }
     }
@@ -712,49 +743,69 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
 
     console.log(`[ZAP-AUTH] Reports stored in GridFS`);
 
+    const authScanResultObj = {
+      status: 'completed',
+      phase: 'completed',
+      progress: 100,
+      authenticated: true,
+      loginUrl,
+      urlsFound,
+      alerts: summaryAlerts,
+      riskCounts,
+      totalAlerts: summaryAlerts.length,
+      totalOccurrences: summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0),
+      reportFiles: [
+        {
+          fileId: htmlFileId.toString(),
+          filename: `zap_auth_report_${scanId}.html`,
+          contentType: 'text/html',
+          format: 'html',
+          size: htmlBuffer.length
+        },
+        {
+          fileId: detailedAlertsFileId.toString(),
+          filename: `zap_auth_detailed_alerts_${scanId}.json`,
+          contentType: 'application/json',
+          format: 'json',
+          size: detailedAlertsBuffer.length,
+          description: 'Full alert details with all affected URLs'
+        }
+      ],
+      completedAt: new Date()
+    };
+
     // Update final scan result
     await ScanResult.updateOne(
       { analysisId: scanId },
       {
         $set: {
-          status: 'completed',
-          'authScanResult.status': 'completed',
-          'authScanResult.phase': 'completed',
-          'authScanResult.progress': 100,
-          'authScanResult.authenticated': true,
-          'authScanResult.loginUrl': loginUrl,
-          'authScanResult.urlsFound': urlsFound,
-          'authScanResult.alerts': summaryAlerts,
-          'authScanResult.riskCounts': riskCounts,
-          'authScanResult.totalAlerts': summaryAlerts.length,
-          'authScanResult.totalOccurrences': summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0),
-          'authScanResult.reportFiles': [
-            {
-              fileId: htmlFileId.toString(),
-              filename: `zap_auth_report_${scanId}.html`,
-              contentType: 'text/html',
-              format: 'html',
-              size: htmlBuffer.length
-            },
-            {
-              fileId: detailedAlertsFileId.toString(),
-              filename: `zap_auth_detailed_alerts_${scanId}.json`,
-              contentType: 'application/json',
-              format: 'json',
-              size: detailedAlertsBuffer.length,
-              description: 'Full alert details with all affected URLs'
-            }
-          ],
-          'authScanResult.completedAt': new Date(),
+          status: 'combining',
+          authScanResult: authScanResultObj,
+          zapResult: authScanResultObj, // Copy to zapResult for compatibility
           updatedAt: new Date()
         }
       }
     );
 
+    // Deduct scan from user quota only upon successful completion
+    await finalizeSuccessfulScan(scanId).catch(e => console.error(`[ZAP-AUTH][${scanId}] Failed to finalize scan quota:`, e.message));
+
     console.log(`[ZAP-AUTH] Scan complete: ${scanId}`);
     console.log(`[ZAP-AUTH]   URLs found: ${urlsFound}`);
     console.log(`[ZAP-AUTH]   Alert types: ${summaryAlerts.length}`);
     console.log(`[ZAP-AUTH]   Risk: High=${riskCounts.High}, Medium=${riskCounts.Medium}, Low=${riskCounts.Low}, Info=${riskCounts.Informational}`);
+
+    // Trigger Gemini report generation
+    setImmediate(() => {
+      try {
+        const { checkAndGenerateGemini } = require('./geminiCompletionService');
+        checkAndGenerateGemini(scanId, String(userId)).catch(e =>
+          console.error(`[ZAP-AUTH][${scanId}] checkAndGenerateGemini error (success path):`, e.message)
+        );
+      } catch (e) {
+        console.error(`[ZAP-AUTH][${scanId}] Failed to load geminiCompletionService:`, e.message);
+      }
+    });
 
     // Cleanup: Remove context and replacer rule
     if (contextName) {
@@ -774,10 +825,35 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     return { success: true, scanId };
 
   } catch (error) {
+    if (error.message === 'STOPPED_BY_USER') {
+      console.log(`🛑 [ZAP-AUTH] Authenticated scan for ${scanId} was successfully terminated due to user cancellation.`);
+      // Cleanup: Remove context and replacer rule
+      if (contextName) {
+        try {
+          await zapAuthApi.get('/JSON/context/action/removeContext/', {
+            params: { contextName }
+          });
+          console.log(`[ZAP-AUTH] Cleaned up context: ${contextName}`);
+        } catch (_) {}
+      }
+      try {
+        await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
+          params: { description: 'auth_cookie' }
+        });
+      } catch (_) {}
+      return { success: false, reason: 'stopped' };
+    }
+
     console.error(`[ZAP-AUTH] Scan failed: ${error.message}`);
 
     // Update database with failure
     try {
+      const zapResultCopy = {
+        status: 'failed',
+        phase: 'failed',
+        error: error.message,
+        completedAt: new Date()
+      };
       await ScanResult.updateOne(
         { analysisId: scanId },
         {
@@ -787,9 +863,15 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
             'authScanResult.phase': 'failed',
             'authScanResult.error': error.message,
             'authScanResult.completedAt': new Date(),
+            zapResult: zapResultCopy,
             updatedAt: new Date()
           }
         }
+      );
+
+      const { checkAndGenerateGemini } = require('./geminiCompletionService');
+      checkAndGenerateGemini(scanId, String(userId)).catch(e =>
+        console.error(`[ZAP-AUTH] checkAndGenerateGemini error after ZAP failure:`, e.message)
       );
     } catch (updateError) {
       console.error('[ZAP-AUTH] Failed to update failure status:', updateError.message);
@@ -939,12 +1021,37 @@ async function stopAuthScan(scanId, userId) {
     await zapAuthApi.get('/JSON/ajaxSpider/action/stop/');
   } catch (_) {}
 
-  // Clean up replacer rule
+  // Cancel active/waiting BullMQ job if present
   try {
-    await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
-      params: { description: 'auth_cookie' }
-    });
-  } catch (_) {}
+    const { getZapQueue } = require('../queues/zapQueue');
+    const zapQueue = getZapQueue();
+    if (zapQueue) {
+      const job = await zapQueue.getJob(`zap-${scanId}`);
+      if (job) {
+        console.log(`[BullMQ] Found job zap-${scanId} in zap-queue for authenticated scan. Canceling.`);
+        try {
+          if (typeof job.discard === 'function') {
+            await job.discard();
+          }
+        } catch (_) {}
+        try {
+          await job.remove();
+        } catch (e) {
+          console.error(`[BullMQ] Failed to remove job zap-${scanId}:`, e.message);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[BullMQ] Error canceling zap-queue job for ${scanId}:`, err.message);
+  }
+
+  // Release AWS Fargate dynamic container
+  try {
+    const { releaseContainer } = require('./zapContainerManager');
+    await releaseContainer(scanId);
+  } catch (err) {
+    console.warn(`[zapAuthService] Failed to release container for ${scanId}:`, err.message);
+  }
 
   // Update database
   await ScanResult.updateOne(

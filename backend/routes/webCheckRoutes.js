@@ -6,6 +6,7 @@ const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
+const { consumeScan } = require('../services/planService');
 
 // POST /api/webcheck/scan
 // Body: { url: "example.com", type: "ssl" }
@@ -13,12 +14,12 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     const { url, type } = req.body;
 
     if (!url) {
-        if (req.refundScan) await req.refundScan();
+
         return res.status(400).json({ error: 'URL is required' });
     }
 
     if (!type) {
-        if (req.refundScan) await req.refundScan();
+
         return res.status(400).json({
             error: 'Scan type is required',
             availableTypes: webCheckService.getAvailableScans()
@@ -26,7 +27,7 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     }
 
     if (!webCheckService.ALLOWED_SCANS.includes(type)) {
-        if (req.refundScan) await req.refundScan();
+
         return res.status(400).json({
             error: `Invalid scan type: ${type}`,
             availableTypes: webCheckService.getAvailableScans()
@@ -36,6 +37,14 @@ router.post('/scan', auth, planCheck, async (req, res) => {
     try {
         console.log(`⚡ WebCheck scan request: ${type} for ${url}`);
         const results = await webCheckService.runScan(type, url);
+
+        const limits = req.planUser.getAccountLimits(req.organization);
+        await consumeScan(req.organization._id, {
+            target: url,
+            scansPerTarget: limits.scansPerTarget,
+            targetsPerMonth: limits.targetsPerMonth
+        });
+        console.log(`[Billing] Scan completed - quota deducted: standalone-webcheck-${type}-${url}`);
 
         res.json({
             success: true,
