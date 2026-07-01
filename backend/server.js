@@ -20,7 +20,7 @@ const {
   emitScanProgress
 } = require('./services/notificationService');
 const { setPublisher, setDirectEmitter } = require('./services/scanProgressService');
-const { createRedisClient, getPublisher, getSubscriber } = require('./config/redis');
+const { createRedisClient, getPublisher, getSubscriber, checkRedisClientHealth } = require('./config/redis');
 const { createScanWorker } = require('./workers/scanWorker');
 const { createZapWorker }  = require('./workers/zapWorker');
 
@@ -183,7 +183,23 @@ app.get('/ready', async (req, res) => {
       const { getPublisher } = require('./config/redis');
       const pub = getPublisher();
       if (pub.status === 'ready') {
-        checks.redis = { ready: true, status: 'ready' };
+        let clientStats = {};
+        try {
+          const info = await pub.info('clients');
+          const lines = info.split('\n');
+          let connected = 0;
+          let max = 0;
+          for (const line of lines) {
+            if (line.startsWith('connected_clients:')) connected = parseInt(line.split(':')[1].trim(), 10);
+            if (line.startsWith('maxclients:')) max = parseInt(line.split(':')[1].trim(), 10);
+          }
+          clientStats = {
+            connected_clients: connected,
+            maxclients: max,
+            warning: (max > 0 && connected > 0.8 * max) ? 'High connection usage' : undefined
+          };
+        } catch (_) {}
+        checks.redis = { ready: true, status: 'ready', ...clientStats };
       } else {
         checks.redis = { ready: false, status: pub.status };
         allReady = false;
@@ -302,7 +318,7 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   console.error('💥 Uncaught Exception:', err);
-  process.exit(1);
+  shutdown('uncaughtException');
 });
 
 async function startServer() {
@@ -329,6 +345,9 @@ async function startServer() {
     // ── Redis + real-time scan progress ──────────────────────────────────
     if (process.env.REDIS_URL) {
       try {
+        // Run Redis client count/health check on startup
+        await checkRedisClientHealth();
+
         // Publisher: used by scanProgressService to broadcast progress events
         const publisher = getPublisher();
         setPublisher(publisher);

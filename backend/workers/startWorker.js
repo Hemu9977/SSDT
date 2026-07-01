@@ -25,10 +25,11 @@ if (process.env.DISABLE_WORKER === 'true') {
 }
 
 const connectDB             = require('../db');
-const { createRedisClient } = require('../config/redis');
+const { createRedisClient, disconnectAll } = require('../config/redis');
 const { createScanWorker }  = require('./scanWorker');
 const { createZapWorker }   = require('./zapWorker');
 const { setPublisher }      = require('../services/scanProgressService');
+const { closeScanQueue }    = require('../queues/scanQueue');
 const { closeZapQueue }     = require('../queues/zapQueue');
 
 async function main() {
@@ -54,10 +55,12 @@ async function main() {
   const shutdown = async (signal) => {
     console.log(`\n${signal} received — shutting down workers...`);
     try {
+      console.log(`[Cleanup] Closing worker connection...`);
       await Promise.all([scanWorker.close(), zapWorker.close()]);
-      // Close zap queue connection created by addZapJob calls inside processScanJob
-      await closeZapQueue();
-      await publisher.quit();
+      // Close scan and zap queue connections created inside workers/queues
+      await Promise.all([closeScanQueue(), closeZapQueue()]);
+      // Close all active Redis connections cleanly (workers' dedicated connections + publisher)
+      await disconnectAll();
       console.log('✅ Workers shut down cleanly');
     } catch (err) {
       console.error('⚠️  Error during shutdown:', err.message);
@@ -73,7 +76,7 @@ async function main() {
   });
   process.on('uncaughtException', (err) => {
     console.error('[Worker] Uncaught exception:', err.message);
-    process.exit(1);
+    shutdown('uncaughtException');
   });
 }
 

@@ -11,19 +11,19 @@
  *   await addScanJob(scanId, url, userId);
  */
 const { Queue, QueueEvents } = require('bullmq');
-const { createRedisClient } = require('../config/redis');
+const { getBullMQConnection, createDedicatedConnection } = require('../config/redis');
 
 const QUEUE_NAME = 'scan-queue';
 let _queue = null;
 let _queueEvents = null;
-let _connection = null;
+let _queueEventsConnection = null;
 
 async function closeScanQueue() {
   try {
     // Close QueueEvents first — it holds BullMQ's internal blocking XREAD connection
     if (_queueEvents) { await _queueEvents.close().catch(() => {}); _queueEvents = null; }
     if (_queue)        { await _queue.close().catch(() => {});       _queue       = null; }
-    if (_connection)   { await _connection.quit().catch(() => {});   _connection  = null; }
+    if (_queueEventsConnection) { await _queueEventsConnection.quit().catch(() => {}); _queueEventsConnection = null; }
   } catch (err) {
     console.error('[ScanQueue] Error during close:', err.message);
   }
@@ -39,15 +39,12 @@ const SCAN_JOB_OPTIONS = {
 
 function getScanQueue() {
   if (!_queue) {
-    if (!_connection) {
-      // One BullMQ connection per process for queue + queue events.
-      _connection = createRedisClient({ lazyConnect: false, maxRetriesPerRequest: null, enableOfflineQueue: false });
-    }
+    const connection = getBullMQConnection();
 
     _queue = new Queue(QUEUE_NAME, {
       // BullMQ recommends maxRetriesPerRequest=null to avoid ioredis aborting
       // long/blocking commands used internally by BullMQ.
-      connection: _connection,
+      connection,
       defaultJobOptions: {
         ...SCAN_JOB_OPTIONS
       }
@@ -57,12 +54,13 @@ function getScanQueue() {
       console.error('[ScanQueue] Queue error:', err.message);
     });
 
-    console.log(`[ScanQueue] Queue "${QUEUE_NAME}" ready`);
+    console.log(`[Queue] Created: ${QUEUE_NAME}`);
   }
 
   if (!_queueEvents) {
+    _queueEventsConnection = createDedicatedConnection('scan-queue-events');
     _queueEvents = new QueueEvents(QUEUE_NAME, {
-      connection: _connection
+      connection: _queueEventsConnection
     });
     _queueEvents.on('completed', ({ jobId }) => {
       console.log(`[ScanQueueEvents] ✅ completed jobId=${jobId}`);
@@ -70,9 +68,19 @@ function getScanQueue() {
     _queueEvents.on('failed', ({ jobId, failedReason }) => {
       console.error(`[ScanQueueEvents] ❌ failed jobId=${jobId}: ${failedReason}`);
     });
+    let lastStreamErrorTime = 0;
     _queueEvents.on('error', (err) => {
-      console.error('[ScanQueueEvents] error:', err.message);
+      if (err.message.includes("Stream isn't writeable") || err.message.includes("enableOfflineQueue")) {
+        const now = Date.now();
+        if (now - lastStreamErrorTime > 30000) {
+          console.error(`[ScanQueueEvents] error: ${err.message} (throttled)`);
+          lastStreamErrorTime = now;
+        }
+      } else {
+        console.error('[ScanQueueEvents] error:', err.message);
+      }
     });
+    console.log(`[QueueEvents] Created: ${QUEUE_NAME}`);
   }
 
   return _queue;

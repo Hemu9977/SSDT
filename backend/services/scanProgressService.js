@@ -12,6 +12,7 @@
  *   { scanId, userId, status, progress, message, timestamp, ...extra }
  */
 
+const { executeWithRetry } = require('../config/redis');
 const CHANNEL = 'scan_progress';
 const SCAN_STATE_TTL_S = 3600; // 1 h
 const SCAN_STATE_WRITE_TIMEOUT_MS = 250;
@@ -55,10 +56,10 @@ async function _saveScanState(scanId, userId, data) {
     ..._sanitizeForRedisState(data)
   };
   try {
-    await _publisher.set(key, JSON.stringify(state), 'EX', SCAN_STATE_TTL_S);
+    await executeWithRetry(() => _publisher.set(key, JSON.stringify(state), 'EX', SCAN_STATE_TTL_S));
   } catch (err) {
     // Best-effort only — never block scan flow on Redis state persistence.
-    console.warn('[ScanProgress] Failed to persist scan state:', err.message);
+    console.warn('[ScanProgress] Failed to persist scan state after retries:', err.message);
   }
 }
 
@@ -134,9 +135,9 @@ async function publishScanProgress(scanId, userId, data) {
       timestamp: Date.now(),
       ...data
     });
-    await _publisher.publish(CHANNEL, payload);
+    await executeWithRetry(() => _publisher.publish(CHANNEL, payload));
   } catch (err) {
-    console.error('[ScanProgress] Redis publish failed for', scanId, ':', err.message);
+    console.error('[ScanProgress] Redis publish failed for', scanId, 'after retries:', err.message);
   }
 }
 

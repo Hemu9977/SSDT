@@ -18,13 +18,23 @@
  */
 
 const { Worker } = require('bullmq');
-const { createRedisClient } = require('../config/redis');
+const { createDedicatedConnection } = require('../config/redis');
 const { setPublisher, publishScanProgress } = require('../services/scanProgressService');
 const { ZAP_QUEUE_NAME, ZAP_JOB_TIMEOUT_MS } = require('../queues/zapQueue');
 
 async function processZapJob(job) {
   const { scanId, targetUrl, userId } = job.data;
   console.log(`[ZapWorker] ▶ Job ${job.id} (attempt ${job.attemptsMade + 1}) — scanId=${scanId}`);
+
+  const ScanResult = require('../models/ScanResult');
+  const scan = await ScanResult.findOne({ analysisId: scanId });
+  if (!scan) throw new Error(`ScanResult ${scanId} not found in DB`);
+
+  if (['stopped', 'cancelled', 'failed', 'completed'].includes(scan.status) || 
+      (scan.zapResult && ['stopped', 'completed', 'failed'].includes(scan.zapResult.status))) {
+    console.log(`[ZapWorker] Scan ${scanId} is already in terminal state (${scan.status}), skipping ZAP processing`);
+    return { scanId, skipped: true };
+  }
 
   // Lazy-require to avoid circular-dep issues and allow in-process + standalone usage.
   const { runAsyncZapScanBackground } = require('../services/zapService');
@@ -46,12 +56,14 @@ function createZapWorker(publisherClient) {
   const concurrency = Math.max(1, parseInt(process.env.ZAP_WORKER_CONCURRENCY || '3', 10));
 
   const worker = new Worker(ZAP_QUEUE_NAME, processZapJob, {
-    connection: createRedisClient({ lazyConnect: false, maxRetriesPerRequest: null, enableOfflineQueue: false }),
+    connection: createDedicatedConnection('zap-worker'),
     concurrency,
     // lockDuration must exceed the job timeout so BullMQ never re-assigns a
     // running long scan to another worker process.
     lockDuration: ZAP_JOB_TIMEOUT_MS + 60 * 60 * 1000 // job timeout + 1 h
   });
+
+  console.log(`[Worker] Created: zap-worker`);
 
   worker.on('completed', (job, result) => {
     console.log(`[ZapWorker] Job ${job.id} completed — scanId=${result?.scanId}`);
@@ -59,6 +71,10 @@ function createZapWorker(publisherClient) {
 
   worker.on('failed', async (job, err) => {
     console.error(`[ZapWorker] Job ${job?.id} failed (attempt ${job?.attemptsMade}):`, err.message);
+    if (err.message === 'STOPPED_BY_USER') {
+      console.log(`[ZapWorker] Job ${job?.id} (scanId=${job?.data?.scanId}) was stopped by user. Skipping failure actions.`);
+      return;
+    }
     if (!job?.data?.scanId) return;
 
     const { scanId, userId } = job.data;
@@ -104,8 +120,17 @@ function createZapWorker(publisherClient) {
     }
   });
 
+  let lastStreamErrorTime = 0;
   worker.on('error', (err) => {
-    console.error('[ZapWorker] Worker error:', err.message);
+    if (err.message.includes("Stream isn't writeable") || err.message.includes("enableOfflineQueue")) {
+      const now = Date.now();
+      if (now - lastStreamErrorTime > 30000) {
+        console.error(`[ZapWorker] Worker error: ${err.message} (throttled)`);
+        lastStreamErrorTime = now;
+      }
+    } else {
+      console.error('[ZapWorker] Worker error:', err.message);
+    }
   });
 
   console.log(`[ZapWorker] BullMQ ZAP worker started on queue "${ZAP_QUEUE_NAME}" (concurrency: ${concurrency})`);

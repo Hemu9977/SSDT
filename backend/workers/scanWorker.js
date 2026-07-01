@@ -14,7 +14,7 @@
  */
 
 const { Worker } = require('bullmq');
-const { createRedisClient } = require('../config/redis');
+const { createDedicatedConnection } = require('../config/redis');
 const { setPublisher, publishScanProgress } = require('../services/scanProgressService');
 const { QUEUE_NAME } = require('../queues/scanQueue');
 const scanConfig = require('../config/scanConfig');
@@ -109,6 +109,13 @@ async function processScanJob(job) {
     urlscanResult
   });
 
+  // ── 4.5. Post-fast-scanners Cancel Check ──────────────────────────────────
+  const currentScan = await ScanResult.findOne({ analysisId: scanId });
+  if (currentScan && ['stopped', 'cancelled', 'failed'].includes(currentScan.status)) {
+    console.log(`[Worker] Scan ${scanId} was cancelled/stopped during fast scans. Skipping ZAP and WebCheck.`);
+    return { skipped: true, reason: currentScan.status };
+  }
+
   // ── 5. Start ZAP (non-blocking) ───────────────────────────────────────────
   // Idempotency: don't start ZAP again if it's already started/running/completed.
   // 'pending' is included so we retry when the DB was updated to 'pending' but
@@ -194,13 +201,15 @@ function createScanWorker(publisherClient) {
   const concurrency = Math.max(1, scanConfig.worker.concurrency);
 
   const worker = new Worker(QUEUE_NAME, processScanJob, {
-    connection: createRedisClient({ lazyConnect: false, maxRetriesPerRequest: null, enableOfflineQueue: false }),
+    connection: createDedicatedConnection('scan-worker'),
     concurrency,
     limiter: {
       max:      scanConfig.worker.rateLimitMax,
       duration: scanConfig.worker.rateLimitWindowMs,
     },
   });
+
+  console.log(`[Worker] Created: scan-worker`);
 
   worker.on('completed', (job, result) => {
     if (result?.skipped) {
@@ -232,8 +241,17 @@ function createScanWorker(publisherClient) {
     }
   });
 
+  let lastStreamErrorTime = 0;
   worker.on('error', (err) => {
-    console.error('[Worker] Worker error:', err.message);
+    if (err.message.includes("Stream isn't writeable") || err.message.includes("enableOfflineQueue")) {
+      const now = Date.now();
+      if (now - lastStreamErrorTime > 30000) {
+        console.error(`[Worker] Worker error: ${err.message} (throttled)`);
+        lastStreamErrorTime = now;
+      }
+    } else {
+      console.error('[Worker] Worker error:', err.message);
+    }
   });
 
   console.log(

@@ -7,18 +7,19 @@
  *   - Use BullMQ retry/backoff for ZAP container startup failures
  */
 const { Queue } = require('bullmq');
-const { createRedisClient } = require('../config/redis');
+const { getBullMQConnection } = require('../config/redis');
 
 const ZAP_QUEUE_NAME = 'zap-queue';
 const ZAP_JOB_TIMEOUT_MS = 13 * 60 * 60 * 1000; // 13 h — 1 h buffer over the 12 h scan max
 
 let _queue = null;
-let _connection = null;
 
 async function closeZapQueue() {
   try {
-    if (_queue)      { await _queue.close().catch(() => {});     _queue      = null; }
-    if (_connection) { await _connection.quit().catch(() => {}); _connection = null; }
+    if (_queue) {
+      await _queue.close().catch(() => {});
+      _queue = null;
+    }
   } catch (err) {
     console.error('[ZapQueue] Error during close:', err.message);
   }
@@ -26,11 +27,9 @@ async function closeZapQueue() {
 
 function getZapQueue() {
   if (!_queue) {
-    if (!_connection) {
-      _connection = createRedisClient({ lazyConnect: false, maxRetriesPerRequest: null, enableOfflineQueue: false });
-    }
+    const connection = getBullMQConnection();
     _queue = new Queue(ZAP_QUEUE_NAME, {
-      connection: _connection,
+      connection,
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 30000 }, // 30 s, 60 s, 120 s
@@ -40,7 +39,7 @@ function getZapQueue() {
       }
     });
     _queue.on('error', (err) => console.error('[ZapQueue] Queue error:', err.message));
-    console.log(`[ZapQueue] Queue "${ZAP_QUEUE_NAME}" ready`);
+    console.log(`[Queue] Created: ${ZAP_QUEUE_NAME}`);
   }
   return _queue;
 }

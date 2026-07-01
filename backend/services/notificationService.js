@@ -181,9 +181,75 @@ function emitScanCompleted(userId, payload) {
 function emitScanProgress(scanId, userId, data) {
   if (!io) return;
   const payload = { scanId, ...data };
+
+  // ── Shape payload for frontend & prevent huge payloads from disconnecting Socket.io (max 1MB) ──
+  if (payload.pagespeedResult) {
+    const categories = payload.pagespeedResult.lighthouseResult?.categories || {};
+    payload.psiScores = !payload.pagespeedResult.error ? {
+      performance:   categories.performance?.score   != null ? Math.round(categories.performance.score * 100)   : null,
+      accessibility: categories.accessibility?.score  != null ? Math.round(categories.accessibility.score * 100)  : null,
+      bestPractices: categories['best-practices']?.score != null ? Math.round(categories['best-practices'].score * 100) : null,
+      seo:           categories.seo?.score            != null ? Math.round(categories.seo.score * 100)            : null
+    } : null;
+    payload.hasPagespeed = !payload.pagespeedResult.error;
+    delete payload.pagespeedResult;
+  }
+  
+  if (payload.observatoryResult) {
+    payload.observatoryData = !payload.observatoryResult.error ? {
+      grade: payload.observatoryResult.grade, score: payload.observatoryResult.score,
+      tests_passed: payload.observatoryResult.tests_passed, tests_failed: payload.observatoryResult.tests_failed,
+      tests_quantity: payload.observatoryResult.tests_quantity
+    } : null;
+    payload.hasObservatory = !payload.observatoryResult.error;
+    delete payload.observatoryResult;
+  }
+
+  if (payload.urlscanResult) {
+    payload.urlscanData = !payload.urlscanResult.error ? {
+      uuid: payload.urlscanResult.uuid, verdicts: payload.urlscanResult.verdicts,
+      page: payload.urlscanResult.page, stats: payload.urlscanResult.stats,
+      screenshot: payload.urlscanResult.screenshot, reportUrl: payload.urlscanResult.reportUrl
+    } : null;
+    payload.hasUrlscan = !payload.urlscanResult.error;
+    delete payload.urlscanResult;
+  }
+
+  if (payload.zapResult) {
+    const zs = payload.zapResult.status;
+    if (zs === 'completed' || zs === 'completed_partial') {
+      payload.zapData = { status: zs, riskCounts: payload.zapResult.riskCounts || {}, alerts: payload.zapResult.alerts || [], totalAlerts: payload.zapResult.totalAlerts || 0, totalOccurrences: payload.zapResult.totalOccurrences || 0, reportFiles: payload.zapResult.reportFiles || [], site: payload.zapResult.site, urlsFound: payload.zapResult.urlsFound || 0 };
+    } else if (zs === 'pending' || zs === 'running') {
+      payload.zapData = { status: zs, phase: payload.zapResult.phase || 'queued', progress: payload.zapResult.progress || 0, message: payload.zapResult.message || 'ZAP scan in progress...', urlsFound: payload.zapResult.urlsFound || 0, alertsFound: payload.zapResult.alertsFound || 0 };
+    } else if (zs === 'failed') {
+      payload.zapData = { status: 'failed', error: payload.zapResult.error || 'ZAP scan failed', message: payload.zapResult.message || 'Vulnerability scan encountered an error' };
+    }
+    payload.zapStatus = zs;
+    delete payload.zapResult;
+  }
+
+  if (payload.webCheckResult) {
+    const ws = payload.webCheckResult.status;
+    if (['completed','completed_with_errors','completed_partial'].includes(ws)) {
+      payload.webCheckData = { status: ws, results: payload.webCheckResult.summary || {}, summary: payload.webCheckResult.summary || {}, completedScans: payload.webCheckResult.completedScans || 0, totalScans: payload.webCheckResult.totalScans || 30, hasErrors: payload.webCheckResult.hasErrors || false, duration: payload.webCheckResult.duration || 0 };
+    } else if (ws === 'uploading') {
+      payload.webCheckData = { status: 'uploading', progress: 100, uploadProgress: payload.webCheckResult.uploadProgress || 0, completedScans: payload.webCheckResult.completedScans || payload.webCheckResult.totalScans, totalScans: payload.webCheckResult.totalScans || 30, message: payload.webCheckResult.message || 'Uploading results to storage...' };
+    } else if (ws === 'running' || ws === 'pending') {
+      payload.webCheckData = { status: 'running', progress: payload.webCheckResult.progress || 0, completedScans: payload.webCheckResult.completedScans || 0, totalScans: payload.webCheckResult.totalScans || 30, message: payload.webCheckResult.message || 'WebCheck scans in progress...', partialResults: payload.webCheckResult.partialResults || {} };
+    } else if (ws === 'failed') {
+      payload.webCheckData = { status: 'failed', error: payload.webCheckResult.error || 'WebCheck scan failed', message: payload.webCheckResult.message || 'WebCheck encountered an error' };
+    }
+    payload.webCheckStatus = ws;
+    delete payload.webCheckResult;
+  }
+
+  // Ensure timestamp is always present on the payload
+  payload.timestamp = payload.timestamp || Date.now();
+
   // Deliver to both rooms so the client can listen on either
   io.to(`user_${userId}`).emit('scan:update', payload);
   io.to(`scan:${scanId}`).emit('scan:update', payload);
+  console.log(`[Socket] Progress event sent... (timestamp: ${payload.timestamp})`);
 }
 
 /**
@@ -194,13 +260,25 @@ function emitScanProgress(scanId, userId, data) {
  * @param {Redis} subscriber - A dedicated ioredis client in subscribe mode
  */
 function initializeScanProgressSubscriber(subscriber) {
-  subscriber.subscribe(CHANNEL, (err) => {
-    if (err) {
-      console.error('[NotificationService] Failed to subscribe to scan_progress:', err.message);
-      return;
-    }
-    console.log(`✅ Redis scan_progress subscriber active (channel: ${CHANNEL})`);
+  const doSubscribe = () => {
+    subscriber.subscribe(CHANNEL, (err) => {
+      if (err) {
+        console.error('[NotificationService] Failed to subscribe to scan_progress:', err.message);
+      } else {
+        console.log('[Redis] Subscriber resubscribed...');
+      }
+    });
+  };
+
+  // Subscribe immediately if ready, or when it becomes ready
+  subscriber.on('ready', () => {
+    console.log('[NotificationService] Subscriber ready event received. Subscribing...');
+    doSubscribe();
   });
+
+  if (subscriber.status === 'ready') {
+    doSubscribe();
+  }
 
   subscriber.on('message', (_channel, raw) => {
     try {
