@@ -16,7 +16,7 @@
 
 const User = require('../models/User');
 const Organization = require('../models/Organization');
-const { consumeScan, refundScan } = require('../services/planService');
+const { checkScanQuota } = require('../services/planService');
 
 module.exports = async function planCheck(req, res, next) {
   try {
@@ -54,7 +54,7 @@ module.exports = async function planCheck(req, res, next) {
     // `targetUrl` (authenticated scan).
     const target = (req.body && (req.body.url || req.body.targetUrl)) || null;
 
-    const result = await consumeScan(user.organizationId, {
+    const result = await checkScanQuota(user.organizationId, {
       target,
       scansPerTarget: limits.scansPerTarget,
       targetsPerMonth: limits.targetsPerMonth
@@ -72,16 +72,6 @@ module.exports = async function planCheck(req, res, next) {
 
     req.organization = result;
     req.planUser = user;
-
-    // Expose a one-shot refund so route handlers can give the scan slot back if
-    // the scan fails to start (invalid input, duplicate, pre-scan error). Idempotent:
-    // calling it more than once per request is a no-op after the first call.
-    let refunded = false;
-    req.refundScan = async () => {
-      if (refunded) return;
-      refunded = true;
-      await refundScan(result._id, result.billingCycle, target);
-    };
 
     next();
   } catch (err) {

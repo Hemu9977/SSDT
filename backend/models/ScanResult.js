@@ -91,6 +91,10 @@ const scanResultSchema = new mongoose.Schema({
   updatedAt: {
     type: Date,
     default: Date.now
+  },
+  quotaConsumed: {
+    type: Boolean,
+    default: false
   }
 });
 
