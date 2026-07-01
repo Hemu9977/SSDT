@@ -33,7 +33,6 @@ const ScanTypeSelector = () => {
           {/* Normal Scan Card */}
           <div
             className="scan-type-card"
-            onClick={() => handleScanTypeSelection('normal')}
           >
             <div className="card-icon">
               <svg
@@ -119,7 +118,6 @@ const ScanTypeSelector = () => {
           {/* Authenticated Scan Card */}
           <div
             className="scan-type-card scan-type-card--auth"
-            onClick={() => handleScanTypeSelection('auth')}
           >
             <div className="card-icon card-icon--auth">
               <svg

@@ -481,10 +481,11 @@ const Hero = ({ historicalScan }) => {
       // WS events carry raw fields only; fetch processed score-card summaries
       // (psiScores, observatoryData, zapData, webCheckData, urlscanData, analysisId)
       const token = localStorage.getItem('token');
-      if (token) {
-        fetch(`${API_BASE}/api/scan/active-scan`, { headers: { 'x-auth-token': token } })
+      const currentScanId = data.scanId || data.analysisId || activeScanIdRef.current;
+      if (token && currentScanId) {
+        fetch(`${API_BASE}/api/scan/combined-analysis/${currentScanId}`, { headers: { 'x-auth-token': token } })
           .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.hasActiveScan) setReport(prev => ({ ...prev, ...d, isPartial: false })); })
+          .then(d => { if (d) setReport(prev => ({ ...prev, ...d, isPartial: false })); })
           .catch(() => {});
       }
       return;
@@ -1690,6 +1691,7 @@ const Hero = ({ historicalScan }) => {
                     <button
                       onClick={async () => {
                         setPdfDropdownOpen(false);
+                        if (pdfDownloading) return; // Prevent duplicate clicks
                         try {
                           setPdfDownloading(true);
                           setPdfProgress(0);
@@ -1715,6 +1717,8 @@ const Hero = ({ historicalScan }) => {
                             { progress: 90, message: t('finalizing') },
                           ];
                           let pollCount = 0;
+                          let consecutive404 = 0; // Track transient 404s
+                          const MAX_404_RETRIES = 3;
 
                           while (true) {
                             await new Promise(r => setTimeout(r, 5000));
@@ -1725,13 +1729,20 @@ const Hero = ({ historicalScan }) => {
                             setPdfProgress(progressSteps[stepIdx].progress);
                             setPdfProgressMessage(progressSteps[stepIdx].message);
 
-                            const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                              headers: { 'x-auth-token': token }
-                            });
+                            let pollRes;
+                            try {
+                              pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                headers: { 'x-auth-token': token }
+                              });
+                            } catch (networkErr) {
+                              console.warn('PDF poll network error, retrying…', networkErr.message);
+                              continue; // Retry on network failures
+                            }
 
-                            if (pollRes.status === 202) continue;
+                            if (pollRes.status === 202) { consecutive404 = 0; continue; }
 
                             if (pollRes.status === 200) {
+                              consecutive404 = 0;
                               setPdfProgress(100);
                               setPdfProgressMessage(t('downloadComplete'));
                               const blob = await pollRes.blob();
@@ -1743,10 +1754,19 @@ const Hero = ({ historicalScan }) => {
                               a.click();
                               window.URL.revokeObjectURL(url);
                               document.body.removeChild(a);
-                              console.log('✅ English PDF report downloaded');
+                              console.log('PDF EN report downloaded');
                               break;
                             }
 
+                            // Handle 404 — may be transient Redis miss, retry before giving up
+                            if (pollRes.status === 404) {
+                              consecutive404++;
+                              console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                              if (consecutive404 < MAX_404_RETRIES) continue;
+                              throw new Error('PDF job not found after multiple retries — it may have expired');
+                            }
+
+                            consecutive404 = 0;
                             const errorData = await pollRes.json().catch(() => ({}));
                             if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                               alert(t('geminiKeyExhausted'));
@@ -1765,7 +1785,7 @@ const Hero = ({ historicalScan }) => {
                             setPdfProgressMessage('');
                           }, 2000);
                         } catch (err) {
-                          console.error('❌ PDF download failed:', err);
+                          console.error('PDF download failed:', err);
                           setPdfProgressMessage(`Error: ${err.message}`);
                           setTimeout(() => {
                             setPdfDownloading(false);
@@ -1780,6 +1800,7 @@ const Hero = ({ historicalScan }) => {
                     <button
                       onClick={async () => {
                         setPdfDropdownOpen(false);
+                        if (pdfDownloading) return; // Prevent duplicate clicks
                         try {
                           setPdfDownloading(true);
                           setPdfProgress(0);
@@ -1807,6 +1828,8 @@ const Hero = ({ historicalScan }) => {
                             { progress: 92, message: t('finalizing') },
                           ];
                           let pollCount = 0;
+                          let consecutive404 = 0;
+                          const MAX_404_RETRIES = 3;
 
                           while (true) {
                             await new Promise(r => setTimeout(r, 5000));
@@ -1817,13 +1840,20 @@ const Hero = ({ historicalScan }) => {
                             setPdfProgress(progressSteps[stepIdx].progress);
                             setPdfProgressMessage(progressSteps[stepIdx].message);
 
-                            const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                              headers: { 'x-auth-token': token }
-                            });
+                            let pollRes;
+                            try {
+                              pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                headers: { 'x-auth-token': token }
+                              });
+                            } catch (networkErr) {
+                              console.warn('PDF poll network error, retrying…', networkErr.message);
+                              continue;
+                            }
 
-                            if (pollRes.status === 202) continue;
+                            if (pollRes.status === 202) { consecutive404 = 0; continue; }
 
                             if (pollRes.status === 200) {
+                              consecutive404 = 0;
                               setPdfProgress(100);
                               setPdfProgressMessage(t('downloadComplete'));
                               const blob = await pollRes.blob();
@@ -1835,10 +1865,18 @@ const Hero = ({ historicalScan }) => {
                               a.click();
                               window.URL.revokeObjectURL(url);
                               document.body.removeChild(a);
-                              console.log('✅ Japanese PDF report downloaded');
+                              console.log('PDF JA report downloaded');
                               break;
                             }
 
+                            if (pollRes.status === 404) {
+                              consecutive404++;
+                              console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                              if (consecutive404 < MAX_404_RETRIES) continue;
+                              throw new Error('PDF job not found after multiple retries — it may have expired');
+                            }
+
+                            consecutive404 = 0;
                             const errorData = await pollRes.json().catch(() => ({}));
                             if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                               alert(t('geminiKeyExhausted'));
@@ -1857,7 +1895,7 @@ const Hero = ({ historicalScan }) => {
                             setPdfProgressMessage('');
                           }, 2000);
                         } catch (err) {
-                          console.error('❌ PDF download failed:', err);
+                          console.error('PDF download failed:', err);
                           setPdfProgressMessage(`Error: ${err.message}`);
                           setTimeout(() => {
                             setPdfDownloading(false);

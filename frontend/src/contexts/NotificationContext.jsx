@@ -108,14 +108,79 @@ export const NotificationProvider = ({ children }) => {
       // which worsens backend overload and competes with scan workers.
       transports: ['websocket'],
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 2000,
       reconnectionDelayMax: 10000,
       timeout: 20000
     });
 
+    let fallbackInterval = null;
+
+    const startFallbackPolling = () => {
+      if (fallbackInterval) return;
+      console.log('🔌 Socket disconnected/error. Scheduling recovery fallback HTTP polling...');
+      
+      fallbackInterval = setInterval(async () => {
+        const token = localStorage.getItem('token');
+        if (!token) return;
+
+        const activeScanIds = Array.from(scanListenersRef.current.keys());
+        if (activeScanIds.length === 0) return;
+
+        for (const scanId of activeScanIds) {
+          try {
+            console.log(`[Socket Fallback] Fetching scan state from HTTP for scanId=${scanId}`);
+            const res = await fetch(`${API_BASE}/api/scan/combined-analysis/${scanId}`, {
+              headers: { 'x-auth-token': token }
+            });
+            if (res.ok) {
+              const data = await res.json();
+              
+              // Map payload keys to match what socket payload expects (scanId)
+              const payload = {
+                scanId,
+                status: data.status,
+                progress: data.progress,
+                message: data.message,
+                error: data.error,
+                timestamp: Date.now(),
+                ...data
+              };
+
+              console.log(`[Socket Fallback] Resynced scan ${scanId}: status=${data.status}, progress=${data.progress}`);
+              
+              const callback = scanListenersRef.current.get(scanId);
+              if (callback) {
+                callback(payload);
+              }
+
+              // Avoid infinite polling if the scan is actually completed/failed/stopped.
+              if (['completed', 'failed', 'stopped'].includes(data.status)) {
+                console.log(`[Socket Fallback] Scan ${scanId} is in terminal state "${data.status}". Stop watching.`);
+                scanListenersRef.current.delete(scanId);
+              }
+            } else if (res.status === 404) {
+              console.warn(`[Socket Fallback] Scan ${scanId} not found (404). Stop watching.`);
+              scanListenersRef.current.delete(scanId);
+            }
+          } catch (err) {
+            console.error(`[Socket Fallback] Resync failed for scan ${scanId}:`, err.message);
+          }
+        }
+      }, 10000); // Poll every 10 seconds
+    };
+
+    const stopFallbackPolling = () => {
+      if (fallbackInterval) {
+        console.log('🔌 Clearing fallback polling...');
+        clearInterval(fallbackInterval);
+        fallbackInterval = null;
+      }
+    };
+
     socket.on('connect', () => {
       console.log('🔌 Notification socket connected:', socket.id);
+      stopFallbackPolling();
 
       // Re-join scan rooms after reconnect so scan replay works reliably.
       try {
@@ -129,10 +194,12 @@ export const NotificationProvider = ({ children }) => {
 
     socket.on('disconnect', (reason) => {
       console.log('🔌 Notification socket disconnected:', reason);
+      startFallbackPolling();
     });
 
     socket.on('connect_error', (error) => {
       console.warn('🔌 Notification socket connection error:', error.message);
+      startFallbackPolling();
     });
 
     // Listen for scan completion events (UI notification popup)
@@ -150,6 +217,8 @@ export const NotificationProvider = ({ children }) => {
 
     // Forward scan:update events to registered per-scan listeners
     socket.on('scan:update', (data) => {
+      const timestamp = data.timestamp || Date.now();
+      console.log(`[Socket] Progress event received... (timestamp: ${timestamp})`);
       const { scanId } = data;
       if (scanId && scanListenersRef.current.has(scanId)) {
         scanListenersRef.current.get(scanId)(data);
@@ -161,6 +230,7 @@ export const NotificationProvider = ({ children }) => {
     return () => {
       socket.disconnect();
       socketRef.current = null;
+      stopFallbackPolling();
     };
   }, [user, addNotification]);
 

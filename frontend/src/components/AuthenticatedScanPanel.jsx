@@ -1,4 +1,4 @@
-﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { useTranslation } from '../contexts/TranslationContext';
@@ -8,6 +8,7 @@ import WebCheckDetails from './WebCheckDetails';
 import '../styles/AuthenticatedScan.scss';
 import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
+import { useNotifications } from '../contexts/NotificationContext';
 
 import { API_BASE } from '../config/api';
 
@@ -31,6 +32,7 @@ const AuthenticatedScanPanel = () => {
   const navigate = useNavigate();
   const { currentLang, setHasReport, t } = useTranslation();
   const { theme } = useTheme();
+  const { addScanListener, removeScanListener } = useNotifications();
 
   // Wizard state
   const [step, setStep] = useState(1);
@@ -81,6 +83,11 @@ const AuthenticatedScanPanel = () => {
   // Polling refs
   const pollingIntervalRef = useRef(null);
   const isPollingRef = useRef(false);
+  const wsListeningRef = useRef(false);
+  const wsWatchdogRef = useRef(null);
+  const stopPollingRef = useRef(false);
+  const pollRef = useRef(null);
+  const activeScanIdRef = useRef(null);
 
   // Get headers with auth token
   const getHeaders = () => {
@@ -97,8 +104,14 @@ const AuthenticatedScanPanel = () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+      }
+      if (activeScanIdRef.current) {
+        removeScanListener(activeScanIdRef.current);
+      }
     };
-  }, []);
+  }, [removeScanListener]);
 
   // Close PDF dropdown when clicking outside
   useEffect(() => {
@@ -161,10 +174,11 @@ const AuthenticatedScanPanel = () => {
 
         console.log('[AUTH] Resuming scan from localStorage:', savedScanId);
         setScanId(savedScanId);
+        activeScanIdRef.current = savedScanId;
         setTargetUrl(url || '');
         setStep(4);
         setScanning(true);
-        startPolling(savedScanId);
+        startWebSocketListener(savedScanId);
       } catch (e) {
         localStorage.removeItem('activeAuthScan');
       }
@@ -459,6 +473,7 @@ const AuthenticatedScanPanel = () => {
       }
 
       setScanId(data.scanId);
+      activeScanIdRef.current = data.scanId;
       setStep(4);
 
       // Persist scan to localStorage for resume on page refresh
@@ -468,21 +483,124 @@ const AuthenticatedScanPanel = () => {
         timestamp: Date.now()
       }));
 
-      // Start polling for progress
-      startPolling(data.scanId);
+      // Start WebSocket listener with polling fallback
+      stopPollingRef.current = false;
+      startWebSocketListener(data.scanId);
     } catch (err) {
       setError(err.message);
       setScanning(false);
     }
   };
 
+  // ========== Apply WebSocket Update Data ==========
+  const applyUpdateData = useCallback((data) => {
+    const status = data.status;
+
+    if (status === 'completed') {
+      // WS sends `aiReport` in payload; component reads `report.refinedReport`
+      const normalized = { ...data };
+      if (normalized.aiReport && !normalized.refinedReport) {
+        normalized.refinedReport = normalized.aiReport;
+      }
+      setReport(prev => ({ ...prev, ...normalized, isPartial: false }));
+      setHasReport(true);
+      setScanning(false);
+      setScanProgress(100);
+      setScanPhase('');
+      localStorage.removeItem('activeAuthScan');
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      setStep(5);
+
+      // Fetch the full report for score cards and other components
+      const token = localStorage.getItem('token');
+      const currentScanId = data.scanId || data.analysisId || activeScanIdRef.current;
+      if (token && currentScanId) {
+        fetch(`${API_BASE}/api/zap-auth/status/${currentScanId}`, { headers: { 'x-auth-token': token } })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d) setReport(prev => ({ ...prev, ...d, isPartial: false })); })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    if (status === 'failed') {
+      setScanning(false);
+      setScanProgress(0);
+      setScanPhase('');
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      setError(data.error || t('scanFailed'));
+      localStorage.removeItem('activeAuthScan');
+      return;
+    }
+
+    if (status === 'stopped') {
+      setScanning(false);
+      setScanPhase(t('scanWasStopped'));
+      wsListeningRef.current = false;
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      localStorage.removeItem('activeAuthScan');
+      return;
+    }
+
+    // Partial updates
+    setReport(prev => ({ ...(prev || {}), ...data, isPartial: true }));
+    if (data.progress != null) setScanProgress(data.progress);
+    if (data.phase != null) setScanPhase(data.phase);
+  }, [t, setHasReport]);
+
+  // ========== WebSocket Listener ==========
+  const startWebSocketListener = useCallback((scanId) => {
+    if (wsListeningRef.current) return;
+    wsListeningRef.current = true;
+
+    console.log('[AUTH] WebSocket listener registered for scan:', scanId);
+
+    addScanListener(scanId, (data) => {
+      if (stopPollingRef.current) return;
+
+      // First WS event cancels the polling watchdog — WebSocket is alive
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      console.log('[AUTH] scan:update via WebSocket:', data.status, data.progress);
+      applyUpdateData(data);
+    });
+
+    // Watchdog: if no WS event arrives within 15s, fall back to HTTP polling
+    wsWatchdogRef.current = setTimeout(() => {
+      wsWatchdogRef.current = null;
+      if (!stopPollingRef.current && wsListeningRef.current) {
+        console.warn('[AUTH] No WS event in 15s — activating HTTP polling fallback');
+        pollRef.current?.(scanId);
+      }
+    }, 15000);
+  }, [addScanListener, applyUpdateData]);
+
   // ========== Step 4: Poll Scan Status ==========
   const startPolling = useCallback((scanId) => {
     if (isPollingRef.current) return;
 
     isPollingRef.current = true;
+    wsListeningRef.current = false; // Polling fallback is active
 
     const poll = async () => {
+      if (stopPollingRef.current) {
+        isPollingRef.current = false;
+        return;
+      }
+
       try {
         const res = await fetch(`${API_BASE}/api/zap-auth/status/${scanId}`, {
           headers: getHeaders()
@@ -493,6 +611,9 @@ const AuthenticatedScanPanel = () => {
         }
 
         const data = await res.json();
+
+        // Prevent updating if stopped/cancelled while requesting
+        if (stopPollingRef.current) return;
 
         setScanPhase(data.phase || '');
         setScanProgress(data.progress || 0);
@@ -518,14 +639,17 @@ const AuthenticatedScanPanel = () => {
           setScanning(false);
         }
       } catch (err) {
-        console.error('Polling error:', err);
+        console.error('[AUTH] Polling error:', err);
       }
     };
 
-    // Poll immediately then every 3 seconds
+    // Poll immediately, then every 15 seconds (reduced frequency fallback since WS is preferred)
     poll();
-    pollingIntervalRef.current = setInterval(poll, 3000);
+    pollingIntervalRef.current = setInterval(poll, 15000);
   }, [t]);
+
+  // Keep pollRef pointed at the latest closure
+  pollRef.current = startPolling;
 
   // ========== Stop Scan ==========
   const handleStopScan = async () => {
@@ -538,6 +662,16 @@ const AuthenticatedScanPanel = () => {
     }
 
     try {
+      stopPollingRef.current = true;
+      if (wsWatchdogRef.current) {
+        clearTimeout(wsWatchdogRef.current);
+        wsWatchdogRef.current = null;
+      }
+      if (activeScanIdRef.current) {
+        removeScanListener(activeScanIdRef.current);
+      }
+      wsListeningRef.current = false;
+
       await fetch(`${API_BASE}/api/zap-auth/stop/${scanId}`, {
         method: 'POST',
         headers: getHeaders()
@@ -1621,6 +1755,9 @@ const AuthenticatedScanPanel = () => {
                                       { progress: 90, message: 'Finalizing...' },
                                     ];
                                     let pollCount = 0;
+                                    let consecutive404 = 0;
+                                    const MAX_404_RETRIES = 3;
+
                                     while (true) {
                                       await new Promise(r => setTimeout(r, 5000));
                                       pollCount++;
@@ -1628,11 +1765,21 @@ const AuthenticatedScanPanel = () => {
                                       const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
                                       setPdfProgress(progressSteps[stepIdx].progress);
                                       setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                        headers: { 'x-auth-token': token }
-                                      });
-                                      if (pollRes.status === 202) continue;
+                                      
+                                      let pollRes;
+                                      try {
+                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                          headers: { 'x-auth-token': token }
+                                        });
+                                      } catch (networkErr) {
+                                        console.warn('PDF poll network error, retrying…', networkErr.message);
+                                        continue;
+                                      }
+
+                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
+
                                       if (pollRes.status === 200) {
+                                        consecutive404 = 0;
                                         setPdfProgress(100);
                                         setPdfProgressMessage('Download complete!');
                                         const blob = await pollRes.blob();
@@ -1646,6 +1793,15 @@ const AuthenticatedScanPanel = () => {
                                         document.body.removeChild(a);
                                         break;
                                       }
+
+                                      if (pollRes.status === 404) {
+                                        consecutive404++;
+                                        console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                                        if (consecutive404 < MAX_404_RETRIES) continue;
+                                        throw new Error('PDF job not found after multiple retries — it may have expired');
+                                      }
+                                      
+                                      consecutive404 = 0;
                                       const errorData = await pollRes.json().catch(() => ({}));
                                       if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                                         alert('Gemini key is exhausted');
@@ -1696,6 +1852,9 @@ const AuthenticatedScanPanel = () => {
                                       { progress: 92, message: 'Finalizing...' },
                                     ];
                                     let pollCount = 0;
+                                    let consecutive404 = 0;
+                                    const MAX_404_RETRIES = 3;
+
                                     while (true) {
                                       await new Promise(r => setTimeout(r, 5000));
                                       pollCount++;
@@ -1703,11 +1862,21 @@ const AuthenticatedScanPanel = () => {
                                       const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
                                       setPdfProgress(progressSteps[stepIdx].progress);
                                       setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      const pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                        headers: { 'x-auth-token': token }
-                                      });
-                                      if (pollRes.status === 202) continue;
+                                      
+                                      let pollRes;
+                                      try {
+                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
+                                          headers: { 'x-auth-token': token }
+                                        });
+                                      } catch (networkErr) {
+                                        console.warn('PDF poll network error, retrying…', networkErr.message);
+                                        continue;
+                                      }
+
+                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
+                                      
                                       if (pollRes.status === 200) {
+                                        consecutive404 = 0;
                                         setPdfProgress(100);
                                         setPdfProgressMessage('Download complete!');
                                         const blob = await pollRes.blob();
@@ -1721,6 +1890,15 @@ const AuthenticatedScanPanel = () => {
                                         document.body.removeChild(a);
                                         break;
                                       }
+
+                                      if (pollRes.status === 404) {
+                                        consecutive404++;
+                                        console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                                        if (consecutive404 < MAX_404_RETRIES) continue;
+                                        throw new Error('PDF job not found after multiple retries — it may have expired');
+                                      }
+                                      
+                                      consecutive404 = 0;
                                       const errorData = await pollRes.json().catch(() => ({}));
                                       if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                                         alert('Gemini key is exhausted');

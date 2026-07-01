@@ -50,49 +50,10 @@
     border: 2px solid var(--accent);
     border-radius: 12px;
     padding: 2.5rem;
-    cursor: pointer;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
     box-shadow: 0 0 20px rgba(255, 107, 0, 0.15);
-
-    &::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: linear-gradient(135deg, var(--accent), var(--accent-light));
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      z-index: 0;
-    }
-
-    &:hover {
-      transform: translateY(-8px);
-      box-shadow: 0 8px 30px rgba(255, 107, 0, 0.3), 0 0 60px rgba(255, 107, 0, 0.2);
-      border-color: var(--accent-light);
-
-      &::before {
-        opacity: 0.05;
-      }
-
-      .card-icon {
-        transform: scale(1.1);
-        box-shadow: 0 0 30px rgba(255, 107, 0, 0.4);
-      }
-
-      .card-button {
-        background: var(--accent-light);
-        transform: translateX(4px);
-
-        svg {
-          transform: translateX(4px);
-        }
-      }
-    }
-
 
     > * {
       position: relative;
@@ -183,11 +144,32 @@
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      cursor: pointer;
 
       svg {
         width: 20px;
         height: 20px;
         transition: transform 0.3s ease;
+      }
+
+      &:hover {
+        transform: translateY(-2px);
+        background: var(--accent-light);
+        box-shadow: 0 4px 15px rgba(255, 107, 0, 0.4);
+
+        svg {
+          transform: translateX(4px);
+        }
+      }
+
+      &:active {
+        transform: translateY(0);
+        box-shadow: 0 2px 8px rgba(255, 107, 0, 0.4);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--accent-light);
+        outline-offset: 2px;
       }
     }
   }
