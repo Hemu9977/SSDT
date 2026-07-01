@@ -21,6 +21,7 @@ const { publishScanProgress } = require('./scanProgressService');
 const { getPublisher } = require('../config/redis');
 const { getSanitizedZapReport } = require('../utils/vulnFilter');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
+const { finalizeSuccessfulScan } = require('./planService');
 
 /**
  * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for a user.
@@ -224,6 +225,10 @@ async function _finishWithFallback(scan, scanId, userId, message) {
     'fallback-complete'
   );
   _markGeminiDone(scanId).catch(() => {});
+  
+  // Deduct scan from user quota only upon successful completion
+  await finalizeSuccessfulScan(scanId).catch(e => console.error(`[Gemini][${scanId}] Failed to finalize scan quota:`, e.message));
+
   await publishScanProgress(scanId, userId, { status: 'completed', progress: 100, message: 'Scan complete' });
   handleScanComplete(scanId, userId, 'Combined Security Scan', scan.target);
 }
@@ -419,6 +424,10 @@ async function _doGenerate(scanId, userId) {
     }
 
     _markGeminiDone(scanId).catch(() => {});
+    
+    // Deduct scan from user quota only upon successful completion
+    await finalizeSuccessfulScan(scanId).catch(e => console.error(`[Gemini][${scanId}] Failed to finalize scan quota:`, e.message));
+
     console.log(`[Gemini][${scanId}] ✅ Scan completed with AI report`);
 
     // ── Emit 100% progress ────────────────────────────────────────────────────

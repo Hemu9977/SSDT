@@ -30,7 +30,7 @@ const { sanitizeScanForLLM } = require('./geminiSanitizer');
 // ─── Config ────────────────────────────────────────────────────────────────────
 // Spec requirement: PDFKit-only (no Puppeteer/HTML renderer)
 const PDF_RENDERER = 'pdfkit';
-const RATE_LIMIT_DELAY = 35_000; // 35 s — keeps Gemini under 2 RPM
+const pdfOpts = { maxRetries: 1, timeoutMs: 35000, maxBackoffMs: 3000 };
 
 const FONTS = {
   regular: path.join(__dirname, '../fonts/NotoSansJP-Regular.ttf'),
@@ -62,6 +62,82 @@ const TEMPLATE_PAGE   = { width: 595.28, height: 841.89 };
 const TEMPLATE_MARGIN = { top: 60, bottom: 60, left: 55, right: 55 };
 
 // ─── Small utilities ────────────────────────────────────────────────────────────
+
+function timeout(ms, message) {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
+}
+
+function severityRank(risk) {
+  const r = String(risk || '').toLowerCase();
+  if (r.includes('critical') || r.includes('high') || r.includes('高')) return 4;
+  if (r.includes('medium') || r.includes('中')) return 3;
+  if (r.includes('low') || r.includes('低')) return 2;
+  return 1;
+}
+
+function buildAiAnalysisFromRefinedReport(refinedReport) {
+  try {
+    const lines = refinedReport.split('\n');
+    const sections = [];
+    let currentSection = { heading: '', content: [] };
+    let currentParagraph = [];
+    let currentList = [];
+
+    const pushParagraph = () => {
+      if (currentParagraph.length) {
+        currentSection.content.push({ type: 'paragraph', text: currentParagraph.join(' ') });
+        currentParagraph = [];
+      }
+    };
+    const pushList = () => {
+      if (currentList.length) {
+        currentSection.content.push({ type: 'bullets', items: currentList });
+        currentList = [];
+      }
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        pushParagraph();
+        pushList();
+        continue;
+      }
+
+      if (trimmed.startsWith('#')) {
+        pushParagraph();
+        pushList();
+        if (currentSection.heading || currentSection.content.length) {
+          sections.push(currentSection);
+        }
+        currentSection = { heading: trimmed.replace(/^#+\s*/, ''), content: [] };
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        pushParagraph();
+        currentList.push(trimmed.substring(2).trim());
+      } else {
+        pushList();
+        currentParagraph.push(trimmed);
+      }
+    }
+    pushParagraph();
+    pushList();
+    if (currentSection.heading || currentSection.content.length) {
+      sections.push(currentSection);
+    }
+    
+    if (!sections.length && lines.length) {
+       sections.push({ heading: 'Analysis', content: [{ type: 'paragraph', text: refinedReport }] });
+    }
+
+    return {
+      title: 'AI-Generated Security Analysis',
+      sections: sections
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 
 function escapeHtml(v) {
   return String(v ?? '')
@@ -201,6 +277,22 @@ function formatHistoryDate(date, lang) {
   return lang === 'ja' ? `${y}/${mo}/${dd}` : `${dd}/${mo}/${y}`;
 }
 
+/**
+ * Format a date for the PDF cover page.
+ * EN => "June 30, 2026"  (human-readable month name)
+ * JA => "2026年6月30日"   (standard Japanese date)
+ */
+function formatCoverDate(date, lang) {
+  const d = date instanceof Date ? date : (date ? new Date(date) : null);
+  if (!d || isNaN(d.getTime())) return '';
+  if (lang === 'ja') {
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  }
+  const months = ['January','February','March','April','May','June',
+                  'July','August','September','October','November','December'];
+  return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
 function looksLikeUrl(text) {
   const s = String(text || '').trim();
   if (!s) return false;
@@ -324,6 +416,46 @@ async function fetchScanHistoryRows(scanResult, limit = 8) {
 async function ensureGeminiScanHistory(scanData, scanHistoryRows) {
   const hasRows = !!(scanData?.scanHistory?.rows?.en?.length || scanData?.scanHistory?.rows?.ja?.length);
   if (hasRows) return scanData.scanHistory;
+  // If Gemini returned rows but the sanitizer replaced executor fields with
+  // "REDACTED", re-inject the real executedBy/date/status values from the
+  // DB-provided `scanHistoryRows` so the PDF shows actual data.
+  try {
+    const formatted = scanData.scanHistory;
+    if (formatted && formatted.rows && Array.isArray(scanHistoryRows)) {
+      const enRows = Array.isArray(formatted.rows.en) ? formatted.rows.en : [];
+      const jaRows = Array.isArray(formatted.rows.ja) ? formatted.rows.ja : [];
+      for (let i = 0; i < scanHistoryRows.length; i++) {
+        const src = scanHistoryRows[i] || {};
+        if (enRows[i] && Array.isArray(enRows[i])) {
+          for (let c = 0; c < enRows[i].length; c++) {
+            const cell = enRows[i][c];
+            if (typeof cell === 'string' && cell.includes('REDACTED')) {
+              if (c === 0) enRows[i][c] = src.dateEn || cell.replace(/REDACTED/g, 'N/A');
+              else if (c === 1) enRows[i][c] = src.executedByEn || cell.replace(/REDACTED/g, 'N/A');
+              else if (c === 2) enRows[i][c] = src.status || cell.replace(/REDACTED/g, '');
+            }
+          }
+        }
+        if (jaRows[i] && Array.isArray(jaRows[i])) {
+          for (let c = 0; c < jaRows[i].length; c++) {
+            const cell = jaRows[i][c];
+            if (typeof cell === 'string' && cell.includes('REDACTED')) {
+              if (c === 0) jaRows[i][c] = src.dateJa || cell.replace(/REDACTED/g, 'N/A');
+              else if (c === 1) jaRows[i][c] = src.executedByJa || cell.replace(/REDACTED/g, 'N/A');
+              else if (c === 2) jaRows[i][c] = getStatusLabel(src.status, 'ja') || cell.replace(/REDACTED/g, '');
+            }
+          }
+        }
+      }
+      // write back patched rows
+      formatted.rows.en = enRows;
+      formatted.rows.ja = jaRows;
+      scanData.scanHistory = formatted;
+    }
+  } catch (e) {
+    console.warn('[PDF] Failed to patch REDACTED in Gemini scanHistory:', e && e.message);
+  }
+  return scanData.scanHistory;
   try {
     const formatted = await formatScanHistoryForPdf(scanHistoryRows);
     if (scanData && typeof scanData === 'object') {
@@ -347,6 +479,100 @@ async function ensureGeminiScanHistory(scanData, scanHistoryRows) {
     }
     return fallbackHistory;
   }
+}
+
+/**
+ * Re-inject real scan metadata into scanData after Gemini formatting.
+ *
+ * The Gemini sanitizer replaces target/analysisId with "REDACTED" to protect
+ * user privacy during LLM calls. This function restores the real values from
+ * the original scanResult for PDF rendering.
+ *
+ * If a value is genuinely unavailable, logs an explicit warning and sets "N/A".
+ */
+function injectRealScanMetadata(scanData, scanResult) {
+  if (!scanData || !scanData.header) {
+    scanData = scanData || {};
+    scanData.header = scanData.header || {};
+  }
+
+  // ── Scan URL ──
+  const realTarget = scanResult?.target;
+  if (realTarget && realTarget !== 'REDACTED') {
+    scanData.header.target = realTarget;
+  } else if (!realTarget) {
+    console.warn('[PDF] Missing scan URL');
+    scanData.header.target = 'N/A';
+  } else if (realTarget === 'REDACTED') {
+    // scanResult itself should never have REDACTED — defensive guard
+    console.warn('[PDF] Missing scan URL');
+    scanData.header.target = 'N/A';
+  }
+
+  // ── Scan ID / Analysis ID ──
+  const realId = scanResult?.analysisId;
+  if (realId && realId !== 'REDACTED') {
+    scanData.header.scanId = realId;
+  } else if (!realId) {
+    console.warn('[PDF] Missing scan ID');
+    scanData.header.scanId = 'N/A';
+  } else if (realId === 'REDACTED') {
+    console.warn('[PDF] Missing scan ID');
+    scanData.header.scanId = 'N/A';
+  }
+
+  // ── Date — store raw Date so renderCoverPage() can format per-language ──
+  scanData.header.dateRaw = scanResult?.createdAt || new Date();
+
+  // ── Threat Reputation Metadata ──
+  const realUrlscan = scanResult?.urlscanResult || scanResult?.urlscanData;
+  let fallbackDomain = 'N/A';
+  if (scanResult?.target && scanResult.target !== 'REDACTED') {
+    try {
+      fallbackDomain = new URL(scanResult.target).hostname;
+    } catch {
+      fallbackDomain = scanResult.target.replace(/^https?:\/\//, '').split('/')[0];
+    }
+  }
+  const domain = realUrlscan?.page?.domain || fallbackDomain;
+  const serverIp = realUrlscan?.page?.ip || 'N/A';
+  const country = realUrlscan?.page?.country || 'N/A';
+
+  console.log('[PDF] Threat reputation metadata', { domain, serverIp, country });
+  if (domain === 'N/A' && serverIp === 'N/A') {
+    console.warn('[PDF] Missing threat reputation metadata');
+  }
+
+  if (Array.isArray(scanData.sections)) {
+    for (const section of scanData.sections) {
+      const items = section.items || section.content;
+      if (!Array.isArray(items)) continue;
+      
+      for (const item of items) {
+        if (!item || !item.label) continue;
+        
+        const labelObj = item.label;
+        const labelEn = (typeof labelObj === 'string' ? labelObj : (labelObj.en || '')).toString().toLowerCase().trim();
+        const labelJa = (typeof labelObj === 'string' ? labelObj : (labelObj.ja || '')).toString().toLowerCase().trim();
+        
+        const isDomain = labelEn.includes('domain') || labelJa.includes('ドメイン');
+        const isIp = labelEn.includes('ip') || labelJa.includes('ip');
+        const isCountry = labelEn.includes('country') || labelJa.includes('国');
+        
+        if (isDomain) {
+           item.value = domain;
+        } else if (isIp) {
+           item.value = serverIp;
+        } else if (isCountry) {
+           item.value = country;
+        } else if (typeof item.value === 'string' && item.value.includes('REDACTED')) {
+           item.value = item.value.replace(/REDACTED/g, 'N/A');
+        }
+      }
+    }
+  }
+
+  return scanData;
 }
 
 async function getDiagnosisHistoryTable(scanResult, lang, limit = 8) {
@@ -651,7 +877,7 @@ function buildSingleLanguageReportHtml({ scanData, aiAnalysis, vulnerabilities, 
   <h1>${escapeHtml(title)}</h1>
   <div class="meta">
     <span>${escapeHtml(L === 'ja' ? 'スキャンURL' : 'Scan URL')}: ${escapeHtml(hdr.target || '')}</span>
-    <span>${escapeHtml(L === 'ja' ? '生成日' : 'Generated')}: ${escapeHtml(hdr.date || '')}</span>
+    <span>${escapeHtml(L === 'ja' ? '生成日' : 'Generated')}: ${escapeHtml((() => { const dr = hdr.dateRaw || hdr.date || ''; const dd = dr instanceof Date ? dr : (dr ? new Date(dr) : null); return dd && !isNaN(dd.getTime()) ? formatCoverDate(dd, L) : String(dr); })())}</span>
     <span>${escapeHtml(L === 'ja' ? 'スキャンID' : 'Scan ID')}: ${escapeHtml(hdr.scanId || '')}</span>
   </div>
   <h2>${escapeHtml(L === 'ja' ? 'エグゼクティブサマリー' : 'Executive Summary')}</h2>
@@ -803,12 +1029,13 @@ function renderCoverPage(doc, scanData, lang, ts) {
 
   const titleS = sanitizeTextForPdf(title, lang);
   const targetS = sanitizeTextForPdf(scanData.header?.target || '', lang);
-  const dateRaw = scanData.header?.date || '';
-  // Try to parse and reformat dates to spec; if parsing fails, keep sanitized raw.
-  const parsed = dateRaw ? new Date(dateRaw) : null;
-  const dateS = parsed && !isNaN(parsed.getTime())
-    ? formatHistoryDate(parsed, lang)
-    : sanitizeTextForPdf(dateRaw, lang);
+  // Use dateRaw (injected by injectRealScanMetadata) for per-language formatting;
+  // fall back to header.date string if dateRaw is absent.
+  const dateRawValue = scanData.header?.dateRaw || scanData.header?.date || '';
+  const parsedDate = dateRawValue instanceof Date ? dateRawValue : (dateRawValue ? new Date(dateRawValue) : null);
+  const dateS = parsedDate && !isNaN(parsedDate.getTime())
+    ? formatCoverDate(parsedDate, lang)
+    : sanitizeTextForPdf(String(dateRawValue), lang);
   const scanIdS = sanitizeTextForPdf(scanData.header?.scanId || '', lang);
 
   doc.font('NotoSans-Bold').fontSize(28).fillColor(COLORS.primary)
@@ -1157,20 +1384,84 @@ function collectBuffer(doc) {
 async function generatePdfReport(scanResult) {
   console.log('📄 Starting bilingual PDF generation…');
 
+  console.time('[PDF] Total');
+  console.log('[PDF] Loading scan data');
+
   // Sanitized copy for Gemini calls only — original scanResult is unchanged and
   // continues to be used for GridFS fetches, history queries, and PDF rendering.
   const llmSafeScan = sanitizeScanForLLM(scanResult);
+  
+  const pdfSafeScan = JSON.parse(JSON.stringify(llmSafeScan));
+  if (pdfSafeScan.zapResult && Array.isArray(pdfSafeScan.zapResult.alerts)) {
+    pdfSafeScan.zapResult.alerts = pdfSafeScan.zapResult.alerts
+      .sort((a, b) => severityRank(b.risk) - severityRank(a.risk))
+      .slice(0, 50);
+  }
+  if (pdfSafeScan.webCheckResult && pdfSafeScan.webCheckResult.fullResults) {
+    for (const key of Object.keys(pdfSafeScan.webCheckResult.fullResults)) {
+      const res = pdfSafeScan.webCheckResult.fullResults[key];
+      if (res) {
+        delete res.html;
+        delete res.rawResponse;
+        delete res.headersDump;
+      }
+    }
+  }
+  if (pdfSafeScan.pagespeedResult?.lighthouseResult?.categories) {
+    const cats = pdfSafeScan.pagespeedResult.lighthouseResult.categories;
+    pdfSafeScan.pagespeedResult.lighthouseResult.categories = {
+      performance: cats.performance,
+      accessibility: cats.accessibility,
+      'best-practices': cats['best-practices'],
+      seo: cats.seo
+    };
+  }
+  if (pdfSafeScan.urlscanResult) {
+    pdfSafeScan.urlscanResult = {
+      verdicts: pdfSafeScan.urlscanResult.verdicts,
+      page: pdfSafeScan.urlscanResult.page,
+      stats: pdfSafeScan.urlscanResult.stats
+    };
+  }
+  if (pdfSafeScan.observatoryResult) {
+    pdfSafeScan.observatoryResult = {
+      grade: pdfSafeScan.observatoryResult.grade,
+      score: pdfSafeScan.observatoryResult.score,
+      tests_passed: pdfSafeScan.observatoryResult.tests_passed,
+      tests_failed: pdfSafeScan.observatoryResult.tests_failed,
+      tests_quantity: pdfSafeScan.observatoryResult.tests_quantity
+    };
+  }
+
+  const chars = JSON.stringify(pdfSafeScan).length;
+  console.log('[PDF] Prompt trimmed');
+  console.log('[PDF] Prompt size:', chars);
+  console.log('[PDF] Estimated tokens:', Math.ceil(chars / 4));
+  console.log('[PDF] ZAP alerts:', pdfSafeScan.zapResult?.alerts?.length || 0);
 
   // Scan history input is dynamic and generated by Gemini as part of scanData.
   const scanHistoryRows = await fetchScanHistoryRows(scanResult);
 
   // Step 1 – scan data
+  console.log('[PDF] Starting Gemini formatting');
+  console.time('[PDF] Gemini format');
   let scanData;
-  try   { scanData = await formatScanDataForPdf(llmSafeScan, { scanHistoryRows }); }
+  try { 
+    scanData = await Promise.race([
+      formatScanDataForPdf(pdfSafeScan, { scanHistoryRows, ...pdfOpts }),
+      timeout(35000, 'formatScanDataForPdf timed out')
+    ]);
+  }
   catch (e) {
     console.warn('[PDF] Gemini scan data formatting failed, using fallback:', e.message);
     scanData = buildFallbackScanDataForPdf(scanResult);
   }
+  console.timeEnd('[PDF] Gemini format');
+  console.log('[PDF] Gemini formatting completed');
+
+  // Re-inject real scan metadata (target URL, scan ID, date) that was
+  // replaced with "REDACTED" by the Gemini sanitizer.
+  injectRealScanMetadata(scanData, scanResult);
 
   // Ensure scanHistory is always populated even if scanData fallback path is used.
   await ensureGeminiScanHistory(scanData, scanHistoryRows);
@@ -1178,29 +1469,35 @@ async function generatePdfReport(scanResult) {
   const zapSection = scanData.sections?.find(s => s.id === 'zap');
   await fetchFullAlertsFromGridFS(scanResult, zapSection);
 
-  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
-
   // Step 2 – AI analysis (EN)
   let aiAnalysisEn = null;
   if (scanResult.refinedReport) {
     try {
-      aiAnalysisEn = await formatAiAnalysisForPdf(scanResult.refinedReport);
-      console.log('[PDF] Using Gemini-generated report');
+      let parsed = buildAiAnalysisFromRefinedReport(scanResult.refinedReport);
+      if (!parsed || !parsed.title || !parsed.sections?.length) {
+         console.warn('[PDF] Local parser failed, falling back to Gemini');
+         parsed = await formatAiAnalysisForPdf(scanResult.refinedReport, pdfOpts);
+      }
+      aiAnalysisEn = parsed;
+      console.log('[PDF] Using local parser-generated report');
     } catch (e) {
       console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
       // aiAnalysisEn stays null — PDF renders without AI narrative section
     }
   }
 
-  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
-
   // Step 3 – translate to JA (static fallback if Gemini unavailable)
   const vulnsEn = zapSection?.detailedAlerts || [];
   let aiAnalysisJa = null, vulnsJa = [];
 
   if (aiAnalysisEn || vulnsEn.length) {
+    console.log('[PDF] Starting JA translation');
+    console.time('[PDF] Translate JA');
     try {
-      const ja = await translateToJapanese(aiAnalysisEn || {}, vulnsEn);
+      const ja = await Promise.race([
+        translateToJapanese(aiAnalysisEn || {}, vulnsEn, pdfOpts),
+        timeout(45000, 'translateToJapanese timed out')
+      ]);
       aiAnalysisJa = ja.aiAnalysis;
       vulnsJa      = ja.vulnerabilities.map((v, i) => ({
         ...v,
@@ -1216,6 +1513,8 @@ async function generatePdfReport(scanResult) {
       aiAnalysisJa = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
       vulnsJa = vulnsEn;
     }
+    console.timeEnd('[PDF] Translate JA');
+    console.log('[PDF] JA translation completed');
   }
 
   const scanHistory = scanData?.scanHistory || null;
@@ -1256,48 +1555,143 @@ async function generatePdfReport(scanResult) {
     Author:  'SSDT Security Scanner',
     Subject: 'Comprehensive Security and Performance Analysis'
   });
+  
+  console.log('[PDF] Rendering PDF');
+  console.time('[PDF] Render');
   const buf = collectBuffer(doc);
   renderTemplateReport(doc, scanData, aiAnalysisEn, vulnsEn, 'en', tsEn);
   doc.addPage();
   renderTemplateReport(doc, scanData, aiAnalysisJa, vulnsJa, 'ja', tsJa);
   doc.end();
-  console.log('[PDF] PDF generation completed successfully');
+  console.timeEnd('[PDF] Render');
+  console.log('[PDF] PDF completed');
+  console.timeEnd('[PDF] Total');
   return buf;
 }
 
-/**
- * Generate a single-language PDF (EN or JA).
- */
 async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 'critical-high') {
-  console.log(`📄 Starting ${lang.toUpperCase()} PDF generation…`);
+  const analysisId = scanResult?.analysisId || 'unknown';
+  console.log(`[PDF][${analysisId}] Starting ${lang.toUpperCase()} PDF generation (accessLevel=${accessLevel})…`);
+
+  // ── Validate scan data before proceeding ──────────────────────────────────
+  if (!scanResult) {
+    const err = new Error('scanResult is null or undefined — cannot generate PDF');
+    err.code = 'MISSING_SCAN_DATA';
+    throw err;
+  }
+  if (!scanResult.target) {
+    const err = new Error('scanResult.target is missing — cannot generate PDF');
+    err.code = 'MISSING_SCAN_DATA';
+    throw err;
+  }
+  const hasAnyData = scanResult.pagespeedResult || scanResult.observatoryResult ||
+                     scanResult.urlscanResult   || scanResult.zapResult ||
+                     scanResult.webCheckResult;
+  if (!hasAnyData) {
+    console.error(`[PDF][${analysisId}] No scan data available. pagespeed=${!!scanResult.pagespeedResult} observatory=${!!scanResult.observatoryResult} urlscan=${!!scanResult.urlscanResult} zap=${!!scanResult.zapResult} webcheck=${!!scanResult.webCheckResult}`);
+    const err = new Error('No scan results available for PDF generation. At least one scanner result is required.');
+    err.code = 'MISSING_SCAN_DATA';
+    throw err;
+  }
+  console.log(`[PDF][${analysisId}] Scan data present: pagespeed=${!!scanResult.pagespeedResult} observatory=${!!scanResult.observatoryResult} urlscan=${!!scanResult.urlscanResult} zap=${!!scanResult.zapResult} webcheck=${!!scanResult.webCheckResult}`);
+
   const isJa = lang === 'ja';
+
+  console.time('[PDF] Total');
+  console.log('[PDF] Loading scan data');
 
   // Sanitized copy for Gemini calls only.
   const llmSafeScan = sanitizeScanForLLM(scanResult);
 
-  const scanHistoryRows = await fetchScanHistoryRows(scanResult);
-
-  let scanData;
-  try   { scanData = await formatScanDataForPdf(llmSafeScan, { scanHistoryRows }); }
-  catch (e) {
-    console.warn('[PDF] Gemini scan data formatting failed, using fallback:', e.message);
-    scanData = buildFallbackScanDataForPdf(scanResult);
+  const pdfSafeScan = JSON.parse(JSON.stringify(llmSafeScan));
+  if (pdfSafeScan.zapResult && Array.isArray(pdfSafeScan.zapResult.alerts)) {
+    pdfSafeScan.zapResult.alerts = pdfSafeScan.zapResult.alerts
+      .sort((a, b) => severityRank(b.risk) - severityRank(a.risk))
+      .slice(0, 50);
+  }
+  if (pdfSafeScan.webCheckResult && pdfSafeScan.webCheckResult.fullResults) {
+    for (const key of Object.keys(pdfSafeScan.webCheckResult.fullResults)) {
+      const res = pdfSafeScan.webCheckResult.fullResults[key];
+      if (res) {
+        delete res.html;
+        delete res.rawResponse;
+        delete res.headersDump;
+      }
+    }
+  }
+  if (pdfSafeScan.pagespeedResult?.lighthouseResult?.categories) {
+    const cats = pdfSafeScan.pagespeedResult.lighthouseResult.categories;
+    pdfSafeScan.pagespeedResult.lighthouseResult.categories = {
+      performance: cats.performance,
+      accessibility: cats.accessibility,
+      'best-practices': cats['best-practices'],
+      seo: cats.seo
+    };
+  }
+  if (pdfSafeScan.urlscanResult) {
+    pdfSafeScan.urlscanResult = {
+      verdicts: pdfSafeScan.urlscanResult.verdicts,
+      page: pdfSafeScan.urlscanResult.page,
+      stats: pdfSafeScan.urlscanResult.stats
+    };
+  }
+  if (pdfSafeScan.observatoryResult) {
+    pdfSafeScan.observatoryResult = {
+      grade: pdfSafeScan.observatoryResult.grade,
+      score: pdfSafeScan.observatoryResult.score,
+      tests_passed: pdfSafeScan.observatoryResult.tests_passed,
+      tests_failed: pdfSafeScan.observatoryResult.tests_failed,
+      tests_quantity: pdfSafeScan.observatoryResult.tests_quantity
+    };
   }
 
+  const chars = JSON.stringify(pdfSafeScan).length;
+  console.log('[PDF] Prompt trimmed');
+  console.log('[PDF] Prompt size:', chars);
+  console.log('[PDF] Estimated tokens:', Math.ceil(chars / 4));
+  console.log('[PDF] ZAP alerts:', pdfSafeScan.zapResult?.alerts?.length || 0);
+
+  console.log(`[PDF][${analysisId}] Fetching scan history rows…`);
+  const scanHistoryRows = await fetchScanHistoryRows(scanResult);
+
+  console.log('[PDF] Starting Gemini formatting');
+  console.time('[PDF] Gemini format');
+  let scanData;
+  try { 
+    scanData = await Promise.race([
+      formatScanDataForPdf(pdfSafeScan, { scanHistoryRows, ...pdfOpts }),
+      timeout(35000, 'formatScanDataForPdf timed out')
+    ]);
+  }
+  catch (e) {
+    console.warn(`[PDF][${analysisId}] Gemini scan data formatting failed, using fallback:`, e.message);
+    scanData = buildFallbackScanDataForPdf(scanResult);
+  }
+  console.timeEnd('[PDF] Gemini format');
+  console.log('[PDF] Gemini formatting completed');
+
+  // Re-inject real scan metadata (target URL, scan ID, date) that was
+  // replaced with "REDACTED" by the Gemini sanitizer.
+  injectRealScanMetadata(scanData, scanResult);
+
+  console.log(`[PDF][${analysisId}] Ensuring scan history…`);
   await ensureGeminiScanHistory(scanData, scanHistoryRows);
 
   const zapSection = scanData.sections?.find(s => s.id === 'zap');
   await fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel);
 
-  await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
-
   let aiAnalysis = null;
   if (scanResult.refinedReport) {
     try {
-      aiAnalysis = await formatAiAnalysisForPdf(scanResult.refinedReport);
-      console.log('[PDF] Using Gemini-generated report');
+      let parsed = buildAiAnalysisFromRefinedReport(scanResult.refinedReport);
+      if (!parsed || !parsed.title || !parsed.sections?.length) {
+         console.warn(`[PDF][${analysisId}] Local parser failed, falling back to Gemini`);
+         parsed = await formatAiAnalysisForPdf(scanResult.refinedReport, pdfOpts);
+      }
+      aiAnalysis = parsed;
+      console.log(`[PDF][${analysisId}] Using local parser-generated report`);
     } catch (e) {
-      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      console.warn(`[PDF][${analysisId}] AI section unavailable, generating PDF from scan findings:`, e.message);
       // aiAnalysis stays null — PDF renders without AI narrative section
     }
   }
@@ -1306,24 +1700,30 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   let aiToUse = aiAnalysis, vulnsToUse = vulnsEn;
 
   if (isJa && (aiAnalysis || vulnsEn.length)) {
-    await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
+    console.log(`[PDF][${analysisId}] Starting JA translation…`);
+    console.time('[PDF] Translate JA');
     try {
-      const ja = await translateToJapanese(aiAnalysis || {}, vulnsEn);
+      const ja = await Promise.race([
+        translateToJapanese(aiAnalysis || {}, vulnsEn, pdfOpts),
+        timeout(45000, 'translateToJapanese timed out')
+      ]);
       aiToUse    = ja.aiAnalysis;
       vulnsToUse = ja.vulnerabilities.map((v, i) => ({
         ...v,
         sampleUrls: vulnsEn[i]?.sampleUrls || []
       }));
       if (aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
-        console.warn('[PDF] JA translation did not produce Japanese text, using static fallback');
+        console.warn(`[PDF][${analysisId}] JA translation did not produce Japanese text, using static fallback`);
         aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
         vulnsToUse = vulnsEn;
       }
     } catch (e) {
-      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      console.warn(`[PDF][${analysisId}] AI section unavailable, generating PDF from scan findings:`, e.message);
       aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
       vulnsToUse = vulnsEn;
     }
+    console.timeEnd('[PDF] Translate JA');
+    console.log('[PDF] JA translation completed');
   }
 
   const disclaimer = getDisclaimerContent(lang);
@@ -1354,6 +1754,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     } catch (e) { console.warn('⚠️ HTML renderer failed:', e.message); }
   }
 
+  console.log(`[PDF][${analysisId}] Rendering PDFKit document…`);
   const tsBase = await getReportTemplateStaticContent({ lang });
   const ts = buildTemplateStaticOverrides(tsBase, { lang, scanData });
   ts.diagnosisTitle   = diagnosis.title;
@@ -1365,10 +1766,15 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     Author:  'SSDT',
     Subject: 'Security Analysis'
   });
+  
+  console.log(`[PDF][${analysisId}] Rendering PDF`);
+  console.time('[PDF] Render');
   const buf = collectBuffer(doc);
   renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts);
   doc.end();
-  console.log('[PDF] PDF generation completed successfully');
+  console.timeEnd('[PDF] Render');
+  console.log(`[PDF][${analysisId}] PDF completed`);
+  console.timeEnd('[PDF] Total');
   return buf;
 }
 
@@ -1421,9 +1827,11 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
 
   let vulnsToUse = vulnerabilities;
   if (isJa && vulnerabilities.length) {
-    await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY));
     try {
-      const ja   = await translateToJapanese({}, vulnerabilities);
+      const ja = await Promise.race([
+        translateToJapanese({}, vulnerabilities, pdfOpts),
+        timeout(45000, 'translateToJapanese timed out')
+      ]);
       vulnsToUse = ja.vulnerabilities.map((v, i) => ({ 
         ...v, 
         urls: vulnerabilities[i]?.urls || [],

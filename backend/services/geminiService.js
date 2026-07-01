@@ -178,6 +178,11 @@ if (!IS_ECS && process.env.GEMINI_API_KEY) {
  * On local dev (no _wifAuthClient) it uses GoogleAuth with ambient ADC.
  */
 async function verifyCredentials() {
+  if (GEMINI_AUTH_MODE === 'AI_STUDIO') {
+    console.log(`[Gemini] ✅ API Key verification bypassed (AUTH_MODE=AI_STUDIO)`);
+    return true;
+  }
+
   try {
     let tokenResult;
     if (_wifAuthClient) {
@@ -221,20 +226,21 @@ verifyCredentials().catch(() => {});
  * @param {string} model   - MODEL_PRO or MODEL_FLASH
  * @param {string} caller  - human-readable label for the calling service (appears in logs)
  */
-async function _generate(prompt, model, caller = 'unknown') {
+async function _generate(prompt, model, caller = 'unknown', opts = {}) {
   // Centralized pre-flight guardrail — every Gemini call goes through here, so
   // one check covers all callers (refineReport, PDF formatters, translators).
   assertNoLeakage(prompt, caller);
   const tag = `[Gemini/${model}/${caller}][auth=${GEMINI_AUTH_MODE}]`;
-  const MAX_RETRIES = 5;
-  const timeoutMs = model === MODEL_PRO ? GEMINI_CALL_TIMEOUT_PRO_MS : GEMINI_CALL_TIMEOUT_FLASH_MS;
+  const MAX_RETRIES = opts.maxRetries ?? 5;
+  const timeoutMs = opts.timeoutMs ?? (model === MODEL_PRO ? GEMINI_CALL_TIMEOUT_PRO_MS : GEMINI_CALL_TIMEOUT_FLASH_MS);
+  const maxBackoffMs = opts.maxBackoffMs ?? 90_000;
   let lastError;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      // Exponential backoff with full jitter: base 10s, cap 90s.
+      // Exponential backoff with full jitter: base 10s, cap maxBackoffMs.
       // 503 UNAVAILABLE = Gemini under high demand; needs longer wait than a simple linear ramp.
-      const base = Math.min(10000 * Math.pow(2, attempt - 1), 90000);
+      const base = Math.min(10000 * Math.pow(2, attempt - 1), maxBackoffMs);
       const delay = Math.floor(base * (0.5 + Math.random() * 0.5)); // 50–100% of base
       console.log(`${tag} Retry ${attempt}/${MAX_RETRIES - 1} in ${(delay / 1000).toFixed(1)}s… (backoff attempt ${attempt})`);
       await new Promise(r => setTimeout(r, delay));
@@ -334,9 +340,9 @@ function _isQuotaError(err) {
  * @param {string} prompt
  * @param {string} caller - label passed through to _generate for log tagging
  */
-async function _generateWithFallback(prompt, caller = 'unknown') {
+async function _generateWithFallback(prompt, caller = 'unknown', opts = {}) {
   try {
-    const result = await _generate(prompt, MODEL_PRO, caller);
+    const result = await _generate(prompt, MODEL_PRO, caller, opts);
     return result;
   } catch (proErr) {
     if (_isQuotaError(proErr)) {
@@ -344,7 +350,7 @@ async function _generateWithFallback(prompt, caller = 'unknown') {
     } else {
       console.warn(`[Gemini/${caller}] Pro model failed (${proErr.message}), falling back to Flash…`);
     }
-    const result = await _generate(prompt, MODEL_FLASH, caller);
+    const result = await _generate(prompt, MODEL_FLASH, caller, opts);
     console.log(`[Gemini/${caller}] Flash model succeeded`);
     return result;
   }
@@ -764,7 +770,7 @@ IMPORTANT RULES:
   - Do NOT invent rows that are not in the input
 `;
 
-  const raw = await _generateWithFallback(prompt, 'formatScanDataForPdf');
+  const raw = await _generateWithFallback(prompt, 'formatScanDataForPdf', options);
   const parsed = _parseJson(raw);
 
   // Always inject full detailedAlerts — Gemini might truncate them
@@ -841,7 +847,7 @@ CRITICAL RULES:
 /**
  * Format AI analysis into structured JSON for PDF.
  */
-async function formatAiAnalysisForPdf(markdownReport) {
+async function formatAiAnalysisForPdf(markdownReport, opts = {}) {
   // Strip any URLs / IPs that Gemini may have embedded in the stored report
   // during the original refineReport() call — prevents a second-pass re-leak.
   const cleanMarkdownReport = sanitizeRefinedReportForLLM(markdownReport);
@@ -912,7 +918,7 @@ EXAMPLE OF COMPLETE VS INCOMPLETE:
 ✅ CORRECT: "The website uses Cloudflare for content delivery, security (WAF), and TLS/SSL management."
 ❌ WRONG: "The website uses Cloudflare for content delivery, security (WAF), and"`;
 
-  const raw = await _generateWithFallback(prompt, 'formatAiAnalysisForPdf');
+  const raw = await _generateWithFallback(prompt, 'formatAiAnalysisForPdf', opts);
   const parsed = _parseJson(raw);
   const cleaned = cleanDuplicateSections(parsed);
   console.log('✅ [Gemini] AI analysis formatted for PDF');
@@ -978,7 +984,7 @@ OUTPUT (Japanese JSON only):`;
 /**
  * Translate both AI analysis and vulnerability details to Japanese in a single call.
  */
-async function translateToJapanese(formattedAnalysis, vulnerabilities) {
+async function translateToJapanese(formattedAnalysis, vulnerabilities, opts = {}) {
   // Sanitize both inputs to strip embedded URLs/IPs before translation
   // (C-07 / C-08 — AI report + vuln detail compound re-leakage).
   const safeAnalysisJson = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
@@ -1030,7 +1036,7 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 
 OUTPUT (Japanese JSON object only):`;
 
-  const raw = await _generate(prompt, MODEL_FLASH, 'translateToJapanese');
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateToJapanese', opts);
   const parsed = _parseJson(raw);
 
   if (!parsed.aiAnalysis || !parsed.vulnerabilities) {
