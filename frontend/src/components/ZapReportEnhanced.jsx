@@ -19,6 +19,13 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
     const [isTranslating, setIsTranslating] = useState(false);
     const translateFetchedRef = React.useRef(false); // tracks if fetch was initiated for current scan+lang
 
+    // Raw request/response evidence (occurrences with request/response), fetched
+    // lazily from the detailed-report endpoint on first alert expansion.
+    const [detailedMap, setDetailedMap] = useState(null); // { [alertName]: occurrences[] }
+    const [rawExpandedAll, setRawExpandedAll] = useState(new Set()); // alert names showing all pairs
+    const detailedFetchedRef = React.useRef(false);
+    const RAW_PREVIEW_COUNT = 3;
+
     // Close PDF dropdown when clicking outside
     useEffect(() => {
         const handleClickOutside = (e) => {
@@ -63,6 +70,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                 const translated = data.translated;
                 const result = alerts.map((a, i) => ({
                     ...a,
+                    _enAlert: a.alert, // preserve English name for detailed-alert lookup
                     alert: translated[i * 3] || a.alert,
                     description: translated[i * 3 + 1] || a.description,
                     solution: translated[i * 3 + 2] || a.solution,
@@ -79,12 +87,58 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
         return null;
     }
 
+    // Lazily fetch the GridFS detailed alerts (occurrences incl. raw
+    // request/response) once, the first time any alert is expanded. If the
+    // historical loader already supplied zapData.detailedAlerts, use that instead.
+    const ensureDetailedLoaded = async () => {
+        if (detailedFetchedRef.current) return;
+        if (zapData?.detailedAlerts?.length) return; // already available on props
+        if (!scanId) return;
+        detailedFetchedRef.current = true;
+        try {
+            const res = await fetch(`${API_BASE}${apiPrefix}/detailed-report/${scanId}`, {
+                headers: { 'x-auth-token': localStorage.getItem('token') }
+            });
+            if (!res.ok) throw new Error('Failed to load detailed report');
+            const data = await res.json();
+            const map = {};
+            (Array.isArray(data) ? data : []).forEach(a => {
+                if (a && a.alert) map[a.alert] = Array.isArray(a.occurrences) ? a.occurrences : [];
+            });
+            setDetailedMap(map);
+        } catch (err) {
+            console.warn('Failed to load ZAP request/response evidence:', err.message);
+            detailedFetchedRef.current = false; // allow a later retry
+        }
+    };
+
+    // Occurrences (with raw request/response) for a given alert name.
+    // Returns null when detailed data has not loaded yet.
+    const getRawOccurrences = (alertName) => {
+        let occ = null;
+        if (zapData?.detailedAlerts?.length) {
+            const d = zapData.detailedAlerts.find(a => (a.alert || a.name) === alertName);
+            occ = d?.occurrences || [];
+        } else if (detailedMap) {
+            occ = detailedMap[alertName] || [];
+        }
+        if (occ === null) return null;
+        return occ.filter(o => o && (o.request || o.response));
+    };
+
+    const toggleRawAll = (alertName) => {
+        const next = new Set(rawExpandedAll);
+        next.has(alertName) ? next.delete(alertName) : next.add(alertName);
+        setRawExpandedAll(next);
+    };
+
     const toggleAlert = (alertName) => {
         const newExpanded = new Set(expandedAlerts);
         if (newExpanded.has(alertName)) {
             newExpanded.delete(alertName);
         } else {
             newExpanded.add(alertName);
+            ensureDetailedLoaded(); // fire-and-forget on first expand
         }
         setExpandedAlerts(newExpanded);
     };
@@ -317,6 +371,58 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                                             </p>
                                         )}
                                     </div>
+
+                                    {(() => {
+                                        const enName = alert._enAlert || alert.alert; // detailed data is keyed by English name
+                                        const rawOccs = getRawOccurrences(enName);
+                                        const showAll = rawExpandedAll.has(enName);
+                                        return (
+                                            <div className="detail-section raw-evidence">
+                                                <h4>🧾 {t('requestResponseEvidence')}</h4>
+                                                {rawOccs === null && (
+                                                    <p className="raw-loading">{t('loadingEvidence')}</p>
+                                                )}
+                                                {rawOccs && rawOccs.length === 0 && (
+                                                    <p className="raw-empty">{t('noEvidenceCaptured')}</p>
+                                                )}
+                                                {rawOccs && rawOccs.length > 0 && (
+                                                    <>
+                                                        {(showAll ? rawOccs : rawOccs.slice(0, RAW_PREVIEW_COUNT)).map((occ, occIdx) => (
+                                                            <div key={occIdx} className="raw-occurrence">
+                                                                <div className="raw-occ-meta">
+                                                                    {occ.method && <span className="raw-method">{occ.method}</span>}
+                                                                    <span className="raw-url">{occ.url}</span>
+                                                                    {occ.param && <span className="raw-param">({occ.param})</span>}
+                                                                </div>
+                                                                {occ.request && (
+                                                                    <div className="raw-pair">
+                                                                        <div className="raw-label raw-label-req">{t('evidenceRequest')}</div>
+                                                                        <pre className="raw-block">{`${occ.request.header || ''}${occ.request.body || ''}`}</pre>
+                                                                    </div>
+                                                                )}
+                                                                {occ.response && (
+                                                                    <div className="raw-pair">
+                                                                        <div className="raw-label raw-label-resp">{t('evidenceResponse')}</div>
+                                                                        <pre className="raw-block">{`${occ.response.header || ''}${occ.response.body || ''}`}</pre>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                        {rawOccs.length > RAW_PREVIEW_COUNT && (
+                                                            <button
+                                                                type="button"
+                                                                className="raw-toggle-btn"
+                                                                onClick={() => toggleRawAll(enName)}
+                                                            >
+                                                                {showAll ? t('showLessEvidence') : t('showAllEvidence', { count: rawOccs.length })}
+                                                            </button>
+                                                        )}
+                                                        <p className="raw-json-note">{t('evidenceFullInJson')}</p>
+                                                    </>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             )}
                         </div>

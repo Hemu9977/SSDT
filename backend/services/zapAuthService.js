@@ -112,21 +112,31 @@ function groupAlertsByUrl(alerts) {
       };
     }
 
+    // ZAP's /JSON/core/view/alerts/ returns a FLAT list — one entry per
+    // occurrence, each addressable to its raw HTTP request/response via
+    // `messageId`. Handle both flat and nested (`instances`) shapes. We capture
+    // method/param/attack/evidence/messageId here (previously only `url` survived
+    // because the flat shape has no `.instances`).
     if (alert.instances && alert.instances.length > 0) {
       alert.instances.forEach(instance => {
         grouped[key].occurrences.push({
           url: instance.uri || alert.url,
-          method: instance.method,
-          param: instance.param,
-          attack: instance.attack,
-          evidence: instance.evidence
+          method: instance.method || alert.method,
+          param: instance.param || alert.param,
+          attack: instance.attack || alert.attack,
+          evidence: instance.evidence || alert.evidence,
+          messageId: instance.messageId || alert.messageId
         });
         grouped[key].totalCount++;
       });
     } else {
       grouped[key].occurrences.push({
         url: alert.url,
-        instances: 1
+        method: alert.method,
+        param: alert.param,
+        attack: alert.attack,
+        evidence: alert.evidence,
+        messageId: alert.messageId
       });
       grouped[key].totalCount++;
     }
@@ -135,8 +145,86 @@ function groupAlertsByUrl(alerts) {
   return Object.values(grouped);
 }
 
-function createDualVersionAlerts(alerts) {
+/**
+ * Fetch the raw HTTP request/response for a single ZAP message.
+ * Best-effort: returns null on any failure (never throws).
+ * @param {import('axios').AxiosInstance} client - ZAP auth API client
+ * @param {string|number} messageId
+ * @returns {Promise<{request:{header:string,body:string},response:{header:string,body:string}}|null>}
+ */
+async function fetchZapMessage(client, messageId) {
+  if (!client || messageId === undefined || messageId === null || messageId === '') return null;
+  try {
+    const res = await client.get('/JSON/core/view/message/', { params: { id: messageId } });
+    const m = (res && res.data && res.data.message) ? res.data.message : (res ? res.data : null);
+    if (!m) return null;
+    return {
+      request: { header: m.requestHeader || '', body: m.requestBody || '' },
+      response: { header: m.responseHeader || '', body: m.responseBody || '' }
+    };
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch ZAP message ${messageId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Enrich grouped-alert occurrences with raw HTTP request/response, fetching each
+ * unique messageId once (deduped, concurrency-capped). Mutates in place.
+ * Best-effort: individual failures are skipped and never throw.
+ * @param {Array} grouped - output of groupAlertsByUrl()
+ * @param {import('axios').AxiosInstance} client - ZAP auth API client
+ */
+async function enrichOccurrencesWithMessages(grouped, client) {
+  if (!client || !Array.isArray(grouped) || grouped.length === 0) return;
+
+  const uniqueIds = new Set();
+  for (const alert of grouped) {
+    for (const occ of (alert.occurrences || [])) {
+      if (occ && occ.messageId !== undefined && occ.messageId !== null && occ.messageId !== '') {
+        uniqueIds.add(String(occ.messageId));
+      }
+    }
+  }
+  if (uniqueIds.size === 0) return;
+
+  const ids = Array.from(uniqueIds);
+  const messageMap = new Map();
+  const CONCURRENCY = 5;
+
+  let cursor = 0;
+  async function worker() {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      const msg = await fetchZapMessage(client, id);
+      if (msg) messageMap.set(id, msg);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(CONCURRENCY, ids.length); i++) workers.push(worker());
+  await Promise.all(workers);
+
+  for (const alert of grouped) {
+    for (const occ of (alert.occurrences || [])) {
+      if (occ && occ.messageId !== undefined && occ.messageId !== null) {
+        const msg = messageMap.get(String(occ.messageId));
+        if (msg) {
+          occ.request = msg.request;
+          occ.response = msg.response;
+        }
+      }
+    }
+  }
+  console.log(`📩 Enriched ZAP auth occurrences with raw request/response for ${messageMap.size}/${ids.length} unique messages`);
+}
+
+async function createDualVersionAlerts(alerts, client = null) {
   const grouped = groupAlertsByUrl(alerts);
+
+  // Best-effort: attach raw HTTP request/response to each occurrence.
+  if (client) {
+    await enrichOccurrencesWithMessages(grouped, client);
+  }
 
   const summaryAlerts = grouped.map(alert => ({
     alert: alert.alert,
@@ -714,7 +802,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     });
 
     // Process alerts
-    const { summaryAlerts, detailedAlerts } = createDualVersionAlerts(rawAlerts);
+    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapAuthApi);
     console.log(`[ZAP-AUTH] Grouped into ${summaryAlerts.length} unique alert types`);
 
     const riskCounts = summaryAlerts.reduce((acc, alert) => {

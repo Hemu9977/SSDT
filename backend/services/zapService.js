@@ -8,6 +8,8 @@ const gridfsService = require('./gridfsService');
 const cleanupService = require('./cleanupService');
 const { publishScanProgress } = require('./scanProgressService');
 const { finalizeSuccessfulScan } = require('./planService');
+const { getSanitizedAlerts } = require('../utils/vulnFilter');
+const User = require('../models/User');
 
 // ============================================================================
 // ZAP API CONFIGURATION
@@ -131,23 +133,31 @@ function groupAlertsByUrl(alerts) {
       };
     }
 
-    // Add URL-specific occurrence
+    // ZAP's /JSON/core/view/alerts/ returns a FLAT list — one entry per
+    // occurrence, each addressable to its raw HTTP request/response via
+    // `messageId`. Older/other report shapes may nest an `instances` array,
+    // so handle both. We capture method/param/attack/evidence/messageId here
+    // (previously only `url` survived because the flat shape has no `.instances`).
     if (alert.instances && alert.instances.length > 0) {
       alert.instances.forEach(instance => {
         grouped[key].occurrences.push({
           url: instance.uri || alert.url,
-          method: instance.method,
-          param: instance.param,
-          attack: instance.attack,
-          evidence: instance.evidence
+          method: instance.method || alert.method,
+          param: instance.param || alert.param,
+          attack: instance.attack || alert.attack,
+          evidence: instance.evidence || alert.evidence,
+          messageId: instance.messageId || alert.messageId
         });
         grouped[key].totalCount++;
       });
     } else {
-      // Fallback: alert without detailed instances
       grouped[key].occurrences.push({
         url: alert.url,
-        instances: 1
+        method: alert.method,
+        param: alert.param,
+        attack: alert.attack,
+        evidence: alert.evidence,
+        messageId: alert.messageId
       });
       grouped[key].totalCount++;
     }
@@ -157,12 +167,97 @@ function groupAlertsByUrl(alerts) {
 }
 
 /**
+ * Fetch the raw HTTP request/response for a single ZAP message.
+ * Best-effort: returns null on any failure (never throws) so a scan is never
+ * failed just because proof-of-exploit data couldn't be retrieved.
+ * @param {import('axios').AxiosInstance} client - ZAP API client
+ * @param {string|number} messageId
+ * @returns {Promise<{request:{header:string,body:string},response:{header:string,body:string}}|null>}
+ */
+async function fetchZapMessage(client, messageId) {
+  if (!client || messageId === undefined || messageId === null || messageId === '') return null;
+  try {
+    const res = await client.get('/JSON/core/view/message/', { params: { id: messageId } });
+    const m = (res && res.data && res.data.message) ? res.data.message : (res ? res.data : null);
+    if (!m) return null;
+    return {
+      request: { header: m.requestHeader || '', body: m.requestBody || '' },
+      response: { header: m.responseHeader || '', body: m.responseBody || '' }
+    };
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch ZAP message ${messageId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Enrich grouped-alert occurrences with their raw HTTP request/response by
+ * fetching each unique ZAP messageId once (deduped, concurrency-capped).
+ * Mutates occurrences in place, attaching occ.request / occ.response.
+ * Best-effort: individual failures are skipped and never throw.
+ * @param {Array} grouped - output of groupAlertsByUrl()
+ * @param {import('axios').AxiosInstance} client - ZAP API client
+ */
+async function enrichOccurrencesWithMessages(grouped, client) {
+  if (!client || !Array.isArray(grouped) || grouped.length === 0) return;
+
+  // Collect unique messageIds across every occurrence (one message = one pair).
+  const uniqueIds = new Set();
+  for (const alert of grouped) {
+    for (const occ of (alert.occurrences || [])) {
+      if (occ && occ.messageId !== undefined && occ.messageId !== null && occ.messageId !== '') {
+        uniqueIds.add(String(occ.messageId));
+      }
+    }
+  }
+  if (uniqueIds.size === 0) return;
+
+  const ids = Array.from(uniqueIds);
+  const messageMap = new Map();
+  const CONCURRENCY = 5;
+
+  // Concurrency-limited fetch pool.
+  let cursor = 0;
+  async function worker() {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      const msg = await fetchZapMessage(client, id);
+      if (msg) messageMap.set(id, msg);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(CONCURRENCY, ids.length); i++) workers.push(worker());
+  await Promise.all(workers);
+
+  // Attach raw request/response back onto each occurrence by messageId.
+  for (const alert of grouped) {
+    for (const occ of (alert.occurrences || [])) {
+      if (occ && occ.messageId !== undefined && occ.messageId !== null) {
+        const msg = messageMap.get(String(occ.messageId));
+        if (msg) {
+          occ.request = msg.request;
+          occ.response = msg.response;
+        }
+      }
+    }
+  }
+  console.log(`📩 Enriched ZAP occurrences with raw request/response for ${messageMap.size}/${ids.length} unique messages`);
+}
+
+/**
  * Create TWO versions of the alert data:
  * 1. Summary version (for MongoDB document) - compact, under 16MB
  * 2. Detailed version (for GridFS) - complete with all URLs
  */
-function createDualVersionAlerts(alerts) {
+async function createDualVersionAlerts(alerts, client = null) {
   const grouped = groupAlertsByUrl(alerts);
+
+  // Best-effort: attach raw HTTP request/response to each occurrence (flows to
+  // the GridFS detailed file → JSON export → PDF proof-of-exploit). Skipped when
+  // no client is passed. Never fails the scan.
+  if (client) {
+    await enrichOccurrencesWithMessages(grouped, client);
+  }
 
   // SUMMARY VERSION: Top 5 URLs per alert type
   const summaryAlerts = grouped.map(alert => ({
@@ -386,7 +481,7 @@ async function runZapScanWithUrlTracking(options) {
     });
 
     // Step 5: Process alerts into dual versions
-    const { summaryAlerts, detailedAlerts } = createDualVersionAlerts(rawAlerts);
+    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapApi);
 
     console.log(`📊 Grouped into ${summaryAlerts.length} unique alert types`);
     console.log(`📊 Summary version size: ${JSON.stringify(summaryAlerts).length} bytes`);
@@ -456,6 +551,21 @@ async function runZapScanWithUrlTracking(options) {
 // FRONTEND API: Download Detailed Report
 // ============================================================================
 
+/** Resolve plan-based vulnerability access level; defaults to most restrictive. */
+async function resolveVulnAccessLevel(userId) {
+  try {
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    if (!u) return 'critical-high';
+    let org = null;
+    if (u.organizationId) {
+      const Organization = require('../models/Organization');
+      org = await Organization.findById(u.organizationId);
+    }
+    return u.getAccountLimits(org).vulnerabilityAccessLevel || 'critical-high';
+  } catch (_) { /* non-fatal */ }
+  return 'critical-high';
+}
+
 /**
  * Express route to download detailed alert report
  * Usage: GET /api/zap/detailed-report/:scanId
@@ -464,8 +574,8 @@ async function downloadDetailedReport(req, res) {
   try {
     const { scanId } = req.params;
 
-    // Find scan result by analysisId (scanId in the route)
-    const scanResult = await ScanResult.findOne({ analysisId: scanId });
+    // Scope by owner (userId) — prevents reading another user's scan by its id.
+    const scanResult = await ScanResult.findOne({ analysisId: scanId, userId: req.user.id });
     if (!scanResult) {
       return res.status(404).json({ error: 'Scan not found' });
     }
@@ -490,20 +600,17 @@ async function downloadDetailedReport(req, res) {
       });
     }
 
-    // Stream from GridFS using correct method name
-    const stream = gridfsService.downloadFileStream(detailedFile.fileId);
+    // Download raw buffer (correct bucket), apply plan-based severity filter,
+    // then send filtered JSON — same pattern as the JSON export and auth route.
+    const bucket = detailedFile.filename.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
+    const accessLevel = await resolveVulnAccessLevel(req.user.id);
+    const rawBuf = await gridfsService.downloadFile(detailedFile.fileId, bucket);
+    const rawAlerts = JSON.parse(rawBuf.toString('utf-8'));
+    const filteredAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
 
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="${detailedFile.filename}"`);
-
-    stream.on('error', (streamError) => {
-      console.error('GridFS stream error:', streamError);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to stream report file' });
-      }
-    });
-
-    stream.pipe(res);
+    res.json(filteredAlerts);
 
   } catch (error) {
     console.error('Download error:', error);
@@ -1162,7 +1269,7 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     });
 
     // Process alerts into dual versions
-    const { summaryAlerts, detailedAlerts } = createDualVersionAlerts(rawAlerts);
+    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapApi);
 
     console.log(`📊 Grouped into ${summaryAlerts.length} unique alert types`);
 
@@ -2125,7 +2232,7 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     }
 
     // Process alerts into dual versions
-    const { summaryAlerts, detailedAlerts } = createDualVersionAlerts(rawAlerts);
+    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapApi);
 
     console.log(`📊 [BACKGROUND] Grouped into ${summaryAlerts.length} unique alert types`);
 

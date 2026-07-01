@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { runZapScan, stopCombinedScan } = require('../services/zapService');
 const { stopWebCheckScan, getFullResults } = require('../services/webCheckService');
 const gridfsService = require('../services/gridfsService');
-const { generatePdfReport, generateSingleLanguagePdf } = require('../services/pdfService');
+const { generateSingleLanguagePdf } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
@@ -815,6 +815,8 @@ router.get('/download-complete-json/:id', auth, async (req, res) => {
           reference: alert.reference || '',
           cweid: alert.cweid || '',
           wascid: alert.wascid || '',
+          // occurrences now carry method/param/attack/evidence + full raw
+          // request/response ({ request:{header,body}, response:{header,body} }).
           instances: alert.occurrences || alert.sampleUrls?.map(url => ({ uri: url })) || [],
           count: alert.totalOccurrences || alert.occurrences?.length || 0
         })),
