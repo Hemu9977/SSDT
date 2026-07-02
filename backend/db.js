@@ -65,10 +65,15 @@ const connectDB = async (retryCount = 0) => {
     process.exit(1);
   }
 
-  if (!uri.startsWith('mongodb+srv://')) {
+  // Accept both MongoDB Atlas (mongodb+srv://) and local/Docker MongoDB (mongodb://)
+  if (
+    !uri.startsWith('mongodb+srv://') &&
+    !uri.startsWith('mongodb://')
+  ) {
     const preview = uri.length > 12 ? uri.slice(0, 12) + '...[REDACTED]' : '[too short]';
-    console.error(`❌ MONGO_URI must use a MongoDB Atlas connection string (mongodb+srv://...). Got: "${preview}"`);
-    console.error('   Local MongoDB is not supported. Set MONGO_URI to your Atlas cluster URI.');
+    console.error(
+      `❌ Invalid MONGO_URI. Expected mongodb:// or mongodb+srv://. Got: "${preview}"`
+    );
     process.exit(1);
   }
 
