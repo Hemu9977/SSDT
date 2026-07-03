@@ -43,6 +43,9 @@ const Profile = () => {
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentMessage, setPaymentMessage] = useState(null);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteMessage, setInviteMessage] = useState(null);
   const navigate = useNavigate();
   const location = useLocation();
   const { t, currentLang } = useTranslation();
@@ -258,6 +261,47 @@ const Profile = () => {
       }
     } catch (err) {
       setPaymentMessage({ type: 'error', text: err.message });
+    }
+  };
+
+  const handleSendInvite = async (e) => {
+    e.preventDefault();
+    if (!inviteEmail) return;
+    
+    setInviteLoading(true);
+    setInviteMessage(null);
+    const token = localStorage.getItem('token');
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/org/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+        body: JSON.stringify({ email: inviteEmail, role: 'member' })
+      });
+      const data = await res.json();
+      
+      if (!res.ok) throw new Error(data.error || 'Failed to send invite');
+      
+      setInviteMessage({ type: 'success', text: data.message });
+      setInviteEmail('');
+      fetchProfile(); // Refresh pending invites list
+    } catch (err) {
+      setInviteMessage({ type: 'error', text: err.message });
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
+  const handleCancelInvite = async (tokenStr) => {
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch(`${API_BASE}/api/org/invite/${tokenStr}`, {
+        method: 'DELETE',
+        headers: { 'x-auth-token': token }
+      });
+      if (res.ok) fetchProfile();
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -512,6 +556,95 @@ const Profile = () => {
                   </>
                 )}
               </div>
+
+              {/* ── Team Management Section ─────────────────────────────────────────── */}
+              {org.seatsAllowed > 1 && (
+                <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
+                  <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                    {t('teamManagement') || 'Team Management'}
+                  </h2>
+                  
+                  <div style={{ marginBottom: '2rem' }}>
+                    <p style={{ margin: '0 0 1rem 0', color: 'var(--foreground-darker)' }}>
+                      Seats used: <strong style={{ color: 'var(--foreground)' }}>{org.seatsUsed} / {org.seatsAllowed}</strong>
+                    </p>
+                    
+                    <form className="invite-form" onSubmit={handleSendInvite}>
+                      <input
+                        type="email"
+                        className="invite-input"
+                        placeholder={t('emailAddress') || 'Email address'}
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        required
+                      />
+                      <button 
+                        type="submit" 
+                        className="btn-invite"
+                        disabled={inviteLoading || org.seatsUsed + (org.pendingInvites?.length || 0) >= org.seatsAllowed}
+                      >
+                        {inviteLoading ? (t('sending') || 'Sending...') : (t('sendInvite') || 'Send Invite')}
+                      </button>
+                    </form>
+                    {inviteMessage && (
+                      <div className={`invite-message ${inviteMessage.type}`}>
+                        {inviteMessage.text}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Active Members */}
+                  {org.members && org.members.length > 0 && (
+                    <div style={{ marginBottom: '1.5rem' }}>
+                      <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+                        {t('activeMembers') || 'Active Members'}
+                      </h3>
+                      <ul className="member-list">
+                        {org.members.map(member => (
+                          <li key={member._id || member.email} className="member-item">
+                            <div className="member-info">
+                              <strong>{member.name}</strong>
+                              <span className="member-email">{member.email}</span>
+                            </div>
+                            <span className="member-role">{member.role}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Pending Invites */}
+                  {org.pendingInvites && org.pendingInvites.length > 0 && (
+                    <div>
+                      <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+                        {t('pendingInvites') || 'Pending Invites'}
+                      </h3>
+                      <ul className="member-list">
+                        {org.pendingInvites.map(invite => (
+                          <li key={invite.token} className="member-item invite-item">
+                            <div className="member-info">
+                              <span className="invite-email">{invite.email}</span>
+                              <span className="invite-role">{invite.role}</span>
+                            </div>
+                            <div className="invite-status-group">
+                              <span className="invite-status">PENDING</span>
+                              {['owner', 'admin'].includes(user.role) && (
+                                <button 
+                                  onClick={() => handleCancelInvite(invite.token)}
+                                  className="btn-revoke"
+                                  title="Revoke Invite"
+                                >
+                                  Revoke
+                                </button>
+                              )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
