@@ -282,7 +282,15 @@ const Profile = () => {
       
       if (!res.ok) throw new Error(data.error || 'Failed to send invite');
       
-      setInviteMessage({ type: 'success', text: data.message });
+      if (data.emailDelivered === false) {
+        // Invite created in DB but SMTP delivery failed — show warning with manual share link
+        setInviteMessage({
+          type: 'warning',
+          text: `Invite created but email delivery failed. Share this link manually: ${data.joinLink}`
+        });
+      } else {
+        setInviteMessage({ type: 'success', text: data.message });
+      }
       setInviteEmail('');
       fetchProfile(); // Refresh pending invites list
     } catch (err) {

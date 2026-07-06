@@ -4,8 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import ParticleBackground from '../components/ParticleBackground';
 import '../styles/JoinOrganization.scss';
-
-const API_BASE = 'http://10.60.227.82:3001';
+import { API_BASE } from '../config/api';
 
 
 const JoinOrganization = () => {

@@ -14,11 +14,16 @@ let transporter;
 if (!IS_AWS) {
   const nodemailer = require('nodemailer');
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false, // STARTTLS
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
     },
+    tls: {
+      rejectUnauthorized: false // allow self-signed certs in dev
+    }
   });
 }
 
