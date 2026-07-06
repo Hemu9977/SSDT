@@ -561,7 +561,7 @@ const Profile = () => {
               {org.seatsAllowed > 1 && (
                 <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
                   <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                    {t('teamManagement') || 'Team Management'}
+                    Team Management
                   </h2>
                   
                   <div style={{ marginBottom: '2rem' }}>
@@ -573,7 +573,7 @@ const Profile = () => {
                       <input
                         type="email"
                         className="invite-input"
-                        placeholder={t('emailAddress') || 'Email address'}
+                        placeholder="Email Address"
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
                         required
@@ -583,7 +583,7 @@ const Profile = () => {
                         className="btn-invite"
                         disabled={inviteLoading || org.seatsUsed + (org.pendingInvites?.length || 0) >= org.seatsAllowed}
                       >
-                        {inviteLoading ? (t('sending') || 'Sending...') : (t('sendInvite') || 'Send Invite')}
+                        {inviteLoading ? (t('sending') || 'Sending...') : 'Send Invite'}
                       </button>
                     </form>
                     {inviteMessage && (
@@ -597,7 +597,7 @@ const Profile = () => {
                   {org.members && org.members.length > 0 && (
                     <div style={{ marginBottom: '1.5rem' }}>
                       <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
-                        {t('activeMembers') || 'Active Members'}
+                        Active Members
                       </h3>
                       <ul className="member-list">
                         {org.members.map(member => (
@@ -617,7 +617,7 @@ const Profile = () => {
                   {org.pendingInvites && org.pendingInvites.length > 0 && (
                     <div>
                       <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
-                        {t('pendingInvites') || 'Pending Invites'}
+                        Pending Invites
                       </h3>
                       <ul className="member-list">
                         {org.pendingInvites.map(invite => (
