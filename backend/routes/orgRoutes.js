@@ -13,6 +13,7 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const { getFrontendBaseUrl } = require('../utils/frontendUrl');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const auth = require('../middleware/auth');
@@ -93,16 +94,12 @@ router.post('/invite', auth, async (req, res) => {
         token
       });
     } catch (emailErr) {
-      console.error('⚠️  Invite created but email delivery failed.');
-      console.error('    SMTP error code   :', emailErr.code || 'N/A');
-      console.error('    SMTP response     :', emailErr.response || 'N/A');
-      console.error('    Error message     :', emailErr.message);
-      console.error('    Full stack        :', emailErr.stack);
+      console.error('⚠️  Invite created but email delivery failed:', emailErr.message);
       // Still return success — token is valid, inviter can share link manually
       return res.json({
         success: true,
         message: 'Invite created. Email delivery failed — share the link manually.',
-        joinLink: `${process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/join?token=${token}`,
+        joinLink: `${getFrontendBaseUrl()}/join?token=${token}`,
         emailDelivered: false
       });
     }
@@ -110,7 +107,7 @@ router.post('/invite', auth, async (req, res) => {
     res.json({
       success: true,
       message: `Invite sent to ${email}`,
-      joinLink: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/join?token=${token}`,
+      joinLink: `${getFrontendBaseUrl()}/join?token=${token}`,
       emailDelivered: true
     });
   } catch (err) {

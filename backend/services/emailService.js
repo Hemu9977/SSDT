@@ -1,7 +1,8 @@
 const IS_AWS = process.env.NODE_ENV === 'production';
 const FROM_EMAIL = process.env.SES_FROM_EMAIL;
 const SENDER = `FORTEXA <${FROM_EMAIL}>`;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const { getFrontendBaseUrl } = require('../utils/frontendUrl');
+const FRONTEND_URL = getFrontendBaseUrl();
 
 let sesClient, SendEmailCommand;
 if (IS_AWS) {
@@ -21,9 +22,6 @@ if (!IS_AWS) {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
     },
-    tls: {
-      rejectUnauthorized: false // allow self-signed certs in dev
-    }
   });
 }
 
@@ -268,7 +266,7 @@ const sendScheduleConfirmationEmail = async (email, userName, scheduleDetails) =
 
 // Send organization invite email
 const sendInviteEmail = async (toEmail, { orgName, inviterName, role, token }) => {
-  const joinUrl = `${process.env.CLIENT_URL || FRONTEND_URL}/join?token=${token}`;
+  const joinUrl = `${getFrontendBaseUrl()}/join?token=${token}`;
   const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
 
   const html = `

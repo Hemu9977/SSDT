@@ -271,25 +271,26 @@ const Profile = () => {
     setInviteLoading(true);
     setInviteMessage(null);
     const token = localStorage.getItem('token');
-    
+    const submittedEmail = inviteEmail;
+
     try {
       const res = await fetch(`${API_BASE}/api/org/invite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
-        body: JSON.stringify({ email: inviteEmail, role: 'member' })
+        body: JSON.stringify({ email: submittedEmail, role: 'member' })
       });
       const data = await res.json();
-      
+
       if (!res.ok) throw new Error(data.error || 'Failed to send invite');
-      
+
       if (data.emailDelivered === false) {
         // Invite created in DB but SMTP delivery failed — show warning with manual share link
         setInviteMessage({
           type: 'warning',
-          text: `Invite created but email delivery failed. Share this link manually: ${data.joinLink}`
+          text: t('inviteEmailFailed', { link: data.joinLink })
         });
       } else {
-        setInviteMessage({ type: 'success', text: data.message });
+        setInviteMessage({ type: 'success', text: t('inviteSentSuccess', { email: submittedEmail }) });
       }
       setInviteEmail('');
       fetchProfile(); // Refresh pending invites list
@@ -307,9 +308,10 @@ const Profile = () => {
         method: 'DELETE',
         headers: { 'x-auth-token': token }
       });
-      if (res.ok) fetchProfile();
+      if (!res.ok) throw new Error('revoke failed');
+      fetchProfile();
     } catch (err) {
-      console.error(err);
+      setInviteMessage({ type: 'error', text: t('inviteRevokeFailed') });
     }
   };
 
@@ -569,29 +571,29 @@ const Profile = () => {
               {org.seatsAllowed > 1 && (
                 <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
                   <h2 style={{ marginBottom: '1.5rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                    Team Management
+                    {t('teamManagement')}
                   </h2>
-                  
+
                   <div style={{ marginBottom: '2rem' }}>
                     <p style={{ margin: '0 0 1rem 0', color: 'var(--foreground-darker)' }}>
-                      Seats used: <strong style={{ color: 'var(--foreground)' }}>{org.seatsUsed} / {org.seatsAllowed}</strong>
+                      {t('seatsUsedLabel')}: <strong style={{ color: 'var(--foreground)' }}>{org.seatsUsed} / {org.seatsAllowed}</strong>
                     </p>
-                    
+
                     <form className="invite-form" onSubmit={handleSendInvite}>
                       <input
                         type="email"
                         className="invite-input"
-                        placeholder="Email Address"
+                        placeholder={t('emailAddress')}
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
                         required
                       />
-                      <button 
-                        type="submit" 
+                      <button
+                        type="submit"
                         className="btn-invite"
                         disabled={inviteLoading || org.seatsUsed + (org.pendingInvites?.length || 0) >= org.seatsAllowed}
                       >
-                        {inviteLoading ? (t('sending') || 'Sending...') : 'Send Invite'}
+                        {inviteLoading ? t('sending') : t('sendInvite')}
                       </button>
                     </form>
                     {inviteMessage && (
@@ -605,7 +607,7 @@ const Profile = () => {
                   {org.members && org.members.length > 0 && (
                     <div style={{ marginBottom: '1.5rem' }}>
                       <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
-                        Active Members
+                        {t('activeMembers')}
                       </h3>
                       <ul className="member-list">
                         {org.members.map(member => (
@@ -625,7 +627,7 @@ const Profile = () => {
                   {org.pendingInvites && org.pendingInvites.length > 0 && (
                     <div>
                       <h3 style={{ fontSize: '1rem', color: 'var(--accent)', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
-                        Pending Invites
+                        {t('pendingInvites')}
                       </h3>
                       <ul className="member-list">
                         {org.pendingInvites.map(invite => (
@@ -635,14 +637,14 @@ const Profile = () => {
                               <span className="invite-role">{invite.role}</span>
                             </div>
                             <div className="invite-status-group">
-                              <span className="invite-status">PENDING</span>
+                              <span className="invite-status">{t('pending')}</span>
                               {['owner', 'admin'].includes(user.role) && (
                                 <button 
                                   onClick={() => handleCancelInvite(invite.token)}
                                   className="btn-revoke"
-                                  title="Revoke Invite"
+                                  title={t('revokeInvite')}
                                 >
-                                  Revoke
+                                  {t('revoke')}
                                 </button>
                               )}
                             </div>
