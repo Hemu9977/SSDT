@@ -21,7 +21,7 @@ let puppeteer;
 try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
 
 const ScanResult = require('../models/ScanResult');
-const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateToJapanese } = require('./geminiService');
+const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateAiAnalysisToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
 const gridfsService = require('./gridfsService');
 const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
@@ -30,6 +30,19 @@ const { sanitizeScanForLLM } = require('./geminiSanitizer');
 // Spec requirement: PDFKit-only (no Puppeteer/HTML renderer)
 const PDF_RENDERER = 'pdfkit';
 const pdfOpts = { maxRetries: 1, timeoutMs: 35000, maxBackoffMs: 3000 };
+// Japanese translation is the single most failure-prone step and its failure
+// silently degrades the whole JA report (thin AI summary + untranslated findings).
+// It gets a far more generous budget than the fast-fail `pdfOpts`: real retries
+// for transient 503s and a per-attempt timeout large enough for a Flash call.
+// The overall PDF job budget is 300s (virustotalRoutes PDF_JOB_TIMEOUT_MS), so
+// this stays well within it even in the worst case.
+const translateOpts = { maxRetries: 3, timeoutMs: 60000, maxBackoffMs: 15000 };
+// Outer ceiling for the whole (chunked, multi-call) JA translation stage. A final
+// safety net only — `_generate` already enforces per-attempt timeouts and retries.
+const TRANSLATION_CEILING_MS = 200000;
+// Vulnerabilities are translated in small chunks so one transient failure only
+// costs that chunk (kept English), not the entire findings list.
+const VULN_TRANSLATION_CHUNK_SIZE = 5;
 
 const FONTS = {
   regular: path.join(__dirname, '../fonts/NotoSansJP-Regular.ttf'),
@@ -743,6 +756,78 @@ function buildJapaneseAiAnalysisFromScanData(scanData, vulnerabilitiesEn = []) {
       ]}]}
     ]
   };
+}
+
+/**
+ * Translate the AI analysis and vulnerabilities to Japanese — resiliently and
+ * granularly, so a failure in one area never blanks the whole Japanese report.
+ *
+ *  - The AI analysis is translated on its own. Only if that specific call fails
+ *    (or returns no Japanese) does the AI narrative fall back to the short
+ *    static buildJapaneseAiAnalysisFromScanData stub.
+ *  - Vulnerabilities are translated in small chunks. A chunk that fails keeps its
+ *    English text while the other chunks stay Japanese (partial success).
+ *  - `occurrences` (raw request/response) and `sampleUrls`/`urls` are always kept
+ *    from the English source and re-attached — they are never sent to Gemini and
+ *    never lost, so the Request/Response Evidence section still renders.
+ *
+ * `deps` lets tests inject stub translators (no network); production uses the real
+ * Gemini calls with the generous `translateOpts` budget.
+ *
+ * @returns {Promise<{ aiToUse: object|null, vulnsToUse: Array }>}
+ */
+async function translateReportToJapanese({ aiAnalysis = null, vulnsEn = [], scanData = null } = {}, deps = {}) {
+  const {
+    translateAi        = (ai)    => translateAiAnalysisToJapanese(ai, translateOpts),
+    translateVulnChunk = (chunk) => translateVulnerabilitiesToJapanese(chunk, translateOpts),
+    chunkSize          = VULN_TRANSLATION_CHUNK_SIZE,
+    logLabel           = 'PDF'
+  } = deps;
+
+  // ── AI analysis (independent) ───────────────────────────────────────────────
+  let aiToUse = aiAnalysis;
+  if (aiAnalysis) {
+    try {
+      const ja = await translateAi(aiAnalysis);
+      if (ja && containsJapanese(JSON.stringify(ja))) {
+        aiToUse = ja;
+      } else {
+        console.warn(`[${logLabel}] AI translation produced no Japanese — using static summary`);
+        aiToUse = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+      }
+    } catch (e) {
+      console.warn(`[${logLabel}] AI analysis translation failed (${e.message}) — using static summary`);
+      aiToUse = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+    }
+  }
+
+  // ── Vulnerabilities (independent, chunked) ──────────────────────────────────
+  // Start as the English list; replace each chunk in place only on success.
+  const vulnsToUse = vulnsEn.slice();
+  for (let start = 0; start < vulnsEn.length; start += chunkSize) {
+    const chunkEn = vulnsEn.slice(start, start + chunkSize);
+    // Strip bulky/technical fields before translation; re-attached from source below.
+    const chunkForTranslate = chunkEn.map(({ occurrences, sampleUrls, urls, ...rest }) => rest);
+    try {
+      const jaChunk = await translateVulnChunk(chunkForTranslate);
+      if (Array.isArray(jaChunk)) {
+        jaChunk.forEach((jv, i) => {
+          const src = chunkEn[i];
+          if (!src || !jv) return;
+          vulnsToUse[start + i] = {
+            ...src, // keep name/risk/confidence/reference/cwe/wasc + occurrences/sampleUrls/urls
+            description: jv.description ?? src.description,
+            solution:    jv.solution ?? src.solution
+          };
+        });
+      }
+    } catch (e) {
+      console.warn(`[${logLabel}] Vulnerability chunk ${start + 1}-${start + chunkEn.length} translation failed (${e.message}) — keeping English for this chunk`);
+      // chunk stays English (already present in vulnsToUse)
+    }
+  }
+
+  return { aiToUse, vulnsToUse };
 }
 
 /**
@@ -1566,27 +1651,18 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     console.log(`[PDF][${analysisId}] Starting JA translation…`);
     console.time('[PDF] Translate JA');
     try {
-      const ja = await Promise.race([
-        // Strip occurrences (raw request/response) before translation — never
-        // send bulky raw HTTP to Gemini; re-injected untranslated below.
-        translateToJapanese(aiAnalysis || {}, vulnsEn.map(({ occurrences, ...r }) => r), pdfOpts),
-        timeout(45000, 'translateToJapanese timed out')
+      const out = await Promise.race([
+        translateReportToJapanese({ aiAnalysis, vulnsEn, scanData }, { logLabel: `PDF][${analysisId}` }),
+        timeout(TRANSLATION_CEILING_MS, 'JA translation timed out')
       ]);
-      aiToUse    = ja.aiAnalysis;
-      vulnsToUse = ja.vulnerabilities.map((v, i) => ({
-        ...v,
-        sampleUrls: vulnsEn[i]?.sampleUrls || [],
-        // Raw request/response is technical data — keep the (untranslated) source.
-        occurrences: vulnsEn[i]?.occurrences || []
-      }));
-      if (aiToUse && !containsJapanese(JSON.stringify(aiToUse))) {
-        console.warn(`[PDF][${analysisId}] JA translation did not produce Japanese text, using static fallback`);
-        aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
-        vulnsToUse = vulnsEn;
-      }
+      aiToUse    = out.aiToUse;
+      vulnsToUse = out.vulnsToUse;
     } catch (e) {
-      console.warn(`[PDF][${analysisId}] AI section unavailable, generating PDF from scan findings:`, e.message);
-      aiToUse    = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
+      // Only reached if the whole stage exceeds the ceiling — per-area failures are
+      // already handled inside translateReportToJapanese. Degrade gracefully:
+      // static AI summary + English findings (occurrences preserved for evidence).
+      console.warn(`[PDF][${analysisId}] JA translation stage failed (${e.message}) — static AI summary + English findings`);
+      aiToUse    = aiAnalysis ? buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn) : null;
       vulnsToUse = vulnsEn;
     }
     console.timeEnd('[PDF] Translate JA');
@@ -1697,21 +1773,13 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   let vulnsToUse = vulnerabilities;
   if (isJa && vulnerabilities.length) {
     try {
-      const ja = await Promise.race([
-        // Strip occurrences (raw request/response) before translation — never
-        // send bulky raw HTTP to Gemini; re-injected untranslated below.
-        translateToJapanese({}, vulnerabilities.map(({ occurrences, ...r }) => r), pdfOpts),
-        timeout(45000, 'translateToJapanese timed out')
+      const out = await Promise.race([
+        translateReportToJapanese({ aiAnalysis: null, vulnsEn: vulnerabilities, scanData: null }, { logLabel: 'ZAP-PDF' }),
+        timeout(TRANSLATION_CEILING_MS, 'JA translation timed out')
       ]);
-      vulnsToUse = ja.vulnerabilities.map((v, i) => ({
-        ...v,
-        urls: vulnerabilities[i]?.urls || [],
-        sampleUrls: vulnerabilities[i]?.sampleUrls || [],
-        // Raw request/response is technical data — keep the (untranslated) source.
-        occurrences: vulnerabilities[i]?.occurrences || []
-      }));
+      vulnsToUse = out.vulnsToUse;
     } catch (e) {
-      console.warn('[PDF] AI section unavailable, generating PDF from scan findings:', e.message);
+      console.warn('[PDF] JA vuln translation stage failed:', e.message);
       // vulnsToUse stays as English vulnerabilities — ZAP PDF still includes all findings
     }
   }
@@ -1730,4 +1798,4 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection };

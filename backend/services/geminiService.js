@@ -928,7 +928,7 @@ EXAMPLE OF COMPLETE VS INCOMPLETE:
 /**
  * Translate formatted AI analysis to Japanese (kept for backwards compatibility).
  */
-async function translateAiAnalysisToJapanese(formattedAnalysis) {
+async function translateAiAnalysisToJapanese(formattedAnalysis, opts = {}) {
   // Sanitize the formatted analysis to strip any embedded URLs/IPs before
   // sending to Gemini for translation (C-07, C-08 — compound re-leakage).
   const safeAnalysisText = sanitizeRefinedReportForLLM(JSON.stringify(formattedAnalysis, null, 2));
@@ -974,7 +974,7 @@ CRITICAL RULES - MUST FOLLOW STRICTLY:
 
 OUTPUT (Japanese JSON only):`;
 
-  const raw = await _generate(prompt, MODEL_FLASH, 'translateAiAnalysisToJapanese');
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateAiAnalysisToJapanese', opts);
   const parsed = _parseJson(raw);
   const cleaned = cleanDuplicateSections(parsed);
   console.log('✅ [Gemini] AI analysis translated to Japanese');
@@ -1048,6 +1048,53 @@ OUTPUT (Japanese JSON object only):`;
   return { aiAnalysis: cleanedAiAnalysis, vulnerabilities: parsed.vulnerabilities };
 }
 
+/**
+ * Translate a batch of vulnerability objects to Japanese — description + solution
+ * only; all other fields (name/risk/confidence/reference/cwe/wasc) are preserved.
+ *
+ * Kept separate from translateToJapanese so the PDF pipeline can translate
+ * vulnerabilities in small chunks. Smaller payloads complete faster and a single
+ * transient failure only affects one chunk, not the whole Japanese report.
+ * Raw request/response (`occurrences`) must be stripped by the caller before
+ * calling this — never send bulky raw HTTP to Gemini.
+ *
+ * @returns {Promise<Array>} translated array, same length/order as the input.
+ */
+async function translateVulnerabilitiesToJapanese(vulnerabilities, opts = {}) {
+  if (!Array.isArray(vulnerabilities) || vulnerabilities.length === 0) return [];
+
+  const safeVulnJson = sanitizeRefinedReportForLLM(JSON.stringify(vulnerabilities, null, 2));
+
+  const prompt = `You are translating the descriptions and solutions of web security vulnerabilities from English to Japanese.
+
+INPUT (JSON array of vulnerability objects):
+${safeVulnJson}
+
+Return ONLY a valid JSON array with the EXACT same length and order as the input.
+
+CRITICAL RULES - MUST FOLLOW STRICTLY:
+1. Return ONLY the raw JSON array — no markdown code blocks (no \`\`\`json), no text before or after.
+2. Preserve the exact same number of objects and their order.
+3. Translate ONLY the "description" and "solution" fields to professional business Japanese (です/ます form).
+4. Keep "name", "risk", "confidence", "reference", "cweid", "wascid", "totalOccurrences" fields UNCHANGED.
+5. Keep technical terms unchanged: URLs, IPs, HTTP header names, code snippets, version numbers.
+6. Use proper Japanese punctuation (。、).
+7. Every translated field MUST be COMPLETE — no truncation, no fragments.
+
+OUTPUT (Japanese JSON array only):`;
+
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateVulnerabilitiesToJapanese', opts);
+  const parsed = _parseJson(raw);
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : (Array.isArray(parsed?.vulnerabilities) ? parsed.vulnerabilities : null);
+  if (!arr) {
+    throw new Error('Invalid response structure — expected a JSON array of vulnerabilities');
+  }
+  console.log(`✅ [Gemini] Translated ${arr.length} vulnerabilities to Japanese`);
+  return arr;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function stripMarkdownBasic(text) {
@@ -1114,6 +1161,7 @@ module.exports = {
   formatScanHistoryForPdf,
   formatAiAnalysisForPdf,
   translateAiAnalysisToJapanese,
+  translateVulnerabilitiesToJapanese,
   translateToJapanese,
   verifyCredentials,
 };
