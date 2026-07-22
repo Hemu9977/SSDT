@@ -44,6 +44,36 @@ const TRANSLATION_CEILING_MS = 200000;
 // costs that chunk (kept English), not the entire findings list.
 const VULN_TRANSLATION_CHUNK_SIZE = 5;
 
+// Request/Response evidence: keep the headers (that's the proof for header/config
+// findings) but only a short "taste" of the body — a full HTTP response body is an
+// entire HTML page and would balloon the PDF to hundreds of pages. The complete,
+// untruncated request/response for every occurrence always lives in the JSON export.
+const EVIDENCE_BODY_MAX_CHARS = 600;   // short body snippet
+const EVIDENCE_HEADER_MAX_CHARS = 4000; // generous safety net; real headers fit easily
+
+/**
+ * Build a bounded evidence blob: full header (capped as a safety net) + a short body
+ * snippet, with a localized "full body in JSON export" note when anything is trimmed.
+ * Pure — exported for tests.
+ */
+function buildEvidenceText(header, body, lang = 'en') {
+  let hdr = String(header || '');
+  let bdy = String(body || '');
+  let trimmed = false;
+
+  if (hdr.length > EVIDENCE_HEADER_MAX_CHARS) { hdr = hdr.slice(0, EVIDENCE_HEADER_MAX_CHARS); trimmed = true; }
+  if (bdy.length > EVIDENCE_BODY_MAX_CHARS)   { bdy = bdy.slice(0, EVIDENCE_BODY_MAX_CHARS);   trimmed = true; }
+
+  let out = hdr;
+  if (bdy) out += (hdr && !hdr.endsWith('\n') ? '\n' : '') + bdy;
+  if (trimmed) {
+    out += (lang === 'ja'
+      ? '\n…(本文は省略されました — 全文はJSONエクスポートを参照してください)'
+      : '\n…(body truncated — full body available in the JSON export)');
+  }
+  return out;
+}
+
 const FONTS = {
   regular: path.join(__dirname, '../fonts/NotoSansJP-Regular.ttf'),
   bold:    path.join(__dirname, '../fonts/NotoSansJP-Bold.ttf')
@@ -1322,14 +1352,14 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
           ensureSpace(ctx, 16);
           doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight)
              .text(lang === 'ja' ? 'リクエスト:' : 'Request:');
-          writeFlowText(ctx, `${occ.request.header || ''}${occ.request.body || ''}`,
+          writeFlowText(ctx, buildEvidenceText(occ.request.header, occ.request.body, lang),
             { lineGap: 1, fontSize: 7, color: COLORS.text });
         }
         if (occ.response) {
           ensureSpace(ctx, 16);
           doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight)
              .text(lang === 'ja' ? 'レスポンス:' : 'Response:');
-          writeFlowText(ctx, `${occ.response.header || ''}${occ.response.body || ''}`,
+          writeFlowText(ctx, buildEvidenceText(occ.response.header, occ.response.body, lang),
             { lineGap: 1, fontSize: 7, color: COLORS.text });
         }
         doc.moveDown(0.15);
@@ -1801,4 +1831,4 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection, buildEvidenceText };
