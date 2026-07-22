@@ -270,6 +270,7 @@ export const ja = {
   googleLoginSuccessful: 'Googleログインに成功しました。リダイレクトしています...',
   googleLoginFailed: 'Googleログインに失敗しました。もう一度お試しください。',
   googleLoginFailedShort: 'Googleログインに失敗しました',
+  inviteEmailMismatch: 'この招待は別のメールアドレス宛に送信されています。招待されたGoogleアカウントまたは招待されたメールアドレスでサインインしてください。',
   loginFailedLater: 'ログインに失敗しました。しばらくしてからもう一度お試しください。',
   newUser: '初めてご利用ですか？',
   registerNow: '今すぐ登録',

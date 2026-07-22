@@ -269,6 +269,7 @@ export const en = {
   googleLoginSuccessful: 'Google login successful! Redirecting...',
   googleLoginFailed: 'Google Login failed. Please try again.',
   googleLoginFailedShort: 'Google Login Failed',
+  inviteEmailMismatch: 'This invitation was sent to another email address. Please sign in using the invited Google account or the invited email.',
   loginFailedLater: 'Login failed. Please try again later.',
   newUser: 'New user?',
   registerNow: 'Register now',

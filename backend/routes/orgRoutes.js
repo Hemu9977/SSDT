@@ -22,6 +22,7 @@ const Organization = require('../models/Organization');
 const Invite = require('../models/Invite');
 const User = require('../models/User');
 const { sendInviteEmail } = require('../services/emailService');
+const { verifyGoogleCredential } = require('../utils/googleAuth');
 
 // ─── POST /api/org/invite ─────────────────────────────────────────────────────
 // Send an invite. Only owners or admins can invite. Fires email delivery.
@@ -162,12 +163,13 @@ router.get('/invite/:token', async (req, res) => {
 });
 
 // ─── POST /api/org/accept-invite ─────────────────────────────────────────────
-// Accepts an invite. Supports two flows:
+// Accepts an invite. Supports three flows:
 //   1. Logged-in user:  { token }  — header: x-auth-token
 //   2. New user:        { token, name, password }  — no auth header required
+//   3. Google:          { token, googleAccessToken } or { token, googleToken }
 router.post('/accept-invite', async (req, res) => {
   try {
-    const { token, name, password } = req.body;
+    const { token, name, password, googleAccessToken, googleToken } = req.body;
     if (!token) return res.status(400).json({ error: 'Invite token is required' });
 
     // ── Validate and atomically accept invite ──────────────────────────────
@@ -197,6 +199,51 @@ router.post('/accept-invite', async (req, res) => {
         user = await User.findById(decoded.user.id);
       } catch (_) {
         // Token invalid — fall through to new-user registration path
+      }
+    }
+
+    if (!user && (googleAccessToken || googleToken)) {
+      // ── Google sign-in/sign-up path ──────────────────────────────────────
+      let googleData;
+      try {
+        googleData = await verifyGoogleCredential({ token: googleToken, googleAccessToken });
+      } catch (googleErr) {
+        console.error('Accept invite Google auth error:', googleErr.message);
+        await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
+        return res.status(400).json({ error: 'Google authentication failed. Please try again.' });
+      }
+
+      // Critical: verified Google email must match the invited email, BEFORE
+      // any user is created/linked or the invite is otherwise consumed.
+      if ((googleData.email || '').toLowerCase() !== invite.email.toLowerCase()) {
+        await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
+        return res.status(403).json({
+          error: 'This invitation was sent to another email address. Please sign in using the invited Google account or the invited email.',
+          invitedEmail: invite.email
+        });
+      }
+
+      user = await User.findOne({ email: invite.email.toLowerCase() });
+      if (user) {
+        if (!user.googleId) user.googleId = googleData.googleId;
+        if (!user.isVerified) user.isVerified = true;
+        user.lastLoginAt = new Date();
+        await user.save();
+      } else {
+        const randomPassword = crypto.randomBytes(32).toString('hex');
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(randomPassword, salt);
+
+        user = new User({
+          name: googleData.name,
+          email: invite.email.toLowerCase(),
+          password: hashedPassword,
+          googleId: googleData.googleId,
+          isVerified: true,
+          accountType: 'free',
+          lastLoginAt: new Date()
+        });
+        await user.save();
       }
     }
 

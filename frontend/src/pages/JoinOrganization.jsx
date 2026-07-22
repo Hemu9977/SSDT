@@ -1,14 +1,18 @@
 import { useUser } from '../contexts/UserContext';
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useGoogleLogin } from '@react-oauth/google';
+import { FcGoogle } from 'react-icons/fc';
 
 import ParticleBackground from '../components/ParticleBackground';
+import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/JoinOrganization.scss';
 import { API_BASE } from '../config/api';
 
 
 const JoinOrganization = () => {
   const { refreshUser } = useUser(); // ✅ MOVE HERE
+  const { t } = useTranslation();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const token = searchParams.get('token');
@@ -88,6 +92,47 @@ const JoinOrganization = () => {
     });
     return res.json();
   };
+
+  // ── GOOGLE flow (works for both new and existing users) ────────────────────
+  const googleJoin = useGoogleLogin({
+    onSuccess: async (tokenResponse) => {
+      setError('');
+      setLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/api/org/accept-invite`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, googleAccessToken: tokenResponse.access_token })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          setError(res.status === 403 && data.invitedEmail ? t('inviteEmailMismatch') : (data.error || t('googleLoginFailed')));
+          return;
+        }
+
+        finalizeLogin(data.token, data.message);
+      } catch (_) {
+        setError('Network error. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    },
+    onError: () => setError(t('googleLoginFailedShort')),
+  });
+
+  const GoogleJoinButton = () => (
+    <button
+      type="button"
+      className="google-btn"
+      onClick={() => googleJoin()}
+      disabled={loading}
+      style={{ width: '100%' }}
+    >
+      <FcGoogle size={22} />
+      <span>{t('loginWithGoogle')}</span>
+    </button>
+  );
 
   // ── REGISTER flow ──────────────────────────────────────────────────────────
   const handleRegister = async (e) => {
@@ -257,6 +302,8 @@ const JoinOrganization = () => {
         {mode === 'choose' && (
           <div className="join-choose">
             <p className="join-subtitle">How would you like to join?</p>
+            <GoogleJoinButton />
+            <div className="join-or-separator"><span>{t('or')}</span></div>
             <button className="join-btn join-btn--primary" onClick={() => setMode('register')}>
               Create New Account
             </button>
@@ -307,6 +354,8 @@ const JoinOrganization = () => {
             <button type="submit" className="join-btn join-btn--primary" disabled={loading}>
               {loading ? 'Creating Account...' : 'Create Account & Join'}
             </button>
+            <div className="join-or-separator"><span>{t('or')}</span></div>
+            <GoogleJoinButton />
             <button type="button" className="join-btn--link" onClick={() => setMode('choose')}>
               ← Back
             </button>
@@ -341,6 +390,8 @@ const JoinOrganization = () => {
             <button type="submit" className="join-btn join-btn--primary" disabled={loading}>
               {loading ? 'Logging in...' : 'Log In & Join'}
             </button>
+            <div className="join-or-separator"><span>{t('or')}</span></div>
+            <GoogleJoinButton />
             <button type="button" className="join-btn--link" onClick={() => setMode('choose')}>
               ← Back
             </button>

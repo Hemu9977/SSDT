@@ -3,15 +3,11 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { OAuth2Client } = require('google-auth-library');
-const axios = require('axios'); 
-const User = require('../models/User'); 
+const User = require('../models/User');
 const auth = require('../middleware/auth');
-const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService'); 
+const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
 const crypto = require('crypto');
-
-// Initialize Google Client
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const { verifyGoogleCredential } = require('../utils/googleAuth');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -28,30 +24,11 @@ router.post('/google', async (req, res) => {
   try {
     let name, email, googleId, picture;
 
-    if (googleAccessToken) {
-      // Flow 1: Access Token (Custom Button)
-      const response = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${googleAccessToken}` }
-      });
-      const data = response.data;
-      name = data.name;
-      email = data.email;
-      googleId = data.sub;
-      picture = data.picture;
-    } else if (token) {
-      // Flow 2: ID Token (Standard Button)
-      const ticket = await client.verifyIdToken({
-        idToken: token,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      const payload = ticket.getPayload();
-      name = payload.name;
-      email = payload.email;
-      googleId = payload.sub;
-      picture = payload.picture;
-    } else {
+    if (!googleAccessToken && !token) {
       return res.status(400).json({ message: 'No token provided' });
     }
+
+    ({ name, email, googleId, picture } = await verifyGoogleCredential({ token, googleAccessToken }));
 
     console.log(`Processing Google Login for user`);
 

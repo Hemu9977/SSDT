@@ -294,6 +294,27 @@
   }
 }
 
+.join-or-separator {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--foreground-darker);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 0.9rem 0;
+
+  &::before,
+  &::after {
+    content: '';
+    flex: 1;
+    border-bottom: 1px solid rgba(255, 107, 0, 0.2);
+  }
+
+  span { margin: 0 0.75rem; }
+}
+
 .join-btn--link {
   background: none;
   border: none;
