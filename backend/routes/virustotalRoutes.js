@@ -14,6 +14,7 @@ const { combinedScanLimiter } = require('../middleware/rateLimiter');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { addScanJob } = require('../queues/scanQueue');
 const { getPublisher, executeWithRetry } = require('../config/redis');
+const { PDF_BUCKET, resolvePdfJobResponse, shouldReuseJob } = require('../services/pdfJobStore');
 
 /**
  * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for req.user.
@@ -900,7 +901,7 @@ router.post('/stop-scan/:id', auth, async (req, res) => {
 //
 // Key schema:
 //   pdf:job:{jobId}    → JSON metadata  (TTL: PDF_JOB_TTL_S)
-//   pdf:buf:{jobId}    → base64 PDF     (TTL: PDF_JOB_TTL_S)
+//   (the PDF bytes live in GridFS bucket 'pdf_reports'; meta.bufferFileId points to it)
 //   pdf:active:{analysisId}:{lang} → jobId  (TTL: PDF_ACTIVE_TTL_S) — dedup
 //
 // Status lifecycle:  pending → processing → completed | failed
@@ -916,7 +917,6 @@ function timeout(ms, message) {
 }
 
 function _pdfMetaKey(jobId)              { return `pdf:job:${jobId}`; }
-function _pdfBufKey(jobId)               { return `pdf:buf:${jobId}`; }
 function _pdfActiveKey(analysisId, lang)  { return `pdf:active:${analysisId}:${lang}`; }
 
 async function _getPdfMeta(jobId) {
@@ -929,28 +929,35 @@ async function _getPdfMeta(jobId) {
   }
 }
 
+// Returns true only if the metadata was durably written. Callers MUST treat a
+// false as fatal for a new job — never hand the client a jobId that points to
+// nothing (that is the silent-404 bug this replaces).
 async function _setPdfMeta(jobId, meta) {
   try {
     await executeWithRetry(() => getPublisher().set(_pdfMetaKey(jobId), JSON.stringify(meta), 'EX', PDF_JOB_TTL_S));
+    return true;
   } catch (err) {
     console.error(`[PDF] Redis SET meta failed for ${jobId}:`, err.message);
+    return false;
   }
 }
 
-async function _setPdfBuffer(jobId, buffer) {
-  try {
-    await executeWithRetry(() => getPublisher().set(_pdfBufKey(jobId), buffer.toString('base64'), 'EX', PDF_JOB_TTL_S));
-  } catch (err) {
-    console.error(`[PDF] Redis SET buffer failed for ${jobId}:`, err.message);
-  }
+// The PDF itself lives in GridFS (durable, not evictable), NOT Redis.
+async function _storePdfFile(buffer, filename, meta) {
+  const fileId = await gridfsService.uploadFile(
+    buffer, filename,
+    { jobId: meta.jobId, analysisId: meta.analysisId, lang: meta.lang, kind: 'pdf_report' },
+    PDF_BUCKET
+  );
+  return fileId.toString();
 }
 
-async function _getPdfBuffer(jobId) {
+async function _getPdfFile(bufferFileId) {
+  if (!bufferFileId) return null;
   try {
-    const raw = await executeWithRetry(() => getPublisher().get(_pdfBufKey(jobId)));
-    return raw ? Buffer.from(raw, 'base64') : null;
+    return await gridfsService.downloadFile(bufferFileId, PDF_BUCKET);
   } catch (err) {
-    console.error(`[PDF] Redis GET buffer failed for ${jobId}:`, err.message);
+    console.warn(`[PDF] GridFS download failed for file ${bufferFileId}:`, err.message);
     return null;
   }
 }
@@ -1006,7 +1013,11 @@ router.post('/pdf-job', auth, async (req, res) => {
       if (existingMeta && (existingMeta.status === 'pending' || existingMeta.status === 'processing' || existingMeta.status === 'completed')) {
         const isPendingOrProcessing = existingMeta.status === 'pending' || existingMeta.status === 'processing';
         const isOrphaned = isPendingOrProcessing && (Date.now() - (existingMeta.lastUpdated || existingMeta.createdAt) > PDF_JOB_TIMEOUT_MS);
-        
+        // A completed job is only reusable while its PDF file still exists in GridFS.
+        const fileExists = existingMeta.status === 'completed'
+          ? await gridfsService.fileExists(existingMeta.bufferFileId, PDF_BUCKET)
+          : false;
+
         if (isOrphaned) {
           console.warn(`[PDF] Found orphaned job jobId=${existingJobId} status=${existingMeta.status} age=${Date.now() - existingMeta.createdAt}ms. Ignoring and creating new job.`);
           try {
@@ -1018,9 +1029,11 @@ router.post('/pdf-job', auth, async (req, res) => {
               lastUpdated: Date.now()
             });
           } catch (_) {}
-        } else {
+        } else if (shouldReuseJob(existingMeta, fileExists)) {
           console.log(`[PDF] Reusing existing job  jobId=${existingJobId} status=${existingMeta.status} analysisId=${analysisId} lang=${lang}`);
           return res.json({ jobId: existingJobId });
+        } else {
+          console.warn(`[PDF] Not reusing job jobId=${existingJobId} status=${existingMeta.status} (PDF file missing) — creating new job.`);
         }
       }
     }
@@ -1031,6 +1044,7 @@ router.post('/pdf-job', auth, async (req, res) => {
   const jobId = crypto.randomUUID();
   const nowTs = Date.now();
   const meta = {
+    jobId,
     status: 'pending',
     lang,
     analysisId,
@@ -1038,7 +1052,12 @@ router.post('/pdf-job', auth, async (req, res) => {
     createdAt: nowTs,
     lastUpdated: nowTs
   };
-  await _setPdfMeta(jobId, meta);
+  // Authoritative persistence: if we can't durably record the job, do NOT hand the
+  // client a jobId that would poll forever into a 404. Fail honestly so it can retry.
+  const persisted = await _setPdfMeta(jobId, meta);
+  if (!persisted) {
+    return res.status(503).json({ error: 'PDF service temporarily unavailable, please retry' });
+  }
 
   // Store active-job key for deduplication
   try {
@@ -1075,10 +1094,12 @@ router.post('/pdf-job', auth, async (req, res) => {
 
       console.log(`[PDF] Generating document  jobId=${jobId} analysisId=${analysisId}`);
 
-      // Store buffer then update metadata (order matters — poll checks meta first)
-      await _setPdfBuffer(jobId, buffer);
-      await _setPdfMeta(jobId, { ...meta, status: 'completed', filename, completedAt: Date.now(), lastUpdated: Date.now() });
-      console.log(`[PDF] PDF completed  jobId=${jobId} bytes=${buffer.length} filename=${filename} analysisId=${analysisId}`);
+      // Store the PDF in GridFS (durable), then flip meta to completed with the
+      // file id. Order matters — the poll checks meta first, so the file must exist
+      // before meta says 'completed'.
+      const bufferFileId = await _storePdfFile(buffer, filename, meta);
+      await _setPdfMeta(jobId, { ...meta, status: 'completed', filename, bufferFileId, completedAt: Date.now(), lastUpdated: Date.now() });
+      console.log(`[PDF] PDF completed  jobId=${jobId} bytes=${buffer.length} fileId=${bufferFileId} filename=${filename} analysisId=${analysisId}`);
     } catch (err) {
       console.error(`[PDF] PDF failed  jobId=${jobId} analysisId=${analysisId} error=${err.message}`);
       console.error(`[PDF] PDF failed stack  jobId=${jobId}:`, err.stack);
@@ -1114,44 +1135,26 @@ router.get('/pdf-job/:jobId', auth, async (req, res) => {
 
   const meta = await _getPdfMeta(jobId);
 
-  if (!meta) {
-    console.warn(`[PDF] Job expired or not found  jobId=${jobId}`);
-    return res.status(404).json({ error: 'Job not found or expired' });
-  }
-
-  if (meta.userId !== req.user.id) {
+  if (meta && meta.userId !== req.user.id) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
-  if (meta.status === 'pending' || meta.status === 'processing') {
-    const age = Date.now() - (meta.lastUpdated || meta.createdAt);
-    if (age > PDF_JOB_TIMEOUT_MS) {
-      console.warn(`[PDF] Job ${jobId} is active (status=${meta.status}) but timed out (age=${age}ms). Transitioning to failed.`);
-      const failedMeta = {
-        ...meta,
-        status: 'failed',
-        error: 'PDF generation timed out (orphaned)',
-        failedAt: Date.now()
-      };
-      await _setPdfMeta(jobId, failedMeta);
-      return res.status(500).json({ status: 'failed', error: failedMeta.error });
-    }
-    return res.status(202).json({ status: meta.status });
+  // For a completed job, fetch the PDF from GridFS — this both verifies the file
+  // still exists and gives us the bytes to stream. Missing file → 409 'expired'.
+  const buffer = meta && meta.status === 'completed' ? await _getPdfFile(meta.bufferFileId) : null;
+
+  const decision = resolvePdfJobResponse(meta, !!buffer, Date.now(), PDF_JOB_TIMEOUT_MS);
+
+  // Persist the orphan → failed transition when the poll detects a timed-out job.
+  if (decision.kind === 'timeout' && meta) {
+    console.warn(`[PDF] Job ${jobId} timed out (status=${meta.status}). Transitioning to failed.`);
+    await _setPdfMeta(jobId, { ...meta, status: 'failed', error: decision.body.error, failedAt: Date.now(), lastUpdated: Date.now() });
   }
 
-  if (meta.status === 'failed') {
-    const code = meta.errorCode === 'GEMINI_KEY_EXHAUSTED' ? 429 : 500;
-    return res.status(code).json({ status: 'failed', errorCode: meta.errorCode, error: meta.error });
-  }
+  if (decision.kind === 'not_found') console.warn(`[PDF] Job expired or not found  jobId=${jobId}`);
+  if (decision.kind === 'expired')   console.warn(`[PDF] Job file missing (regenerable)  jobId=${jobId}`);
 
-  // completed — stream PDF from Redis; keep keys alive (no delete, TTL handles expiry)
-  if (meta.status === 'completed') {
-    const buffer = await _getPdfBuffer(jobId);
-    if (!buffer) {
-      // Buffer expired before metadata — treat as expired
-      console.warn(`[PDF] Job buffer missing  jobId=${jobId}`);
-      return res.status(404).json({ error: 'Job not found or expired' });
-    }
+  if (decision.kind === 'completed') {
     console.log(`[PDF] Job served  jobId=${jobId} bytes=${buffer.length}`);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${meta.filename}"`);
@@ -1159,8 +1162,7 @@ router.get('/pdf-job/:jobId', auth, async (req, res) => {
     return res.send(buffer);
   }
 
-  // Unknown status — shouldn't happen, but guard defensively
-  return res.status(500).json({ status: meta.status, error: 'Unexpected job state' });
+  return res.status(decision.code).json(decision.body);
 });
 
 // 🔟 Download PDF Report (Protected route) - Supports language selection

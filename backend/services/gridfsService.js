@@ -255,6 +255,39 @@ class GridFSService {
             .toArray();
         return files[0] || null;
     }
+
+    /**
+     * Cheap existence check (no download). Safe on missing/invalid ids → false.
+     * @param {ObjectId|String} fileId
+     * @param {String} bucketName
+     * @returns {Promise<boolean>}
+     */
+    async fileExists(fileId, bucketName = 'zap_reports') {
+        if (!fileId) return false;
+        try {
+            return !!(await this.getFileMetadata(fileId, bucketName));
+        } catch (_) {
+            return false;
+        }
+    }
+
+    /**
+     * Delete GridFS files in a bucket older than a cutoff (by uploadDate).
+     * Used to bound PDF-report storage since it is no longer TTL-managed by Redis.
+     * @param {String} bucketName
+     * @param {Date} olderThan - delete files uploaded before this date
+     * @returns {Promise<number>} number of files deleted
+     */
+    async deleteFilesOlderThan(bucketName, olderThan) {
+        const bucket = this.initialize(bucketName);
+        const files = await bucket.find({ uploadDate: { $lt: olderThan } }).toArray();
+        let deleted = 0;
+        for (const f of files) {
+            try { await bucket.delete(f._id); deleted++; }
+            catch (err) { console.warn(`[GridFS] Failed to delete ${f._id} from ${bucketName}: ${err.message}`); }
+        }
+        return deleted;
+    }
 }
 
 module.exports = new GridFSService();

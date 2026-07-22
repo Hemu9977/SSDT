@@ -1746,7 +1746,7 @@ const AuthenticatedScanPanel = () => {
                                       const e = await startRes.json().catch(() => ({}));
                                       throw new Error(e.error || 'Failed to start PDF generation');
                                     }
-                                    const { jobId } = await startRes.json();
+                                    let { jobId } = await startRes.json();
                                     const progressSteps = [
                                       { progress: 15, message: 'Formatting scan data...' },
                                       { progress: 35, message: 'Waiting for API rate limit...' },
@@ -1756,6 +1756,7 @@ const AuthenticatedScanPanel = () => {
                                     ];
                                     let pollCount = 0;
                                     let consecutive404 = 0;
+                                    let restarted = false;
                                     const MAX_404_RETRIES = 3;
 
                                     while (true) {
@@ -1794,9 +1795,24 @@ const AuthenticatedScanPanel = () => {
                                         break;
                                       }
 
-                                      if (pollRes.status === 404) {
+                                      // 404 = job meta gone; 409 = a completed job's file expired.
+                                      // Both are recoverable: start ONE fresh job, then fall back
+                                      // to the bounded retry budget.
+                                      if (pollRes.status === 404 || pollRes.status === 409) {
+                                        if (!restarted) {
+                                          restarted = true;
+                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
+                                          try {
+                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
+                                              method: 'POST',
+                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
+                                            });
+                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
+                                          } catch (e) { /* fall through to retry budget */ }
+                                        }
                                         consecutive404++;
-                                        console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
                                         if (consecutive404 < MAX_404_RETRIES) continue;
                                         throw new Error('PDF job not found after multiple retries — it may have expired');
                                       }
@@ -1841,7 +1857,7 @@ const AuthenticatedScanPanel = () => {
                                       const e = await startRes.json().catch(() => ({}));
                                       throw new Error(e.error || 'Failed to start PDF generation');
                                     }
-                                    const { jobId } = await startRes.json();
+                                    let { jobId } = await startRes.json();
                                     const progressSteps = [
                                       { progress: 10, message: 'Formatting scan data...' },
                                       { progress: 25, message: 'Waiting for API rate limit...' },
@@ -1853,6 +1869,7 @@ const AuthenticatedScanPanel = () => {
                                     ];
                                     let pollCount = 0;
                                     let consecutive404 = 0;
+                                    let restarted = false;
                                     const MAX_404_RETRIES = 3;
 
                                     while (true) {
@@ -1891,9 +1908,24 @@ const AuthenticatedScanPanel = () => {
                                         break;
                                       }
 
-                                      if (pollRes.status === 404) {
+                                      // 404 = job meta gone; 409 = a completed job's file expired.
+                                      // Both are recoverable: start ONE fresh job, then fall back
+                                      // to the bounded retry budget.
+                                      if (pollRes.status === 404 || pollRes.status === 409) {
+                                        if (!restarted) {
+                                          restarted = true;
+                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
+                                          try {
+                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
+                                              method: 'POST',
+                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
+                                            });
+                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
+                                          } catch (e) { /* fall through to retry budget */ }
+                                        }
                                         consecutive404++;
-                                        console.warn(`PDF poll returned 404 (attempt ${consecutive404}/${MAX_404_RETRIES})`);
+                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
                                         if (consecutive404 < MAX_404_RETRIES) continue;
                                         throw new Error('PDF job not found after multiple retries — it may have expired');
                                       }

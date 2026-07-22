@@ -198,6 +198,18 @@ async function runCleanup() {
         // 3. Clean up orphaned ZapAlert documents
         await cleanupService.cleanupOrphanedZapAlerts();
 
+        // 4. Clean up generated PDF reports older than 24h. These live in GridFS
+        //    (bucket 'pdf_reports') and are no longer TTL-managed by Redis, so bound
+        //    their lifetime here to match the PDF-job metadata TTL.
+        try {
+            const gridfsService = require('../services/gridfsService');
+            const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const deleted = await gridfsService.deleteFilesOlderThan('pdf_reports', cutoff);
+            if (deleted) console.log(`[CleanupJob] Deleted ${deleted} expired PDF report file(s) from GridFS`);
+        } catch (pdfErr) {
+            console.warn('[CleanupJob] PDF report cleanup failed (non-fatal):', pdfErr.message);
+        }
+
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`[CleanupJob] Cleanup completed in ${duration}s`);
 

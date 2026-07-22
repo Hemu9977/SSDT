@@ -21,7 +21,7 @@ let puppeteer;
 try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
 
 const ScanResult = require('../models/ScanResult');
-const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateAiAnalysisToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
+const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateAiAnalysisSectionsToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
 const gridfsService = require('./gridfsService');
 const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
@@ -778,7 +778,7 @@ function buildJapaneseAiAnalysisFromScanData(scanData, vulnerabilitiesEn = []) {
  */
 async function translateReportToJapanese({ aiAnalysis = null, vulnsEn = [], scanData = null } = {}, deps = {}) {
   const {
-    translateAi        = (ai)    => translateAiAnalysisToJapanese(ai, translateOpts),
+    translateAi        = (ai)    => translateAiAnalysisSectionsToJapanese(ai, translateOpts),
     translateVulnChunk = (chunk) => translateVulnerabilitiesToJapanese(chunk, translateOpts),
     chunkSize          = VULN_TRANSLATION_CHUNK_SIZE,
     logLabel           = 'PDF'
@@ -789,10 +789,13 @@ async function translateReportToJapanese({ aiAnalysis = null, vulnsEn = [], scan
   if (aiAnalysis) {
     try {
       const ja = await translateAi(aiAnalysis);
-      if (ja && containsJapanese(JSON.stringify(ja))) {
+      // Accept the translated analysis only if at least one SECTION actually became
+      // Japanese (the title alone is always Japanese, so it can't be the signal).
+      // If every section failed to translate, fall back to the static summary.
+      if (ja && ja.sections?.length && containsJapanese(JSON.stringify(ja.sections))) {
         aiToUse = ja;
       } else {
-        console.warn(`[${logLabel}] AI translation produced no Japanese — using static summary`);
+        console.warn(`[${logLabel}] AI translation produced no Japanese sections — using static summary`);
         aiToUse = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
       }
     } catch (e) {

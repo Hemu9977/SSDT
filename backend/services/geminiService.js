@@ -1095,6 +1095,99 @@ OUTPUT (Japanese JSON array only):`;
   return arr;
 }
 
+const AI_SECTION_CHUNK_SIZE = 3;
+
+/**
+ * Merge Gemini's translated strings back into the ORIGINAL section structure.
+ * Structure (section shape, block order/types) always comes from the source; only
+ * string fields (heading, paragraph text, bullet items, bold_text label/text) are
+ * replaced, and only when the translation is a non-empty string of the right shape.
+ * Anything missing/malformed falls back to the English source — never dropped.
+ */
+function mergeTranslatedSection(src, ja) {
+  const srcContent = Array.isArray(src.content) ? src.content : [];
+  const jaContent  = Array.isArray(ja?.content) ? ja.content : [];
+  const str = (v) => (typeof v === 'string' && v.trim()) ? v : null;
+  const content = srcContent.map((block, i) => {
+    const jb = jaContent[i] || {};
+    if (block.type === 'paragraph') {
+      return { ...block, text: str(jb.text) ?? block.text };
+    }
+    if (block.type === 'bullets') {
+      const items = (Array.isArray(jb.items) &&
+                     jb.items.length === (block.items || []).length &&
+                     jb.items.every(x => str(x)))
+        ? jb.items : block.items;
+      return { ...block, items };
+    }
+    if (block.type === 'bold_text') {
+      return { ...block, label: str(jb.label) ?? block.label, text: str(jb.text) ?? block.text };
+    }
+    return block;
+  });
+  return { ...src, heading: str(ja?.heading) ?? src.heading, content };
+}
+
+/**
+ * Translate an AI analysis object to Japanese section-by-section, merging the
+ * translated strings back into the original structure via mergeTranslatedSection.
+ *
+ * Why not one big call: the local markdown parser produces sections without a
+ * top-level `type`, and a single large translation is truncation-prone (a
+ * truncated response fails JSON parsing and collapses the whole summary to the
+ * static stub). Translating in small chunks and rebuilding from the source is
+ * resilient — a failed chunk simply keeps its English text while the rest of the
+ * report stays Japanese.
+ */
+async function translateAiAnalysisSectionsToJapanese(aiAnalysis, opts = {}) {
+  const title    = 'AIによるセキュリティ分析';
+  const sections = Array.isArray(aiAnalysis?.sections) ? aiAnalysis.sections : [];
+  if (!sections.length) return { ...(aiAnalysis || {}), title, sections: [] };
+
+  const chunkSize = opts.sectionChunkSize || AI_SECTION_CHUNK_SIZE;
+  // `opts.generate` lets tests drive this without a live Gemini call.
+  const generate = opts.generate || ((p) => _generate(p, MODEL_FLASH, 'translateAiAnalysisSectionsToJapanese', opts));
+  const out = sections.slice(); // English by default; replaced per chunk on success
+
+  for (let start = 0; start < sections.length; start += chunkSize) {
+    const chunk = sections.slice(start, start + chunkSize);
+    const safeJson = sanitizeRefinedReportForLLM(JSON.stringify(chunk, null, 2));
+    const prompt = `Translate the following security-report sections from English to Japanese.
+
+INPUT (JSON array of section objects):
+${safeJson}
+
+Return ONLY a valid JSON array with the EXACT same length, order, and structure as the input.
+
+CRITICAL RULES - MUST FOLLOW STRICTLY:
+1. Return ONLY the raw JSON array — no markdown code blocks (no \`\`\`json), no text before or after.
+2. Preserve the number of sections and, within each section, the number of content blocks and their order.
+3. Translate ONLY these string fields to professional business Japanese (です/ます form): each section "heading"; each content block's "text"; every string in a "bullets" block's "items"; any "label".
+4. Do NOT translate or alter: URLs, IPs, HTTP header names, code snippets, version numbers, and every block's "type" field.
+5. Use Japanese punctuation (。、). Keep every translation COMPLETE — no truncation, no fragments.
+
+OUTPUT (Japanese JSON array only):`;
+
+    try {
+      const raw = await generate(prompt);
+      const parsed = _parseJson(raw);
+      const jaArr = Array.isArray(parsed)
+        ? parsed
+        : (Array.isArray(parsed?.sections) ? parsed.sections : null);
+      if (jaArr) {
+        chunk.forEach((srcSection, i) => {
+          if (jaArr[i]) out[start + i] = mergeTranslatedSection(srcSection, jaArr[i]);
+        });
+      }
+    } catch (e) {
+      console.warn(`[Gemini] AI section chunk ${start + 1}-${start + chunk.length} translation failed (${e.message}) — keeping English for these sections`);
+    }
+  }
+
+  console.log(`✅ [Gemini] Translated AI analysis (${sections.length} sections, chunked) to Japanese`);
+  return { ...aiAnalysis, title, sections: out };
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function stripMarkdownBasic(text) {
@@ -1137,10 +1230,14 @@ function cleanDuplicateSections(parsed) {
   const seen = new Set();
   const unique = [];
   for (const section of parsed.sections) {
-    if (!section.heading?.trim() || !section.type || !Array.isArray(section.content)) continue;
+    if (!section.heading?.trim() || !Array.isArray(section.content)) continue;
     const key = section.heading.toLowerCase().trim();
     if (seen.has(key)) continue;
-    if (!['paragraph', 'bullets', 'mixed'].includes(section.type)) continue;
+    // `section.type` is optional: the local markdown parser
+    // (buildAiAnalysisFromRefinedReport) sets `type` on content BLOCKS, not on the
+    // section. Only reject a section whose type is present AND unrecognised — never
+    // drop a valid section merely for lacking a top-level type.
+    if (section.type && !['paragraph', 'bullets', 'mixed'].includes(section.type)) continue;
     const content = validateContentBlocks(section.content);
     if (!content.length) continue;
     seen.add(key);
@@ -1161,7 +1258,11 @@ module.exports = {
   formatScanHistoryForPdf,
   formatAiAnalysisForPdf,
   translateAiAnalysisToJapanese,
+  translateAiAnalysisSectionsToJapanese,
   translateVulnerabilitiesToJapanese,
   translateToJapanese,
+  // exported for unit tests
+  cleanDuplicateSections,
+  mergeTranslatedSection,
   verifyCredentials,
 };
