@@ -537,9 +537,14 @@ const Profile = () => {
 
                 {/* One-time scans remaining */}
                 {org.billingCycle === 'onetime' && (
-                  <p style={{ margin: '1rem 0', color: 'var(--foreground-darker)' }}>
-                    {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.oneTimeRemainingScans}</strong>
-                  </p>
+                  <>
+                    <p style={{ margin: '1rem 0 0.5rem 0', color: 'var(--foreground-darker)' }}>
+                      {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.oneTimeRemainingScans}</strong>
+                    </p>
+                    <p style={{ margin: '0.5rem 0', color: 'var(--foreground-darker)' }}>
+                      {t('validityPeriod')}
+                    </p>
+                  </>
                 )}
 
                 {/* Seats */}
@@ -699,17 +704,17 @@ const Profile = () => {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
                 {PLANS[selectedBilling].map(plan => (
                   <div key={plan.planType} style={{
-                    border: plan.planType === 'pro' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
+                    border: plan.planType === 'basic' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
                     borderRadius: '1.5rem',
                     padding: '2rem 1.5rem',
-                    background: plan.planType === 'pro' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
+                    background: plan.planType === 'basic' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
                     display: 'flex',
                     flexDirection: 'column',
                     gap: '0.75rem',
                     position: 'relative',
-                    boxShadow: plan.planType === 'pro' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
+                    boxShadow: plan.planType === 'basic' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
                   }}>
-                    {plan.planType === 'pro' && (
+                    {plan.planType === 'basic' && (
                       <div style={{
                         position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
                         background: 'var(--accent)', color: 'var(--background)',
@@ -719,7 +724,7 @@ const Profile = () => {
                       }}>{t('mostPopular')}</div>
                     )}
 
-                    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'pro' ? '0.5rem' : 0 }}>
+                    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'basic' ? '0.5rem' : 0 }}>
                       {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
                     </div>
 
@@ -731,10 +736,17 @@ const Profile = () => {
                     <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                       <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
                       <li>
-                        ・{plan.billingCycle === 'onetime'
+                        ・{plan.planType === 'trial1'
+                          ? t('trial1ScansAndDevice')
+                          : plan.planType === 'trial2'
+                          ? t('trial2ScansAndDevice')
+                          : plan.billingCycle === 'onetime'
                           ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
                           : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
                       </li>
+                      {plan.billingCycle === 'onetime' && (
+                        <li>・{t('validityPeriod')}</li>
+                      )}
                       <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
                         ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
                       </li>

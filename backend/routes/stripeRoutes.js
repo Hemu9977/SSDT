@@ -408,7 +408,7 @@ async function handleCheckoutComplete(session) {
     org.seatsAllowed = 1;
     org.oneTimeRemainingScans = ONETIME_SCANS[key] || 1;
     org.stripeSubscriptionId = null;
-    org.expiresAt = null;
+    org.expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000); // 90 days validity
   } else {
     const PLAN_CONFIGS = {
       light: { seatsAllowed: 1, scanLimit: 3 },
