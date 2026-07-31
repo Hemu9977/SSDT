@@ -12,14 +12,14 @@ import { API_BASE } from '../config/api';
 // Plan definitions — source of truth for the UI
 const PLANS = {
   monthly: [
-    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: '/月', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: '/月', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: '/月', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: 'periodMonth', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: 'periodMonth', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: 'periodMonth', accounts: 5, scans: 10, targets: 10, severity: 'all' },
   ],
   annual: [
-    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: '/年', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: '/年', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: '/年', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: 'periodYear', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: 'periodYear', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: 'periodYear', accounts: 5, scans: 10, targets: 10, severity: 'all' },
   ],
   onetime: [
     { planType: 'trial1', billingCycle: 'onetime', price: '¥20,000', period: '', accounts: 1, scans: 1, targets: 1, severity: 'critical-high' },
@@ -27,8 +27,8 @@ const PLANS = {
   ],
 };
 
-const PLAN_NAMES = { light: 'Light', basic: 'Basic', pro: 'Pro', trial1: 'Trial 1', trial2: 'Trial 2' };
-const BILLING_LABELS = { monthly: 'Monthly', annual: 'Annual', onetime: 'One-Time Trial' };
+const PLAN_NAMES = { light: 'planLight', basic: 'planBasic', pro: 'planPro', trial1: 'planTrial1', trial2: 'planTrial2' };
+const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', onetime: 'billingOneTime' };
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
 
@@ -257,7 +257,7 @@ const Profile = () => {
         setPaymentMessage({ type: 'success', text: t('subscriptionCancelled') });
         fetchProfile();
       } else {
-        throw new Error(data.error || 'Failed to cancel subscription');
+        throw new Error(data.error || t('failedCancelSubscription'));
       }
     } catch (err) {
       setPaymentMessage({ type: 'error', text: err.message });
@@ -281,7 +281,7 @@ const Profile = () => {
       });
       const data = await res.json();
 
-      if (!res.ok) throw new Error(data.error || 'Failed to send invite');
+      if (!res.ok) throw new Error(data.error || t('failedSendInvite'));
 
       if (data.emailDelivered === false) {
         // Invite created in DB but SMTP delivery failed — show warning with manual share link
@@ -346,7 +346,7 @@ const Profile = () => {
   const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
   const accountTypeClass = hasPlan ? 'paid' : user.accountType;
   const accountTypeLabel = hasPlan
-    ? `${PLAN_NAMES[org.planType] || org.planType} (${BILLING_LABELS[org.billingCycle] || org.billingCycle})`
+    ? `${PLAN_NAMES[org.planType] ? t(PLAN_NAMES[org.planType]) : org.planType} (${BILLING_LABELS[org.billingCycle] ? t(BILLING_LABELS[org.billingCycle]) : org.billingCycle})`
     : user.accountType.toUpperCase();
 
   return (
@@ -357,7 +357,7 @@ const Profile = () => {
         <div className="profile-container">
           <div className="profile-header">
             <h1>{t('myProfile')}</h1>
-            {user.isPro && <span className="pro-badge">{PLAN_NAMES[org?.planType] || t('pro')}</span>}
+            {user.isPro && <span className="pro-badge">{PLAN_NAMES[org?.planType] ? t(PLAN_NAMES[org?.planType]) : t('pro')}</span>}
           </div>
 
           {/* Profile save feedback */}
@@ -501,10 +501,10 @@ const Profile = () => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem' }}>
                   <div>
                     <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '2px' }}>
-                      {PLAN_NAMES[org.planType] || org.planType}
+                      {PLAN_NAMES[org.planType] ? t(PLAN_NAMES[org.planType]) : org.planType}
                     </div>
                     <div style={{ color: 'var(--foreground-darker)', textTransform: 'capitalize', marginTop: '0.25rem' }}>
-                      {BILLING_LABELS[org.billingCycle] || org.billingCycle}
+                      {BILLING_LABELS[org.billingCycle] ? t(BILLING_LABELS[org.billingCycle]) : org.billingCycle}
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
@@ -682,14 +682,14 @@ const Profile = () => {
                     alignItems: 'center',
                     gap: '0.4rem'
                   }}>
-                    {BILLING_LABELS[bc]}
+                    {BILLING_LABELS[bc] ? t(BILLING_LABELS[bc]) : bc}
                     {bc === 'annual' && (
                       <span style={{
                         fontSize: '0.7rem', fontWeight: 800,
                         color: selectedBilling === bc ? 'rgba(0,0,0,0.6)' : '#00d084',
                         background: selectedBilling === bc ? 'rgba(0,0,0,0.15)' : 'rgba(0,208,132,0.15)',
                         padding: '0.1rem 0.4rem', borderRadius: '4px'
-                      }}>17% OFF</span>
+                      }}>{t('discount17Percent')}</span>
                     )}
                   </button>
                 ))}
@@ -716,24 +716,24 @@ const Profile = () => {
                         fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
                         borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
                         whiteSpace: 'nowrap'
-                      }}>Most Popular</div>
+                      }}>{t('mostPopular')}</div>
                     )}
 
                     <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'pro' ? '0.5rem' : 0 }}>
-                      {PLAN_NAMES[plan.planType]}
+                      {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
                     </div>
 
                     <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
                       {plan.price}
-                      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period}</span>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
                     </div>
 
                     <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <li>✓ {plan.accounts} {plan.accounts === 1 ? 'account' : 'accounts'}</li>
-                      <li>✓ {plan.scans} scan{plan.scans !== 1 ? 's' : ''}/month per target</li>
-                      <li>✓ {plan.targets} target{plan.targets !== 1 ? 's' : ''}/month</li>
+                      <li>✓ {t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
+                      <li>✓ {t('planScansPerMonthPerTarget', { count: plan.scans, plural: plan.scans !== 1 ? 's' : '' })}</li>
+                      <li>✓ {t('planTargetsPerMonth', { count: plan.targets, plural: plan.targets !== 1 ? 's' : '' })}</li>
                       <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
-                        ✓ {plan.severity === 'all' ? 'All severity levels' : 'Critical + High only'}
+                        ✓ {plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
                       </li>
                     </ul>
 
