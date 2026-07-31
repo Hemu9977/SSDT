@@ -12,18 +12,18 @@ import { API_BASE } from '../config/api';
 // Plan definitions — source of truth for the UI
 const PLANS = {
   monthly: [
-    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: 'periodMonth', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: 'periodMonth', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: 'periodMonth', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: 'periodMonth', accounts: 1, totalScans: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: 'periodMonth', accounts: 3, totalScans: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: 'periodMonth', accounts: 5, totalScans: 10, severity: 'all' },
   ],
   annual: [
-    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: 'periodYear', accounts: 1, scans: 1,  targets: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: 'periodYear', accounts: 3, scans: 3,  targets: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: 'periodYear', accounts: 5, scans: 10, targets: 10, severity: 'all' },
+    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: 'periodYear', accounts: 1, totalScans: 3,  severity: 'critical-high' },
+    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: 'periodYear', accounts: 3, totalScans: 5,  severity: 'all' },
+    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: 'periodYear', accounts: 5, totalScans: 10, severity: 'all' },
   ],
   onetime: [
-    { planType: 'trial1', billingCycle: 'onetime', price: '¥20,000', period: '', accounts: 1, scans: 1, targets: 1, severity: 'critical-high' },
-    { planType: 'trial2', billingCycle: 'onetime', price: '¥30,000', period: '', accounts: 1, scans: 2, targets: 1, severity: 'all' },
+    { planType: 'trial1', billingCycle: 'onetime', price: '¥20,000', period: '', accounts: 1, totalScans: 1, severity: 'critical-high' },
+    { planType: 'trial2', billingCycle: 'onetime', price: '¥30,000', period: '', accounts: 1, totalScans: 2, severity: 'all' },
   ],
 };
 
@@ -729,11 +729,14 @@ const Profile = () => {
                     </div>
 
                     <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <li>✓ {t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
-                      <li>✓ {t('planScansPerMonthPerTarget', { count: plan.scans, plural: plan.scans !== 1 ? 's' : '' })}</li>
-                      <li>✓ {t('planTargetsPerMonth', { count: plan.targets, plural: plan.targets !== 1 ? 's' : '' })}</li>
+                      <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
+                      <li>
+                        ・{plan.billingCycle === 'onetime'
+                          ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
+                          : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
+                      </li>
                       <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
-                        ✓ {plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
+                        ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
                       </li>
                     </ul>
 
