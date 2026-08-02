@@ -77,6 +77,9 @@ router.get('/', auth, async (req, res) => {
         // isPro: true for ANY active paid plan (light, basic, pro) — org-first, then user fallback
         isPro: user.isPro(org),
         proExpiresAt: org ? org.expiresAt : user.proExpiresAt,
+        role: user.role,
+        // ── Platform-level role (independent from org role) ──────────────────
+        systemRole: user.systemRole || 'user',
         // ── Service plan fields ──────────────────────────────────────────────
         organization: org ? {
           id: org._id,

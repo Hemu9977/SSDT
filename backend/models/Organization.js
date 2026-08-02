@@ -18,6 +18,9 @@ const OrganizationSchema = new mongoose.Schema({
     enum: ['active', 'canceled', 'past_due', 'trialing', null],
     default: null
   },
+  // Platform-level admin lock — blocks login for all members of this org.
+  // Independent from subscriptionStatus (which reflects billing state, not access).
+  isDisabled: { type: Boolean, default: false },
   seatsAllowed: { type: Number, default: 1 },
   seatsUsed: { type: Number, default: 1 },
   scanLimit: { type: Number, default: 0 },
@@ -33,7 +36,8 @@ const OrganizationSchema = new mongoose.Schema({
   stripeCheckoutSessionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },
   lastScanReset: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now }
+  // Indexed for the admin analytics growth-trend aggregation.
+  createdAt: { type: Date, default: Date.now, index: true }
 });
 
 module.exports = mongoose.model('Organization', OrganizationSchema);

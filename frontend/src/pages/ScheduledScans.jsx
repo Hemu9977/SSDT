@@ -1,6 +1,6 @@
 /**
  * ScheduledScans Page
- * Dashboard view for managing scheduled scans.
+ * Profile/Home view for managing scheduled scans.
  * Uses the same layout as LandingPage (Header + ParticleBackground).
  */
 

@@ -147,6 +147,10 @@ app.use('/api/org', apiLimiter, require('./routes/orgRoutes'));
 app.use('/api/schedules', apiLimiter, require('./routes/scheduleRoutes'));
 app.use('/api/notifications', apiLimiter, require('./routes/notificationRoutes'));
 
+// 👇 REGISTER GLOBAL ADMIN ROUTES
+app.use('/api/admin', apiLimiter, require('./routes/admin'));
+
+
 // ── /health — lightweight liveness probe (ECS health check target) ───────────
 // Returns 200 immediately; ECS uses this to decide whether to route traffic.
 // Intentionally minimal — no DB or Redis calls so it never blocks.

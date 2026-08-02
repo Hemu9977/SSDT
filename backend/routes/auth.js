@@ -4,12 +4,27 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Organization = require('../models/Organization');
 const auth = require('../middleware/auth');
 const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
 const crypto = require('crypto');
 const { verifyGoogleCredential } = require('../utils/googleAuth');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// An account is blocked if the user themselves was disabled by an admin, or if
+// their organization was disabled — either way, login must be refused before
+// any token/OTP is issued.
+async function isAccountBlocked(user) {
+  if (user.isDisabled) return true;
+  if (user.organizationId) {
+    const org = await Organization.findById(user.organizationId).select('isDisabled');
+    if (org && org.isDisabled) return true;
+  }
+  return false;
+}
+
+const DISABLED_MESSAGE = 'This account has been disabled. Please contact your administrator.';
 
 // Explicit OPTIONS handler — belt-and-suspenders in case the global preflight
 // handler in server.js is bypassed (e.g. a future middleware ordering change).
@@ -57,6 +72,10 @@ router.post('/google', async (req, res) => {
       await user.save();
     }
 
+    if (await isAccountBlocked(user)) {
+      return res.status(403).json({ message: DISABLED_MESSAGE });
+    }
+
     if (!user.isVerified) user.isVerified = true;
     user.lastLoginAt = new Date();
     await user.save();
@@ -71,7 +90,7 @@ router.post('/google', async (req, res) => {
         res.json({
           message: 'Google login successful',
           token: jwtToken,
-          user: { id: user.id, email: user.email, isVerified: user.isVerified }
+          user: { id: user.id, email: user.email, isVerified: user.isVerified, systemRole: user.systemRole || 'user' }
         });
       }
     );
@@ -132,10 +151,14 @@ router.post('/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
+    if (await isAccountBlocked(user)) {
+      return res.status(403).json({ message: DISABLED_MESSAGE });
+    }
+
     const recentlyReset = user.passwordResetAt && (new Date() - user.passwordResetAt) < (86400000);
     if (recentlyReset) {
        const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-       return res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true } });
+       return res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' } });
     }
 
     const otp = generateOTP();
@@ -143,7 +166,7 @@ router.post('/login', async (req, res) => {
     user.otpExpires = new Date(Date.now() + 600000);
     await user.save();
     try { await sendOTPEmail(user.email, otp); } catch(e) { console.error(e); }
-    res.json({ message: 'Check email for OTP', user: { id: user.id, email: user.email }});
+    res.json({ message: 'Check email for OTP', user: { id: user.id, email: user.email, systemRole: user.systemRole || 'user' }});
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -163,6 +186,11 @@ router.post('/verify-otp', async (req, res) => {
     if (!user || user.otp !== otp || user.otpExpires < new Date()) {
       return res.status(400).json({ message: 'Invalid or expired OTP' });
     }
+
+    if (await isAccountBlocked(user)) {
+      return res.status(403).json({ message: DISABLED_MESSAGE });
+    }
+
     user.otp = undefined;
     user.otpExpires = undefined;
     user.isVerified = true;
@@ -170,7 +198,7 @@ router.post('/verify-otp', async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true }});
+    res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' }});
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }

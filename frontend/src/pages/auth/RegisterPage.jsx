@@ -39,7 +39,8 @@ const RegisterPage = () => {
         if (response.ok) {
           localStorage.setItem('token', data.token);
           setMessage(t('googleSignupSuccessful'));
-          setTimeout(() => navigate('/'), 2000);
+          const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+          setTimeout(() => navigate(target), 2000);
         } else {
           setError(data.message || t('googleSignupFailed'));
         }

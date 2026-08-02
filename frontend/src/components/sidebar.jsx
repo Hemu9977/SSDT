@@ -1,22 +1,28 @@
 import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { FaHome, FaShieldAlt, FaHistory, FaUser, FaCog, FaSignOutAlt, FaChartBar } from 'react-icons/fa';
+import { FaShieldAlt, FaHistory, FaUser, FaCog, FaSignOutAlt, FaChartBar, FaUserShield } from 'react-icons/fa';
 import { useTranslation } from '../contexts/TranslationContext';
+import { useUser } from '../contexts/UserContext';
 import '../styles/Sidebar.scss';
+
 
 const Sidebar = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
+  const { user } = useUser();
+  const isSystemAdmin = user && ['admin', 'superadmin'].includes(user.systemRole);
+
 
   const menuItems = [
-    { path: '/dashboard', icon: <FaHome />, label: t('dashboard') },
     { path: '/scan', icon: <FaShieldAlt />, label: t('securityScan') },
     { path: '/reports', icon: <FaChartBar />, label: t('reports') },
     { path: '/history', icon: <FaHistory />, label: t('scanHistory') },
     { path: '/profile', icon: <FaUser />, label: t('profile') },
     { path: '/settings', icon: <FaCog />, label: t('settings') },
+    ...(isSystemAdmin ? [{ path: '/admin', icon: <FaUserShield />, label: t('adminPanel') }] : []),
   ];
+
 
   const handleLogout = () => {
     localStorage.removeItem('token');

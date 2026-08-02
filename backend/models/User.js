@@ -37,6 +37,21 @@ const UserSchema = new mongoose.Schema({
     type: Date,
   },
 
+  // ─── SYSTEM ROLE (PLATFORM-LEVEL) ───────────────────────────────────────────
+  // Independent from org-level role (owner/admin/member).
+  // Controls access to the global admin dashboard.
+  systemRole: {
+    type: String,
+    enum: ['user', 'admin', 'superadmin'],
+    default: 'user'
+  },
+  // Platform-level admin lock — independent from org/subscription state.
+  // Blocks login when true; does not invalidate already-issued JWTs (7-day expiry).
+  isDisabled: {
+    type: Boolean,
+    default: false
+  },
+
   // ─── ORGANIZATION (NEW) ──────────────────────────────────────────────────────
   organizationId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -127,10 +142,12 @@ const UserSchema = new mongoose.Schema({
   targetsUsed: [{
     type: String
   }],
-  // Account creation date
+  // Account creation date — indexed for the admin analytics growth-trend
+  // aggregation (30-day date-range $match + $group by day).
   createdAt: {
     type: Date,
-    default: Date.now
+    default: Date.now,
+    index: true
   },
   // Last login tracking
   lastLoginAt: {

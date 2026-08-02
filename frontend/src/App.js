@@ -12,10 +12,12 @@ import OTPVerification from './pages/auth/OTPVerification';
 import ForgotPasswordPage from './pages/auth/ForgotPasswordPage';
 import ResetPasswordPage from './pages/auth/ResetPasswordPage';
 import Profile from './pages/Profile';
-import Dashboard from './pages/Dashboard';
 import ScanViewer from './pages/ScanViewer';
+
 import ScheduledScans from './pages/ScheduledScans';
 import JoinOrganization from './pages/JoinOrganization';
+import AdminPanel from './pages/Admin/AdminPanel';
+
 // Translation imports
 import { TranslationProvider } from './contexts/TranslationContext';
 import { UserProvider, useUser } from './contexts/UserContext';
@@ -45,11 +47,11 @@ function AppContent() {
             <Route path="/verify-otp" element={<OTPVerification />} />
             <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
-            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/scan/:analysisId" element={<ScanViewer />} />
             <Route path="/schedules" element={<ScheduledScans />} />
             <Route path="/join" element={<JoinOrganization />} />
+            <Route path="/admin" element={<AdminPanel />} />
           </Routes>
         </BrowserRouter>
       </TranslationProvider>
