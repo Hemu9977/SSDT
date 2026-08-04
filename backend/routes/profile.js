@@ -28,10 +28,11 @@ router.get('/', auth, async (req, res) => {
       .limit(5)
       .select('analysisId target status createdAt triggerSource');
 
-    // Calculate scans this month
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    // Calculate scans this month — UTC boundary, matching planService.js's
+    // UTC monthly reset. (This count is still limited by ScanResult's 7-day
+    // TTL, so it's cosmetic only; org.scansUsed is the authoritative value.)
+    const now = new Date();
+    const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
 
     const scansThisMonth = await ScanResult.countDocuments({
       userId: req.user.id,
@@ -60,6 +61,17 @@ router.get('/', auth, async (req, res) => {
     // Get account limits (org-aware)
     const limits = user.getAccountLimits(org);
 
+    // Purchased one-off scan credits — derived from live batches, never the
+    // (drift-prone) oneTimeRemainingScans mirror, so expired batches don't
+    // count.
+    const liveCreditBatches = org
+      ? (org.scanCredits || []).filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+      : [];
+    const extraScansRemaining = liveCreditBatches.reduce((sum, c) => sum + c.scansRemaining, 0);
+    const extraScansExpiresAt = liveCreditBatches.length
+      ? liveCreditBatches.reduce((earliest, c) => (c.expiresAt < earliest ? c.expiresAt : earliest), liveCreditBatches[0].expiresAt)
+      : null;
+
     res.json({
       success: true,
       user: {
@@ -70,6 +82,7 @@ router.get('/', auth, async (req, res) => {
         accountType: user.accountType,
         isVerified: user.isVerified,
         totalScans: totalScans,
+        totalScansAllTime: org ? (org.totalScansAllTime || 0) : 0,
         scansThisMonth: scansThisMonth,
         monthlyScansUsed: org ? org.scansUsed : 0,
         createdAt: user.createdAt,
@@ -91,6 +104,9 @@ router.get('/', auth, async (req, res) => {
           scansUsed: org.scansUsed,
           targetsUsed: org.targetsUsed,
           oneTimeRemainingScans: org.oneTimeRemainingScans,
+          extraScansRemaining,
+          extraScansExpiresAt,
+          totalScansAllTime: org.totalScansAllTime || 0,
           expiresAt: org.expiresAt,
           members: members,
           pendingInvites: pendingInvites

@@ -323,6 +323,13 @@
       letter-spacing: 1px;
       font-weight: 600;
     }
+
+    .stat-sublabel {
+      font-size: 0.7rem;
+      color: var(--foreground-darker);
+      margin-top: 0.35rem;
+      opacity: 0.8;
+    }
   }
 }
 

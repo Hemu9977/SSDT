@@ -42,6 +42,9 @@ const ONETIME_SCANS = {
   trial2_onetime: 2,
 };
 
+// Validity window for a purchased one-off scan credit batch, from purchase.
+const CREDIT_VALIDITY_DAYS = 90;
+
 // ─── POST /api/stripe/create-checkout-session ─────────────────────────────────
 router.post('/create-checkout-session', auth, async (req, res) => {
   try {
@@ -61,9 +64,33 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    const isOnetime = billingCycle === 'onetime';
+
+    if (user.organizationId) {
+      const orgForGuard = await Organization.findById(user.organizationId);
+
+      // Only an org owner/admin may purchase a plan or a top-up.
+      if (orgForGuard && !['owner', 'admin'].includes(user.role)) {
+        return res.status(403).json({
+          code: 'INSUFFICIENT_ROLE',
+          error: 'Only the organization owner or an admin can purchase a plan or top-up.'
+        });
+      }
+
+      // Block a SECOND recurring subscription while one is already active —
+      // that path would overwrite planType/billingCycle/stripeSubscriptionId
+      // on the org (see handleCheckoutComplete). One-time top-ups are always
+      // allowed through regardless of subscription state.
+      if (!isOnetime && orgForGuard && orgForGuard.subscriptionStatus === 'active' && orgForGuard.billingCycle && orgForGuard.billingCycle !== 'onetime') {
+        return res.status(409).json({
+          code: 'ALREADY_SUBSCRIBED',
+          error: 'You already have an active subscription. Cancel it before purchasing a different plan.'
+        });
+      }
+    }
+
     // Reuse existing Stripe customer or create a new one
     let customerId = user.stripeCustomerId;
-    const isOnetime = billingCycle === 'onetime';
     const frontendBase = process.env.FRONTEND_URL || 'http://localhost:3000';
 
     // Verify existing customer
@@ -137,6 +164,15 @@ router.get('/subscription', auth, async (req, res) => {
       org = await Organization.findById(user.organizationId);
     }
 
+    const now = new Date();
+    const liveCreditBatches = org
+      ? (org.scanCredits || []).filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+      : [];
+    const extraScansRemaining = liveCreditBatches.reduce((sum, c) => sum + c.scansRemaining, 0);
+    const extraScansExpiresAt = liveCreditBatches.length
+      ? liveCreditBatches.reduce((earliest, c) => (c.expiresAt < earliest ? c.expiresAt : earliest), liveCreditBatches[0].expiresAt)
+      : null;
+
     // Org is the source of truth; User fields are a legacy fallback for
     // pre-migration accounts that still have plan data on the User document.
     res.json({
@@ -147,6 +183,8 @@ router.get('/subscription', auth, async (req, res) => {
         subscriptionStatus: org ? org.subscriptionStatus : user.subscriptionStatus,
         stripeSubscriptionId: org ? org.stripeSubscriptionId : user.stripeSubscriptionId,
         oneTimeRemainingScans: org ? (org.oneTimeRemainingScans || 0) : (user.oneTimeRemainingScans || 0),
+        extraScansRemaining,
+        extraScansExpiresAt,
         monthlyScansUsed: org ? org.scansUsed : 0,
         proExpiresAt: org ? org.expiresAt : user.proExpiresAt
       }
@@ -392,6 +430,25 @@ async function handleCheckoutComplete(session) {
     // so org is fully configured before anything is written to DB
   }
 
+  // A top-up is a one-time purchase by a user whose org already has a real,
+  // active recurring subscription. It must add a scan credit batch WITHOUT
+  // touching planType/billingCycle/subscriptionStatus/stripeSubscriptionId/
+  // seatsAllowed/scanLimit/expiresAt/scansUsed — otherwise the subscription
+  // would be silently clobbered by the generic plan-assignment logic below.
+  // A legacy pure one-time org (billingCycle already 'onetime', no real
+  // subscription) buying a second trial does NOT take this branch — it falls
+  // through to the existing onetime logic further down, which now stacks
+  // instead of overwriting.
+  const isTopUp =
+    billingCycle === 'onetime' &&
+    org.subscriptionStatus === 'active' &&
+    org.billingCycle && org.billingCycle !== 'onetime' &&
+    !!org.planType;
+
+  if (isTopUp) {
+    return await handleTopUpPurchase(org, user, session, key);
+  }
+
   if (org.stripeCheckoutSessionId === session.id && org.subscriptionStatus === 'active') {
     user.stripePending = false;
     await user.save();
@@ -406,9 +463,23 @@ async function handleCheckoutComplete(session) {
 
   if (billingCycle === 'onetime') {
     org.seatsAllowed = 1;
-    org.oneTimeRemainingScans = ONETIME_SCANS[key] || 1;
+    // Additive, not overwrite — a legacy trial org buying a second trial
+    // stacks its scans instead of losing the first batch's remainder.
+    org.oneTimeRemainingScans = (org.oneTimeRemainingScans || 0) + (ONETIME_SCANS[key] || 1);
+    org.scanCredits = org.scanCredits || [];
+    org.scanCredits.push({
+      source: key,
+      scansTotal: ONETIME_SCANS[key] || 1,
+      scansRemaining: ONETIME_SCANS[key] || 1,
+      purchasedAt: new Date(),
+      expiresAt: new Date(Date.now() + CREDIT_VALIDITY_DAYS * 24 * 60 * 60 * 1000),
+      stripeCheckoutSessionId: session.id,
+      vulnerabilityAccessLevel: key === 'trial2_onetime' ? 'all' : 'critical-high',
+      source_type: 'stripe'
+    });
+    org.scanCredits.sort((a, b) => a.expiresAt - b.expiresAt);
     org.stripeSubscriptionId = null;
-    org.expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000); // 90 days validity
+    org.expiresAt = new Date(Date.now() + CREDIT_VALIDITY_DAYS * 24 * 60 * 60 * 1000);
   } else {
     const PLAN_CONFIGS = {
       light: { seatsAllowed: 1, scanLimit: 3 },
@@ -441,6 +512,49 @@ async function handleCheckoutComplete(session) {
   // and closes the partial-state window from the early user.save() that was here before
   await Promise.all([org.save(), user.save()]);
   console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}. DB update complete.`);
+}
+
+// Appends a scan credit batch for a subscriber buying a one-off top-up.
+// Deliberately does NOT touch planType/billingCycle/subscriptionStatus/
+// stripeSubscriptionId/seatsAllowed/scanLimit/expiresAt/scansUsed/
+// targetScanCounts/lastScanReset — those all describe the recurring
+// subscription, which this purchase must leave completely untouched.
+//
+// Idempotency: `sync-checkout-session` calls handleCheckoutComplete() (and
+// therefore this function) OUTSIDE the StripeEvent unique-claim guard that
+// protects the /webhook route, so this needs its own guard against being
+// invoked twice for the same session (once via sync, once via the real
+// webhook delivery).
+async function handleTopUpPurchase(org, user, session, key) {
+  const alreadyGranted = (org.scanCredits || []).some(c => c.stripeCheckoutSessionId === session.id);
+  if (alreadyGranted) {
+    await User.updateOne({ _id: user._id }, { $set: { stripePending: false } });
+    console.log(`♻️  [webhook] Top-up session ${session.id} already granted for Org ${org._id}. Skipping.`);
+    return;
+  }
+
+  const scansGranted = ONETIME_SCANS[key] || 1;
+  const batch = {
+    source: key,
+    scansTotal: scansGranted,
+    scansRemaining: scansGranted,
+    purchasedAt: new Date(),
+    expiresAt: new Date(Date.now() + CREDIT_VALIDITY_DAYS * 24 * 60 * 60 * 1000),
+    stripeCheckoutSessionId: session.id,
+    vulnerabilityAccessLevel: key === 'trial2_onetime' ? 'all' : 'critical-high',
+    source_type: 'stripe'
+  };
+
+  await Organization.updateOne(
+    { _id: org._id, 'scanCredits.stripeCheckoutSessionId': { $ne: session.id } },
+    {
+      $push: { scanCredits: { $each: [batch], $sort: { expiresAt: 1 } } },
+      $inc: { oneTimeRemainingScans: scansGranted }
+    }
+  );
+  await User.updateOne({ _id: user._id }, { $set: { stripePending: false } });
+
+  console.log(`✅ [webhook] Top-up granted: ${scansGranted} scans (${key}) to Org ${org._id}, session ${session.id}.`);
 }
 
 async function handleCheckoutExpired(session) {
