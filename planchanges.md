@@ -145,7 +145,12 @@ So a subscriber buying Trial 1 today would: drop to 1 seat, lose `stripeSubscrip
 - `backend/services/schedulerService.js:127-131` runs the same `checkScanQuota` for scheduled scans.
 - Other consumers of `checkScanQuota`/`consumeScan` to keep in sync: `routes/pageSpeedRoutes.js:15,29`, `routes/webCheckRoutes.js:13,42`, `routes/zapRoutes.js:79`, `routes/zapAuthRoutes.js:208`, `routes/virustotalRoutes.js:476`.
 
-**Pre-existing bug to note (do not fix in this change, but flag):** `pageSpeedRoutes.js:29` and `webCheckRoutes.js:42` call `consumeScan()` inline **in addition to** the later `finalizeSuccessfulScan()`, so those routes can double-charge. Widening the quota path makes this more visible.
+**Two deliberate charging strategies — do not "unify" them.** There are two distinct quota paths, and they never both fire for the same scan:
+
+- **Orchestrated combined scan** — `planCheck` *checks* at scan start; `finalizeSuccessfulScan(scanId)` *charges* at successful completion, guarded by `ScanResult.quotaConsumed` (`models/ScanResult.js:95-98`). The guard is needed because several components (`geminiCompletionService.js:230,429`, `zapService.js:1345`, `zapAuthService.js:879`) can each reach finalize for the same scan. Charging at the end means a scan that dies halfway costs the customer nothing.
+- **Standalone one-shot routes** — `pageSpeedRoutes.js:29` and `webCheckRoutes.js:42` call `consumeScan()` inline right after a successful result. These create no `ScanResult` and never enter the pipeline above, so one HTTP request charges exactly once. No idempotency flag is needed or possible.
+
+Both paths call `consumeScan()`, so **any change to consumption ordering must be applied inside `consumeScan()` itself**, not at the call sites — otherwise the standalone routes will keep the old subscription-only behaviour and never fall back to credits. (Note: neither standalone endpoint is currently called from the frontend.)
 
 ### D. Counting "scans this month" from ScanResult
 
