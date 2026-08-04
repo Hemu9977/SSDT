@@ -112,18 +112,36 @@ Recent work:
 
 ### Subscription Tiers
 
+> **Single source of truth: `PLAN_LIMITS` in `backend/models/User.js`.** The table below
+> mirrors that constant — if they ever disagree, the code is right and this table is stale.
+> Read via `user.getAccountLimits(org)`; keys are `` `${planType}_${billingCycle}` ``.
+
 | Feature | Light | Basic | Pro |
 |---------|-------|-------|-----|
 | **Monthly Price** | ¥30,000 | ¥50,000 | ¥100,000 |
 | **Annual Price** | ¥300,000 | ¥500,000 | ¥1,000,000 |
-| **Accounts** | 1 | 3 | 5 |
-| **Scans per target/month** | 1 | 3 | 10 |
-| **Max targets/month** | 3 | 5 | 10 |
-| **Severity levels shown** | Critical, High only | All (Critical→Informational) | All (Critical→Informational) |
+| **Accounts** (`seatsAllowed`) | 1 | 3 | 5 |
+| **Scans/month** (`scansPerMonth`) | 3 | 5 | 10 |
+| **Max targets/month** (`targetsPerMonth`) | 3 | 5 | 10 |
+| **Scans per target** (`scansPerTarget`) | monthly: none · annual: 3 | monthly: none · annual: 5 | monthly: none · annual: 10 |
+| **Max schedules** (`maxSchedules`) | 1 | 3 | 10 |
+| **Severity shown** (`vulnerabilityAccessLevel`) | `critical-high` | `all` | `all` |
+
+Notes:
+- **Monthly plans have no per-target cap** (`scansPerTarget: null`) — the cap is the global
+  `scansPerMonth`. Only *annual* plans enforce per-target limits.
+- **ZAP never emits a "Critical" severity** (`backend/utils/vulnFilter.js:23`), so the
+  `critical-high` tier resolves to **High only** in practice.
+- **Free / no-plan tier**: `scansPerMonth: 20`, unlimited targets, `critical-high`,
+  `maxSchedules: 2`. Also the fallback for an org whose paid plan was nulled on cancellation.
 
 ### One-Time Trial Plans
-- **Trial 1**: ¥20,000 - 1 account, 1 scan, 1 target, Critical+High only
-- **Trial 2**: ¥30,000 - 1 account, 2 scans, 1 target, all severity levels
+- **Trial 1** (`trial1_onetime`): ¥20,000 — 1 account, 1 scan, 1 target, `critical-high`, no schedules
+- **Trial 2** (`trial2_onetime`): ¥30,000 — 1 account, 2 scans, 1 target, `all` severities, no schedules
+
+Scan allocations live in `ONETIME_SCANS` (`backend/routes/stripeRoutes.js`). One-time is
+currently an org-wide *mode* (`Organization.billingCycle === 'onetime'`), not a credit balance —
+see `planchanges.md` for the planned rework.
 
 ### Environment Scale Targets
 - Light plan: support 10 companies
@@ -131,18 +149,42 @@ Recent work:
 - Pro plan: support 5 companies
 - Scale adjusted based on contract status
 
-### Features NOT YET Implemented (Goals)
-- [x] **TASK 1**: VirusTotal API removal (completed — VT removed from all files, 6 scanners remain)
-- [ ] **TASK 2**: Multi-tenant account system (Company model, multiple accounts per company)
-- [ ] **TASK 3**: Severity-level gating (Light plan: only show Critical + High vulnerabilities)
-- [ ] **TASK 4**: Plan-based scan limits (scans per target per month, max targets per month)
-- [ ] **TASK 5**: Trial plan one-time scan mode
-- [ ] **TASK 6**: Usage tracking dashboard
+### Implementation Status
+- [x] **TASK 1**: VirusTotal API removal (VT removed from all files, 6 scanners remain)
+- [x] **TASK 2**: Multi-tenant account system — `backend/models/Organization.js`, `middleware/requireOrg.js`
+- [x] **TASK 3**: Severity-level gating — `backend/utils/vulnFilter.js`, driven by `vulnerabilityAccessLevel`
+- [x] **TASK 4**: Plan-based scan limits — `backend/services/planService.js` (`checkScanQuota`, `consumeScan`, `finalizeSuccessfulScan`) enforced by `middleware/planCheck.js`
+- [x] **TASK 5**: Trial one-time scan mode — `billingCycle: 'onetime'` + `Organization.oneTimeRemainingScans`
+- [x] **Stripe billing** (not originally listed) — `backend/routes/stripeRoutes.js`, `models/StripeEvent.js` for webhook idempotency
+- [ ] **TASK 6**: Usage tracking dashboard — partially present in the Profile page; see `planchanges.md`
 - [ ] **TASK 7**: Admin panel for managing company accounts and plans
 
-**Full implementation details for each task: see `IMPLEMENTATION_PLAN.md`**
+### Quota Enforcement Notes
+- Quota is checked at scan **start** (`planCheck.js`) but charged only at successful
+  **completion** (`finalizeSuccessfulScan`, guarded by `ScanResult.quotaConsumed`).
+- Monthly counters reset on a **UTC** calendar-month boundary (`planService.js`).
+  `backend/routes/profile.js` currently computes its month boundary in *server-local* time —
+  these disagree; see `planchanges.md`.
+- `ScanResult` documents carry a **7-day TTL**, so they cannot be used to compute monthly
+  usage. `Organization.scansUsed` is authoritative.
 
-### Existing Infrastructure (useful for plan features)
-- User model already has `accountType` ('free'/'pro'), `proExpiresAt`, `isPro()`, `getAccountLimits()`
-- Prototype upgrade/downgrade endpoints exist in `backend/routes/profile.js`
-- `virustotalRoutes.js` is the main scan orchestration file (filename is legacy) - handles ALL scan workflows
+### Other Infrastructure
+- `User.getAccountLimits(org)` also returns legacy `scansPerDay` (derived as
+  `scansPerMonth / 30`) and `maxFileSize` — **neither is enforced anywhere**; do not treat
+  them as real limits.
+- `virustotalRoutes.js` is the main scan orchestration file (filename is legacy) — handles ALL scan workflows
+
+## UI Language Policy
+
+- **Japanese is the default UI language**; English stays available via the header toggle
+  (`components/LanguageToggle.jsx`). Default lives in `frontend/src/locales/index.js`.
+- `ja.js` spreads `...en`, so a missing JA key silently renders English rather than a raw key.
+  **Every new user-facing string needs entries in both `en.js` and `ja.js`.** Both files are
+  flat key objects — check for an existing key before adding one, duplicates are easy to create.
+- **Never display third-party scanner names to users.** The product is resold; clients must not
+  learn that OWASP ZAP, WebCheck, urlscan.io, Mozilla Observatory, PageSpeed, or Gemini are
+  used. Score cards and progress text use neutral wording; scan progress is reported as
+  "Step N of 6" via `frontend/src/utils/scanStatus.js`.
+- **Never render a backend-supplied `message` or `error` string in the UI.** Those are English-only,
+  bypass i18n, and name the scan engines (e.g. `'ZAP scan timed out'`). They are for server logs.
+  Derive user-facing status from structured fields and resolve it through `t()`.
