@@ -12,6 +12,7 @@ import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 
 import { API_BASE } from '../config/api';
+import { getScanStatusLine } from '../utils/scanStatus';
 
 // 🔄 Loading Placeholder Component for progressive loading
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -28,6 +29,10 @@ const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) =
 
 const Hero = ({ historicalScan }) => {
   const [report, setReport] = useState(null);
+  // Mirror of `report` so WebSocket handlers can read the merged scan state
+  // synchronously when deriving the progress status line. Kept in sync below so the
+  // other setReport() call sites (completion, historical load, reset) can't desync it.
+  const reportRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStage, setLoadingStage] = useState('');
@@ -55,9 +60,17 @@ const Hero = ({ historicalScan }) => {
 
   const navigate = useNavigate();
   const { currentLang, setHasReport, t } = useTranslation();
+  // Always-current t() for use inside effects that must NOT re-run on a language
+  // toggle (e.g. the resume-scan check, which would otherwise re-hit the API).
+  const tRef = useRef(t);
+  tRef.current = t;
   const { addScanListener, removeScanListener } = useNotifications();
   const { theme } = useTheme();
   const { user, organization } = useUser();
+
+  // Keep reportRef aligned with `report` after every commit, so setReport() calls made
+  // outside the WebSocket handler (completion, historical load, reset) stay reflected.
+  useEffect(() => { reportRef.current = report; }, [report]);
 
   // 🌐 Report Translation State
   const [translatedReport, setTranslatedReport] = useState(null);
@@ -317,7 +330,7 @@ const Hero = ({ historicalScan }) => {
         setActiveScanId(data.analysisId);
         setScanUrl(data.target);
         setLoading(true);
-        setLoadingStage('Resuming scan...');
+        setLoadingStage(tRef.current('resumingScan'));
         stopPollingRef.current = false;
 
         // Calculate progress based on what's completed
@@ -497,7 +510,8 @@ const Hero = ({ historicalScan }) => {
       setLoadingStage('');
       wsListeningRef.current = false;
       if (wsWatchdogRef.current) { clearTimeout(wsWatchdogRef.current); wsWatchdogRef.current = null; }
-      setError(t('analysisFailed', { reason: data.error || t('unknownError') }));
+      // data.error is a raw backend string that can name the scan engines — never show it.
+      setError(t('analysisFailed', { reason: t('unknownError') }));
       localStorage.removeItem('activeScan');
       setActiveScanId(null);
       activeScanIdRef.current = null;
@@ -515,10 +529,17 @@ const Hero = ({ historicalScan }) => {
       return;
     }
 
-    // Partial update — merge in whatever data arrived
-    setReport(prev => ({ ...(prev || {}), ...data, isPartial: true }));
+    // Partial update — each event carries only a slice of the scan, so the status
+    // line must be derived from the accumulated result. Merge through `reportRef`
+    // rather than a setState updater: updaters do not run synchronously, so reading
+    // state back on the next line would lag one event behind.
+    const merged = { ...(reportRef.current || {}), ...data, isPartial: true };
+    reportRef.current = merged;
+    setReport(merged);
     if (data.progress != null) setLoadingProgress(data.progress);
-    if (data.message)           setLoadingStage(data.message);
+    // Never render the backend's `message`: those strings are English-only and name
+    // the underlying scan engines. Derive a neutral, localized step line instead.
+    setLoadingStage(getScanStatusLine(merged, t));
   }, [setHasReport, t]);
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -625,7 +646,8 @@ const Hero = ({ historicalScan }) => {
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
           isPollingRef.current = false; // Reset polling flag
-          throw new Error('Analysis failed: ' + (analysisData.error || 'Unknown error'));
+          // analysisData.error can be e.g. 'ZAP scan timed out' — never surface it.
+          throw new Error(t('analysisFailed', { reason: t('unknownError') }));
         } else if (status === 'stopped') {
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
@@ -639,25 +661,9 @@ const Hero = ({ historicalScan }) => {
           isPollingRef.current = false; // Reset polling flag
           console.log('Max attempts reached, showing partial results');
         } else {
-          // Show progress indicators based on what we have
-          let statusMessage = t('analyzing');
-          const hasPsi = analysisData.hasPsiResult;
-          const hasObs = analysisData.hasObservatoryResult;
-          const hasZap = analysisData.hasZapResult;
-          const zapPending = analysisData.zapPending;
-          const hasAi = analysisData.hasRefinedReport;
-
-          if (!hasPsi || !hasObs) statusMessage = `📊 ${t('fetchingPerformanceAndSecurityMetadata')}`;
-          else if (zapPending && analysisData.zapData) {
-            const zapPhase = analysisData.zapData.phase || 'scanning';
-            const zapProgress = analysisData.zapData.progress || 0;
-            statusMessage = `⚡ ${t('vulnerabilityAnalysisInProgress', { phase: zapPhase, progress: zapProgress })}`;
-          }
-          else if (!hasZap && !zapPending) statusMessage = `⚡ ${t('startingComprehensiveVulnerabilityScan')}`;
-          else if (!hasAi) statusMessage = `🤖 ${t('generatingAiPoweredSecurityInsights')}`;
-          else statusMessage = `✅ ${t('finalizingResults')}`;
-
-          setLoadingStage(statusMessage);
+          // Neutral step progress — never names a scan engine or leaks the raw
+          // backend `phase` (spidering / ajax_spider / active_scan / ...).
+          setLoadingStage(getScanStatusLine(analysisData, t));
           setTimeout(poll, 2000);
         }
       } catch (pollError) {
@@ -886,29 +892,27 @@ const Hero = ({ historicalScan }) => {
       return map[grade[0]] || '#888';
     };
 
-    // ⚡ ZAP Helpers - Now using backend zapData with status support
-    let zapRiskLabel = "Passed";
+    // Vulnerability scan helpers - driven by backend zapData status.
+    // Labels are localized and engine-agnostic; the backend `phase` and `message`
+    // fields are intentionally never surfaced.
+    let zapRiskLabel = t('passed');
     let zapRiskColor = "#00d084";
     let zapPendingMessage = null;
 
     const backendZapData = report?.zapData;
     if (backendZapData) {
       if (backendZapData.status === 'pending' || backendZapData.status === 'running') {
-        // ZAP scan in progress
-        zapRiskLabel = "Scanning...";
+        zapRiskLabel = t('scanning');
         zapRiskColor = "#ffb900";
-        const progress = backendZapData.progress || 0;
-        const phase = backendZapData.phase || 'starting';
-        zapPendingMessage = `${phase}: ${progress}%`;
+        zapPendingMessage = `${backendZapData.progress || 0}%`;
       } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
-        // ZAP scan complete
-        if (backendZapData.riskCounts.High > 0) { zapRiskLabel = "Vulnerable (High)"; zapRiskColor = "#e81123"; }
-        else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = "Vulnerable (Medium)"; zapRiskColor = "#ff8c00"; }
-        else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = "Vulnerable (Low)"; zapRiskColor = "#ffb900"; }
+        if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = "#e81123"; }
+        else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = "#ff8c00"; }
+        else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = "#ffb900"; }
       } else if (backendZapData.status === 'failed') {
-        zapRiskLabel = "Failed";
+        zapRiskLabel = t('scanFailed');
         zapRiskColor = "#e81123";
-        zapPendingMessage = backendZapData.message || 'Scan failed';
+        zapPendingMessage = null;
       }
     }
 
@@ -932,7 +936,7 @@ const Hero = ({ historicalScan }) => {
         {loading && (
           <div className="scan-progress-bar">
             <div className="progress-header">
-              <span className="progress-title">🔍 Scanning {report?.target || 'URL'}...</span>
+              <span className="progress-title">🔍 {t('scanningTarget', { target: report?.target || 'URL' })}</span>
               <span className="progress-percentage">{loadingProgress}%</span>
             </div>
             <div className="progress-track">
@@ -959,7 +963,7 @@ const Hero = ({ historicalScan }) => {
           {refinedReport ? (
             isTranslatingReport ? (
               <div style={{ textAlign: 'center', padding: '1rem' }}>
-                <p style={{ color: 'var(--accent)' }}>🌐 Translating report to Japanese...</p>
+                <p style={{ color: 'var(--accent)' }}>🌐 {t('translatingReportToJapanese')}</p>
               </div>
             ) : (
               <ReactMarkdown>
@@ -978,7 +982,7 @@ const Hero = ({ historicalScan }) => {
               <LoadingPlaceholder height="1rem" width="92%" style={{ marginBottom: '0.5rem' }} />
               <LoadingPlaceholder height="1rem" width="75%" style={{ marginBottom: '0.5rem' }} />
               <p style={{ color: 'var(--accent)', marginTop: '1rem', textAlign: 'center' }}>
-                ⏳ Generating AI analysis... (waiting for all scan data)
+                ⏳ {t('generatingAiAnalysisWaitingForAllScanData')}
               </p>
             </div>
           )}
@@ -989,7 +993,7 @@ const Hero = ({ historicalScan }) => {
           {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
           {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
           <div className="score-card">
-            <h4 className="score-card__title">⚡ OWASP ZAP</h4>
+            <h4 className="score-card__title">⚡ {t('vulnerabilityScan')}</h4>
             {backendZapData ? (
               <>
                 <span className="score-card__value" style={{ color: zapRiskColor }}>{zapRiskLabel}</span>
@@ -1037,7 +1041,7 @@ const Hero = ({ historicalScan }) => {
             {observatoryData?.grade ? (
               <>
                 <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
-                <p className="score-card__label">Mozilla Observatory</p>
+                <p className="score-card__label">{t('securityConfig')}</p>
               </>
             ) : (
               <div className="score-card__loading loading-pulse">
@@ -1050,13 +1054,13 @@ const Hero = ({ historicalScan }) => {
           {/* 🔍 URLScan.io Security Verdict */}
           {/* 🔍 URLScan.io Security Verdict */}
           <div className="score-card">
-            <h4 className="score-card__title">🌐 URLScan.io</h4>
+            <h4 className="score-card__title">🌐 {t('threatIntelligence')}</h4>
             {report?.hasUrlscanResult && report?.urlscanData ? (
               <>
                 <span className="score-card__value" style={{
                   color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084'
                 }}>
-                  {report.urlscanData.verdicts?.overall?.malicious ? 'Malicious' : 'Clean'}
+                  {report.urlscanData.verdicts?.overall?.malicious ? t('malicious') : t('clean')}
                 </span>
                 <p className="score-card__label">
                   {report.urlscanData.verdicts?.overall?.score || 0} {t('threatScore')}
@@ -1265,7 +1269,7 @@ const Hero = ({ historicalScan }) => {
                 return (
                   <>
                     <span className={`score-card__value score-card__value--${blockedCount === 0 ? 'safe' : 'high'}`}>
-                      {blockedCount === 0 ? 'Clean' : `${blockedCount} Found`}
+                      {blockedCount === 0 ? t('clean') : t('foundCount', { count: blockedCount })}
                     </span>
                     <p className="score-card__label">{t('listsChecked', { count: blocklists.length })}</p>
                   </>
@@ -1508,13 +1512,13 @@ const Hero = ({ historicalScan }) => {
             : null;
           const urlscanScreenshot = report?.urlscanData?.screenshot || null;
           const screenshotSrc = webCheckScreenshot || urlscanScreenshot;
-          const screenshotSource = webCheckScreenshot ? 'WebCheck' : (urlscanScreenshot ? 'URLScan.io' : null);
 
           if (!screenshotSrc) return null;
 
           return (
             <div className="screenshot-preview">
-              <h4>📸 {t('websiteScreenshot')} <span>({screenshotSource})</span></h4>
+              {/* The capture source is an internal engine detail — not shown. */}
+              <h4>📸 {t('websiteScreenshot')}</h4>
               <img
                 src={screenshotSrc}
                 alt={t('websiteScreenshot')}
@@ -1535,20 +1539,20 @@ const Hero = ({ historicalScan }) => {
         {/* ZAP Pending/Running Status */}
         {backendZapData && (backendZapData.status === 'pending' || backendZapData.status === 'running') && (
           <div className="zap-progress-card">
-            <h3>⚡ OWASP ZAP Security Scan in Progress</h3>
+            <h3>⚡ {t('scanningInProgress')}</h3>
             <p className="zap-status">
-              {backendZapData.phase || 'Scanning'}: {backendZapData.progress || 0}%
+              {backendZapData.progress || 0}%
             </p>
             <p className="zap-details">
-              {backendZapData.message || 'Running comprehensive security tests...'}
+              {t('runningSecurityTests')}
             </p>
             {backendZapData.urlsFound > 0 && (
               <p className="zap-stats">
-                Found {backendZapData.urlsFound} URLs • {backendZapData.alertsFound || 0} alerts so far
+                {t('urlsAndAlertsFound', { urls: backendZapData.urlsFound, alerts: backendZapData.alertsFound || 0 })}
               </p>
             )}
             <p className="zap-details" style={{ marginTop: '1rem', fontSize: '0.8rem' }}>
-              This page will automatically update when the scan completes.
+              {t('pageWillUpdateAutomatically')}
             </p>
           </div>
         )}
@@ -1785,7 +1789,7 @@ const Hero = ({ historicalScan }) => {
                             const errorData = await pollRes.json().catch(() => ({}));
                             if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                               alert(t('geminiKeyExhausted'));
-                              throw new Error('Gemini key is exhausted');
+                              throw new Error(t('geminiKeyExhausted'));
                             }
                             if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
                               alert(t('englishPdfOnly'));
@@ -1911,7 +1915,7 @@ const Hero = ({ historicalScan }) => {
                             const errorData = await pollRes.json().catch(() => ({}));
                             if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                               alert(t('geminiKeyExhausted'));
-                              throw new Error('Gemini key is exhausted');
+                              throw new Error(t('geminiKeyExhausted'));
                             }
                             if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
                               alert(t('englishPdfOnly'));

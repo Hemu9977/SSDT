@@ -1821,8 +1821,10 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   const tsFinal = buildTemplateStaticOverrides(ts, { lang });
 
   const doc = makePdfDoc({
-    Title:   `ZAP Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
-    Author:  'SSDT - OWASP ZAP',
+    // Document properties are client-visible in any PDF reader — keep them free of
+    // third-party engine names.
+    Title:   `Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
+    Author:  'SSD',
     Subject: 'Detailed Vulnerability Analysis'
   });
   const buf = collectBuffer(doc);
