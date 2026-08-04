@@ -16,10 +16,10 @@
 >
 > **Blocking questions — all must be answered before implementation starts:**
 >
-> 1. **Q3 — what is the plan's scan limit?** `CLAUDE.md` and `PLAN_LIMITS` in
->    `backend/models/User.js` disagree about scans-per-target vs. scans-per-month. This decides
->    what the new Profile card is even supposed to display. **The whole of Request 1 is blocked
->    on this.**
+> 1. **Q3 — what is the plan's scan limit?** The shipped code enforces a global monthly cap with
+>    **no per-target limit** on monthly plans, which differs from the original written spec. This
+>    decides what the new Profile card is supposed to display. **The whole of Request 1 is
+>    blocked on this.**
 > 2. **Q1 — credit expiry window.** Determines the `expiresAt` written on every purchased batch.
 >    Wrong value = wrong data persisted to real customer records, needing a migration to undo.
 > 3. **Q4 — do credits bypass per-target caps?** If they do not, a Light customer who has used
@@ -28,9 +28,17 @@
 >    `vulnerabilityAccessLevel` is read from the batch or the subscription at scan time.
 > 5. **Q6 — repeat/stacked purchases allowed?** Determines whether `scanCredits` is genuinely
 >    an array or should be a single object.
+> 6. **Q12 — what should the "Total Scans" card show?** It cannot mean "total" today: `ScanResult`
+>    has a 7-day TTL, so the number silently counts only the last week and shrinks over time.
+>    Also blocks Request 1.
 >
 > Questions 2, 7–11 are lower-risk and may be confirmed in parallel with implementation, but
 > **should still be asked up front.**
+
+**Accuracy note.** Every `file:line` reference in this document was verified against the working
+tree at commit `dcb19cf`. Line numbers drift as the code changes — re-check before relying on any
+specific line. Claims about *behaviour* (what the code does) are more durable than the line
+numbers pointing at them.
 
 ### ⚠️ Do not remove the frontend purchase gate first
 
@@ -92,7 +100,7 @@ Where those values come from:
 
 | Value | Source |
 |---|---|
-| `user.totalScans` | `backend/routes/profile.js:25` — `ScanResult.countDocuments({ userId })` |
+| `user.totalScans` | `backend/routes/profile.js:25` — `ScanResult.countDocuments({ userId })`. **⚠️ Not actually a lifetime total** — see the TTL note in §D. |
 | `user.scansThisMonth` | `backend/routes/profile.js:31-39` — `ScanResult.countDocuments` since `startOfMonth`, computed in **server-local time** (`setDate(1); setHours(0,0,0,0)`) |
 | `limits.scansPerDay` | `backend/models/User.js:220` — `Math.ceil(limits.scansPerMonth / 30)`. Purely derived; nothing enforces it. |
 | `limits.maxFileSize` | `backend/models/User.js:222` — `isPro ? 100MB : 32MB`. Nothing in the scan pipeline reads it. |
@@ -166,6 +174,16 @@ ScanResult.countDocuments({
 
 **However `createdAt` carries a 7-day TTL index** (`ScanResult.js:89` — `index: { expires: 604800 }`). Scan documents self-delete after a week, so `ScanResult` **cannot** be the source of truth for a monthly counter. `Organization.scansUsed` must remain authoritative; `ScanResult` is only usable for the cosmetic "recent activity" number.
 
+**⚠️ The same TTL already breaks the two numbers on the page today.** Both are `ScanResult.countDocuments` queries:
+
+- `user.totalScans` (`profile.js:25`) is labelled **"Total Scans"** but can only ever count the last 7 days. For any customer older than a week it silently under-reports, and it *decreases* over time.
+- `user.scansThisMonth` (`profile.js:31-39`) is labelled **"This Month"** but is likewise capped at 7 days, so from day 8 of any month onward it is simply wrong.
+
+This is a **pre-existing bug, not something this change introduces** — but the panel is being rebuilt, so decide now:
+
+- **"This Month"** — fixed by this plan: source it from `org.scansUsed`, which is authoritative and correctly reset (§Frontend, Card 2).
+- **"Total Scans"** — **not** fixed by this plan. There is no lifetime counter anywhere in the schema. Options: (a) add a monotonic `Organization.totalScansAllTime` incremented in `consumeScan()`, (b) relabel the card to "Scans (last 7 days)", or (c) drop the card. **This needs a product decision — see Open Question 12.**
+
 ---
 
 ## Data model changes
@@ -224,14 +242,17 @@ Add two helpers and rewire both entry points. **Ordering is mandatory: subscript
   1. If subscription is usable (`status active|trialing`, `scansUsed < scanLimit`) **and** per-target/target-count caps pass (existing `:90-106` logic) → return `org` with `req.quotaSource = 'subscription'`.
   2. Else if a live credit batch exists (`scansRemaining > 0 && expiresAt > now`) → return `org` with `quotaSource = 'credit'`.
   3. Else `null` → `PLAN_LIMIT_EXCEEDED`.
-- Return shape: today the middleware stores the raw org (`planCheck.js:73`). Return `{ org, quotaSource }` and update `planCheck.js:73` to `req.organization = result.org; req.quotaSource = result.quotaSource;`. **All five call sites of `req.organization`** must be checked (`pageSpeedRoutes.js:29`, `webCheckRoutes.js:42`, plus `zapRoutes.js`, `zapAuthRoutes.js`, `virustotalRoutes.js`) — they use `req.organization._id`, so a shape change is a breaking edit. Lower-risk alternative: keep returning the org document and attach `org.__quotaSource` as a non-persisted property.
+- Return shape: today the middleware stores the raw org (`planCheck.js:73` — `req.organization = result;`). If you change it to `{ org, quotaSource }`, update that line to `req.organization = result.org; req.quotaSource = result.quotaSource;`. **Blast radius is small — only two files read `req.organization`:** `pageSpeedRoutes.js:24,28,29` and `webCheckRoutes.js:41,42`. `zapRoutes.js:79`, `zapAuthRoutes.js:208` and `virustotalRoutes.js:476` only mount `planCheck` in their middleware chain and never read the property. (Verified: `grep -rn "req\.organization" backend/routes backend/middleware` returns hits in those two files only.) Lower-risk alternative if you prefer zero call-site edits: keep returning the org document and attach `org.__quotaSource` as a non-persisted property.
 
 **`consumeScan()` (`planService.js:125-190`)**
 
 Same ordering. Two atomic paths, tried in order:
 
 ```js
-// 1. Subscription slot (existing :185-189, unchanged)
+// 1. Subscription slot. NOTE: this is the existing :185-189 update PLUS a new
+//    subscriptionStatus guard. The guard is required now that checkScanQuota
+//    also admits orgs with no live subscription (credit-only), which the
+//    existing filter would otherwise let through into the subscription path.
 const sub = await Organization.findOneAndUpdate(
   { _id: orgId, subscriptionStatus: { $in: ['active','trialing'] }, scansUsed: { $lt: org.scanLimit } },
   { $inc: inc }, { new: true });
@@ -328,7 +349,7 @@ Four cards, replacing the `dailyLimit` and `maxFileSize` cards:
 
 | Card | Value | Label key |
 |---|---|---|
-| 1 | `user.totalScans` | `totalScans` *(existing)* |
+| 1 | `user.totalScans` — **but see warning below** | `totalScans` *(existing)* |
 | 2 | `org ? org.scansUsed : user.scansThisMonth` | `scansThisMonthLabel` **(new)** |
 | 3 | `org?.scanLimit > 0 ? org.scanLimit : '—'` | `planScanLimitLabel` **(new)** |
 | 4 | `org?.extraScansRemaining ?? 0` + expiry sub-line | `extraScansRemainingLabel` **(new)** |
@@ -337,7 +358,9 @@ Card 3 renders `t('noPlanScanLimit')` when there is no subscription (`scanLimit`
 
 Card 4 renders only when `org?.extraScansRemaining > 0`, with a sub-line `t('extraScansExpireOn', { date: formatDate(org.extraScansExpiresAt) })` using the existing `formatDate` (`Profile.jsx:318-322`, already locale-aware). This replaces the hard-coded `t('validityPeriod')` at `Profile.jsx:545` with the **real** date.
 
-Reuse `.stats-grid` / `.stat-card` / `.stat-value` / `.stat-label` from `frontend/src/styles/Profile.scss:274-327` — `grid-template-columns: repeat(auto-fit, minmax(200px, 1fr))` already reflows for 3 or 4 cards, so no SCSS change is required. Add one small `.stat-sublabel` rule if the expiry line needs its own size.
+**Card 1 caveat:** `user.totalScans` is not a lifetime total (7-day TTL — see §D). Do not ship the card labelled "Total Scans" without resolving Open Question 12.
+
+Reuse `.stats-grid` / `.stat-card` / `.stat-value` / `.stat-label` from `frontend/src/styles/Profile.scss:274-327` — the base rule is `grid-template-columns: repeat(auto-fit, minmax(200px, 1fr))`, which reflows for 3 or 4 cards. Note there is also a **fixed two-column override** at `Profile.scss:770-775` (`@media (max-width: 480px)` → `repeat(2, 1fr)`); it handles both 3 and 4 cards, so no SCSS change is strictly required, but be aware Card 4 is conditional so the grid alternates between 3 and 4 items. Add one small `.stat-sublabel` rule if the expiry line needs its own size.
 
 ### 2. Also update the "Your Plan" card
 
@@ -432,7 +455,12 @@ Interpolation uses `{name}` placeholders, handled by `interpolate()` in `fronten
 
 1. **Credit expiry window.** Code and copy both say 90 days (`stripeRoutes.js:411`, `en.js:296`). Confirm 90 days from *purchase*, and that it is independent of the subscription's own `expiresAt`.
 2. **Roll-over.** Do unused *monthly* scans roll over? Current code resets to zero (`planService.js:66-72`). Assumed: **no roll-over**.
-3. **Per-target vs. global limit.** `CLAUDE.md` specifies "Scans per target/month: Light 1, Basic 3, Pro 10" and "Max targets/month: 3, 5, 10". The code (`models/User.js:183-185`) sets monthly plans to `scansPerMonth: 3/5/10, targetsPerMonth: 3/5/10, scansPerTarget: null` — i.e. a **global** monthly cap with no per-target cap, and the numbers are transposed relative to the spec. Which is authoritative? This directly determines what "the scan limit associated with the subscription plan" means in the new Profile card.
+3. **Per-target vs. global limit — is the shipped behaviour the intended commercial offer?**
+   The *original* written spec said "Scans per target/month: Light 1, Basic 3, Pro 10" with "Max targets/month: 3, 5, 10". The code (`models/User.js:183-185`) instead gives monthly plans `scansPerMonth: 3/5/10, targetsPerMonth: 3/5/10, scansPerTarget: null` — a **global** monthly cap and **no per-target cap at all**. Only *annual* plans set `scansPerTarget`.
+
+   Concretely, under the code a Light customer may run all 3 of their monthly scans against a **single** target; under the original spec they could have run only 1. That is a real difference in what the customer is buying.
+
+   `CLAUDE.md` has since been corrected to mirror the code (commit `53101aa`), on the assumption that the code is the newer intent. **That was a documentation fix, not a product decision** — confirm the code's behaviour is the offer you actually intend to sell. This also determines what "the scan limit associated with the subscription plan" means on the new Profile card, and the customer-facing plan cards at `Profile.jsx:13-28` already advertise the code's numbers (`totalScans: 3/5/10`).
 4. **Do credits bypass the target caps?** See Edge Case 11.
 5. **Severity level of a credit-funded scan.** If a Light subscriber buys Trial 2 (all severities), does that one scan show all severities, or stay Critical+High? See Backend Changes §1.
 6. **Repeat top-ups.** May a user buy the same trial multiple times? May they hold several concurrent batches? (The batch model supports it; the UI needs to say so.)
@@ -441,6 +469,7 @@ Interpolation uses `{name}` placeholders, handled by `interpolate()` in `fronten
 9. **Timezone.** Is "this month" JST or UTC for the Japanese market? Currently inconsistent (Edge Case 6).
 10. **Plan-change flow.** Should a subscriber be able to *switch* subscription tiers from Profile? Currently impossible (`Profile.jsx:667`) and destructive if attempted (`stripeRoutes.js:402-426`). Out of scope but adjacent.
 11. **Should `maxFileSize` / `dailyLimit` disappear entirely,** or move to a "Plan details" area? The plan removes them from the Statistics grid but leaves them in the API payload.
+12. **What should the "Total Scans" card show?** It currently cannot mean "total" — `ScanResult` has a 7-day TTL, so the number counts only the last week and shrinks over time (see §D). Pick one: (a) add a real lifetime counter (`Organization.totalScansAllTime`, incremented in `consumeScan()`), (b) relabel to "Scans (last 7 days)", or (c) remove the card. **Option (a) is the only one that preserves the card's current meaning, and it requires a schema field + a migration backfill decision** (existing history is already unrecoverable — the documents are gone).
 
 ---
 
@@ -448,8 +477,9 @@ Interpolation uses `{name}` placeholders, handled by `interpolate()` in `fronten
 
 **Static / read-only checks**
 1. `grep -rn "dailyLimit\|maxFileSize" frontend/src` → only the (retained, unused) locale definitions at `en.js:228-229` / `ja.js:228-229`.
-2. Every new key exists in **both** `en.js` and `ja.js`, and neither file has duplicates:
-   `awk -F: '/^  [a-zA-Z0-9_]+:/{k=$1; gsub(/ /,"",k); print k}' en.js | sort | uniq -d` → empty.
+2. Every new key exists in **both** `en.js` and `ja.js`, and neither file has duplicates. Run against both files; each must print nothing:
+   `awk -F: '/^  [a-zA-Z0-9_]+:/{k=$1; gsub(/ /,"",k); print k}' en.js | sort | uniq -d`
+   (Duplicates are easy to introduce here — the files are ~700 flat keys and a second definition silently wins.)
 3. Confirm no remaining `billingCycle === 'onetime'` short-circuits in `planService.js` outside the migration-compat path.
 
 **Manual E2E — display**
