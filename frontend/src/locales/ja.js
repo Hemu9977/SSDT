@@ -289,6 +289,7 @@ export const ja = {
   billingOneTime: '単発お試し',
   discount17Percent: '17％割引',
   mostPopular: '一番人気',
+  planFree: 'フリープラン',
   planLight: 'ライトプラン',
   planBasic: 'ベーシックプラン',
   planPro: 'プロプラン',

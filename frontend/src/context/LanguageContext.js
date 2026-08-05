@@ -5,27 +5,25 @@ const STORAGE_KEY = 'fortexa-language';
 
 const LanguageContext = createContext(null);
 
-// One-time migration: existing browsers already hold a `fortexa-language` value from
-// when English was the default, so flipping defaultLanguage alone would never reach
-// them. Reset those to Japanese exactly once; the toggle is respected from then on.
-const JA_DEFAULT_MIGRATION_KEY = 'fortexa-language-default-ja';
-
+// An explicit language choice ALWAYS wins; the default is only seeded when nothing is
+// stored yet (new or cleared browser). A previous version force-reset every browser to
+// the default once, which silently destroyed a saved English selection — and, because
+// the write that recorded "already migrated" could itself throw, could re-fire on every
+// load and pin the UI to Japanese permanently. Reading first removes both failure modes:
+// a stored value is always honoured, and a failed seed just means we re-seed next time.
 const readInitialLanguage = () => {
   if (typeof window === 'undefined') return defaultLanguage;
-  // This runs in the useState initializer (render phase) and writes to storage, so it
-  // must never throw: localStorage access can fail outright under private browsing or
-  // a strict cookie policy, and a throw here would break first paint for everyone.
+  // Runs in the useState initializer (render phase) and touches storage, so it must
+  // never throw: localStorage can be unavailable outright under private browsing or a
+  // strict cookie policy, and a throw here would break first paint for everyone.
   try {
-    if (!window.localStorage.getItem(JA_DEFAULT_MIGRATION_KEY)) {
-      window.localStorage.setItem(JA_DEFAULT_MIGRATION_KEY, '1');
-      window.localStorage.setItem(STORAGE_KEY, defaultLanguage);
-      return defaultLanguage;
-    }
     const stored = window.localStorage.getItem(STORAGE_KEY);
-    return supportedLanguages.includes(stored) ? stored : defaultLanguage;
+    if (supportedLanguages.includes(stored)) return stored;
+    window.localStorage.setItem(STORAGE_KEY, defaultLanguage);
   } catch {
-    return defaultLanguage;
+    /* storage unavailable — fall through to the in-memory default */
   }
+  return defaultLanguage;
 };
 
 const interpolate = (value, params = {}) => {
@@ -46,8 +44,14 @@ export const LanguageProvider = ({ children }) => {
   const setLanguage = useCallback((nextLanguage) => {
     if (!supportedLanguages.includes(nextLanguage)) return;
     setLanguageState(nextLanguage);
-    window.localStorage.setItem(STORAGE_KEY, nextLanguage);
     document.documentElement.lang = nextLanguage;
+    // Persisting is best-effort: if storage is blocked the switch must still apply for
+    // this session rather than throwing out of the click handler mid-way.
+    try {
+      window.localStorage.setItem(STORAGE_KEY, nextLanguage);
+    } catch {
+      /* storage unavailable — choice applies for this session only */
+    }
   }, []);
 
   const toggleLanguage = useCallback(() => {
@@ -55,9 +59,13 @@ export const LanguageProvider = ({ children }) => {
   }, [language, setLanguage]);
 
   const t = useCallback((key, params) => {
-    const dictionary = locales[language] || locales[defaultLanguage];
-    const fallback = locales[defaultLanguage][key] || key;
-    return interpolate(dictionary[key] || fallback, params);
+    // Fall back through English, not defaultLanguage: `en` is the complete base
+    // dictionary (ja.js spreads ...en), so a key missing from the active dictionary
+    // resolves to English rather than leaking Japanese into the English UI — which is
+    // what would happen if the fallback tracked defaultLanguage now that it is 'ja'.
+    const dictionary = locales[language] || locales.en;
+    const value = dictionary[key] !== undefined ? dictionary[key] : locales.en[key];
+    return interpolate(value !== undefined ? value : key, params);
   }, [language]);
 
   const value = useMemo(() => ({

@@ -289,6 +289,7 @@ export const en = {
   billingOneTime: 'One-Time Trial',
   discount17Percent: '17% OFF',
   mostPopular: 'Most Popular',
+  planFree: 'Free',
   planLight: 'Light Plan',
   planBasic: 'Basic Plan',
   planPro: 'Pro Plan',

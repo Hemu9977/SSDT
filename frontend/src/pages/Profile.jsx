@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
@@ -109,6 +109,10 @@ const Profile = () => {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteMessage, setInviteMessage] = useState(null);
+  // True only while we are handing off to Stripe. Distinguishes that from the
+  // post-payment activation flow, which also raises paymentLoading but must NOT be
+  // cancelled when the tab regains focus. See the bfcache effect below.
+  const awaitingCheckoutRedirectRef = useRef(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { t, currentLang } = useTranslation();
@@ -300,12 +304,44 @@ const Profile = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || t('checkoutFailed'));
+      // Deliberately leave paymentLoading true — the page is navigating away. It is
+      // reset if the user comes back without paying (see the bfcache effect below).
+      awaitingCheckoutRedirectRef.current = true;
       window.location.href = data.url;
     } catch (err) {
+      awaitingCheckoutRedirectRef.current = false;
       setPaymentMessage({ type: 'error', text: err.message || t('checkoutFailed') });
       setPaymentLoading(false);
     }
   };
+
+  // Recover from a Stripe hand-off the user backed out of.
+  //
+  // startCheckout leaves paymentLoading true on purpose, because window.location.href
+  // is about to unload the page. But pressing the browser Back button restores this
+  // page from the back/forward cache with React state exactly as it was, so every
+  // purchase button stays disabled on "Redirecting to checkout..." with no way back.
+  //
+  // Both events are needed: pageshow+persisted is the real bfcache restore signal,
+  // while visibilitychange covers tab and mobile app switches where no restore fires.
+  // The ref guard keeps this from cancelling the ?payment=success activation poll,
+  // which legitimately holds paymentLoading while the webhook lands.
+  useEffect(() => {
+    const clearStaleRedirect = () => {
+      if (!awaitingCheckoutRedirectRef.current) return;
+      awaitingCheckoutRedirectRef.current = false;
+      setPaymentLoading(false);
+    };
+    const onPageShow = (event) => { if (event.persisted) clearStaleRedirect(); };
+    const onVisibility = () => { if (document.visibilityState === 'visible') clearStaleRedirect(); };
+
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   const cancelSubscription = async () => {
     setCancelDialogOpen(false);
@@ -408,9 +444,13 @@ const Profile = () => {
   const org = user.organization;
   const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
   const accountTypeClass = hasPlan ? 'paid' : user.accountType;
+  // Plan display is derived from the organization's real plan, never from
+  // user.accountType. accountType feeds nothing in the quota system (getAccountLimits
+  // keys off planType_billingCycle) and a legacy 'pro' value there would otherwise be
+  // shown as if the user had bought the Pro tier.
   const accountTypeLabel = hasPlan
     ? `${PLAN_NAMES[org.planType] ? t(PLAN_NAMES[org.planType]) : org.planType} (${BILLING_LABELS[org.billingCycle] ? t(BILLING_LABELS[org.billingCycle]) : org.billingCycle})`
-    : user.accountType.toUpperCase();
+    : t('planFree');
 
   return (
     <div className="profile-page">
@@ -420,7 +460,12 @@ const Profile = () => {
         <div className="profile-container">
           <div className="profile-header">
             <h1>{t('myProfile')}</h1>
-            {user.isPro && <span className="pro-badge">{PLAN_NAMES[org?.planType] ? t(PLAN_NAMES[org?.planType]) : t('pro')}</span>}
+            {/* Only badge a real, named plan. `isPro` means "has any paid plan", so on
+                its own it would fall through to the literal word "PRO" for an account
+                that has bought nothing. */}
+            {hasPlan && PLAN_NAMES[org.planType] && (
+              <span className="pro-badge">{t(PLAN_NAMES[org.planType])}</span>
+            )}
           </div>
 
           {/* Profile save feedback */}

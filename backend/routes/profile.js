@@ -229,90 +229,14 @@ router.get('/stats', auth, async (req, res) => {
   }
 });
 
-// @route   POST /profile/upgrade-to-pro
-// @desc    Upgrade to Pro account (PROTOTYPE ONLY - for testing purposes)
-// @access  Private
-router.post('/upgrade-to-pro', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    if (user.isPro()) {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have an active Pro account'
-      });
-    }
-
-    // PROTOTYPE: Upgrade user to PRO
-    user.accountType = 'pro';
-    user.proExpiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 year from now
-
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Successfully upgraded to Pro!',
-      user: {
-        accountType: user.accountType,
-        proExpiresAt: user.proExpiresAt,
-        isPro: user.isPro()
-      },
-      note: 'This is a prototype build for testing. Payment integration will be added in production.'
-    });
-  } catch (err) {
-    console.error('Pro upgrade error:', err.message);
-    res.status(500).json({
-      message: 'Server error',
-      error: devMsg(err)
-    });
-  }
-});
-
-// @route   POST /profile/downgrade-to-free
-// @desc    Downgrade to Free account (PROTOTYPE ONLY - for testing purposes)
-// @access  Private
-router.post('/downgrade-to-free', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    if (user.accountType === 'free') {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have a Free account'
-      });
-    }
-
-    // PROTOTYPE: Downgrade user to FREE
-    user.accountType = 'free';
-    user.proExpiresAt = null;
-
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Successfully downgraded to Free account',
-      user: {
-        accountType: user.accountType,
-        proExpiresAt: user.proExpiresAt,
-        isPro: user.isPro()
-      },
-      note: 'This is a prototype build for testing. In production, this would handle subscription cancellation.'
-    });
-  } catch (err) {
-    console.error('Downgrade error:', err.message);
-    res.status(500).json({
-      message: 'Server error',
-      error: devMsg(err)
-    });
-  }
-});
+// NOTE: POST /profile/upgrade-to-pro and POST /profile/downgrade-to-free used to live
+// here. They were prototype routes that set accountType='pro' (plus a one-year
+// proExpiresAt) behind nothing but `auth` — no payment, no plan check — so any logged-in
+// user could grant themselves a "Pro" account. Neither had a frontend caller.
+//
+// They were harmless only by accident: getAccountLimits() derives every real limit from
+// planType_billingCycle and never reads accountType, so the flag granted no entitlement,
+// but it did surface as a misleading "PRO" badge on the profile. Plan changes now go
+// through Stripe (backend/routes/stripeRoutes.js). Do not reintroduce these.
 
 module.exports = router;
