@@ -28,7 +28,32 @@ const OrganizationSchema = new mongoose.Schema({
   // MongoDB map keys / dotted update paths). Map size = distinct targets used;
   // each value = scans against that target. Reset monthly alongside scansUsed.
   targetScanCounts: { type: Map, of: Number, default: {} },
+  // Denormalized mirror of sum(scanCredits[].scansRemaining) for live batches,
+  // updated in the same atomic op as the array. Drifts upward when a batch
+  // merely expires (nothing decrements it on expiry) — quota logic and
+  // display must derive from live scanCredits batches, never trust this
+  // scalar alone as the source of truth for "can we spend a credit".
   oneTimeRemainingScans: { type: Number, default: 0 },
+  // Purchased one-off scan credit batches — one per completed Stripe one-time
+  // checkout. Kept sorted by expiresAt ascending ($push + $sort on insert) so
+  // the atomic positional-$ decrement in consumeScan() always burns the
+  // soonest-expiring live batch first.
+  scanCredits: {
+    type: [{
+      source: { type: String, required: true },
+      scansTotal: { type: Number, required: true },
+      scansRemaining: { type: Number, required: true, min: 0 },
+      purchasedAt: { type: Date, default: Date.now },
+      expiresAt: { type: Date, required: true },
+      stripeCheckoutSessionId: { type: String, default: null },
+      vulnerabilityAccessLevel: { type: String, default: 'critical-high' },
+      source_type: { type: String, enum: ['stripe', 'migration'], default: 'stripe' }
+    }],
+    default: []
+  },
+  // Real lifetime scan counter (ScanResult has a 7-day TTL so it cannot serve
+  // this purpose). Incremented atomically inside consumeScan().
+  totalScansAllTime: { type: Number, default: 0 },
   stripeSubscriptionId: { type: String, default: null },
   stripeCheckoutSessionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },

@@ -208,7 +208,23 @@ UserSchema.methods.getAccountLimits = function (org = null) {
     key = `${source.planType}_${source.billingCycle}`;
   }
 
-  const limits = PLAN_LIMITS[key] || PLAN_LIMITS['free'];
+  let limits = PLAN_LIMITS[key] || PLAN_LIMITS['free'];
+
+  // Credit-only override: while a subscription is active, the subscription's
+  // vulnerabilityAccessLevel always wins. Only when there is NO active
+  // subscription does a purchased credit's own severity level apply — taken
+  // from the soonest-expiring live batch (the one that will fund the next
+  // scan), not from PLAN_LIMITS['free'].
+  const hasActiveSub = source && (source.subscriptionStatus === 'active' || source.subscriptionStatus === 'trialing');
+  if (!hasActiveSub && org && Array.isArray(org.scanCredits)) {
+    const now = new Date();
+    const liveBatches = org.scanCredits
+      .filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+      .sort((a, b) => a.expiresAt - b.expiresAt);
+    if (liveBatches.length > 0) {
+      limits = { ...limits, vulnerabilityAccessLevel: liveBatches[0].vulnerabilityAccessLevel || limits.vulnerabilityAccessLevel };
+    }
+  }
 
   return {
     scansPerMonth: limits.scansPerMonth,

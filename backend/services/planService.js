@@ -34,6 +34,39 @@ function mapSize(map) {
   return Object.keys(map).length;
 }
 
+function hasActiveSubscription(org) {
+  return org.subscriptionStatus === 'active' || org.subscriptionStatus === 'trialing';
+}
+
+function subscriptionHasCapacity(org) {
+  return hasActiveSubscription(org) && org.scanLimit > 0 && org.scansUsed < org.scanLimit;
+}
+
+function hasLiveCredit(org, now = new Date()) {
+  return (org.scanCredits || []).some(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now);
+}
+
+// Back-compat for legacy one-time orgs created before scanCredits existed: their
+// balance lives only in the oneTimeRemainingScans scalar. Without this, every
+// unmigrated trial customer gets PLAN_LIMIT_EXCEEDED the moment this deploys,
+// making scripts/migrateOneTimeCredits.js a hard prerequisite of the release.
+// Honouring the scalar makes that migration ordinary cleanup instead.
+//
+// Gated on there being NO batches at all — not merely no *live* ones — because:
+//   • once migrated, the batch is authoritative and the scalar is just a mirror,
+//     so counting both would let the same scan be spent twice;
+//   • if every batch has expired, the scalar still reads high (nothing decrements
+//     it on expiry, see Organization.js), so trusting it would resurrect expired
+//     credits.
+// Residual gap, resolved by running the migration: an unmigrated org that buys a
+// new one-time plan gets a batch for the new purchase only, and its old scalar
+// remainder becomes unreachable.
+function hasLegacyOneTimeBalance(org) {
+  return org.billingCycle === 'onetime'
+    && (org.scanCredits || []).length === 0
+    && (org.oneTimeRemainingScans || 0) > 0;
+}
+
 /**
  * Check if the organization has quota to run a scan without consuming it.
  * Performs monthly reset if needed.
@@ -46,20 +79,23 @@ async function checkScanQuota(orgId, opts = {}) {
   const { target = null, scansPerTarget = null, targetsPerMonth = null } = opts;
 
   const org = await Organization.findById(orgId);
+  const now = new Date();
 
-  if (!org || (org.billingCycle !== "onetime" && org.subscriptionStatus !== "active" && org.subscriptionStatus !== "trialing")) {
+  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now) && !hasLegacyOneTimeBalance(org))) {
     return null;
   }
 
-  const now = new Date();
-
-  // 🔁 Monthly reset FIRST — UTC, so the cycle is timezone-independent
+  // 🔁 Monthly reset FIRST — UTC, so the cycle is timezone-independent.
+  // Unconditional: an org can hold a subscription AND credits at once, so
+  // the subscription's monthly counters must still roll over regardless of
+  // billingCycle. Credit batches are unaffected — they expire on their own
+  // expiresAt, not on the monthly boundary.
   const lastReset = org.lastScanReset || new Date(0);
   const isNewMonth =
     now.getUTCMonth() !== lastReset.getUTCMonth() ||
     now.getUTCFullYear() !== lastReset.getUTCFullYear();
 
-  if (isNewMonth && org.billingCycle !== "onetime") {
+  if (isNewMonth) {
     await Organization.updateOne(
       { _id: orgId },
       {
@@ -77,35 +113,42 @@ async function checkScanQuota(orgId, opts = {}) {
     org.lastScanReset = now;
   }
 
-  // 🔥 ONE-TIME PLAN
-  if (org.billingCycle === "onetime") {
-    return org.oneTimeRemainingScans > 0 ? org : null;
-  }
+  // 🔥 SUBSCRIPTION PATH — tried first. Per-target caps apply here only.
+  if (subscriptionHasCapacity(org)) {
+    const norm = normalizeTarget(target);
 
-  // 🔥 SUBSCRIPTION PLAN
-  if (org.scansUsed >= org.scanLimit) {
-    return null;
-  }
+    if (norm) {
+      const key = targetKey(norm);
+      const counts = org.targetScanCounts;
+      const thisTargetCount = mapGet(counts, key);
+      const isNewTarget = thisTargetCount === 0;
 
-  const norm = normalizeTarget(target);
-
-  if (norm) {
-    const key = targetKey(norm);
-    const counts = org.targetScanCounts;
-    const thisTargetCount = mapGet(counts, key);
-    const isNewTarget = thisTargetCount === 0;
-
-    // Max distinct targets per month (skip when unlimited: -1 / null)
-    if (isNewTarget && targetsPerMonth != null && targetsPerMonth >= 0 && mapSize(counts) >= targetsPerMonth) {
-      return null;
+      // Max distinct targets per month (skip when unlimited: -1 / null)
+      if (isNewTarget && targetsPerMonth != null && targetsPerMonth >= 0 && mapSize(counts) >= targetsPerMonth) {
+        return null;
+      }
+      // Max scans per target per month (skip when unlimited: null)
+      if (scansPerTarget != null && thisTargetCount >= scansPerTarget) {
+        return null;
+      }
     }
-    // Max scans per target per month (skip when unlimited: null)
-    if (scansPerTarget != null && thisTargetCount >= scansPerTarget) {
-      return null;
-    }
+
+    return org;
   }
 
-  return org;
+  // 🔥 CREDIT FALLBACK — only reached once the monthly allowance is
+  // exhausted (or there's no active subscription at all). Bypasses
+  // per-target caps entirely by design.
+  if (hasLiveCredit(org, now)) {
+    return org;
+  }
+
+  // Legacy pre-scanCredits balance (see hasLegacyOneTimeBalance).
+  if (hasLegacyOneTimeBalance(org)) {
+    return org;
+  }
+
+  return null;
 }
 
 /**
@@ -126,18 +169,18 @@ async function consumeScan(orgId, opts = {}) {
   const { target = null, scansPerTarget = null, targetsPerMonth = null } = opts;
 
   const org = await Organization.findById(orgId);
+  const now = new Date();
 
-  if (!org || (org.billingCycle !== "onetime" && org.subscriptionStatus !== "active" && org.subscriptionStatus !== "trialing")) {
+  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now) && !hasLegacyOneTimeBalance(org))) {
     return null;
   }
 
-  const now = new Date();
   const lastReset = org.lastScanReset || new Date(0);
   const isNewMonth =
     now.getUTCMonth() !== lastReset.getUTCMonth() ||
     now.getUTCFullYear() !== lastReset.getUTCFullYear();
 
-  if (isNewMonth && org.billingCycle !== "onetime") {
+  if (isNewMonth) {
     await Organization.updateOne(
       { _id: orgId },
       {
@@ -155,38 +198,84 @@ async function consumeScan(orgId, opts = {}) {
     org.lastScanReset = now;
   }
 
-  if (org.billingCycle === "onetime") {
-    return Organization.findOneAndUpdate(
-      { _id: orgId, oneTimeRemainingScans: { $gt: 0 } },
-      { $inc: { oneTimeRemainingScans: -1 } },
+  // ── 1. Try the subscription slot first ──────────────────────────────────
+  if (subscriptionHasCapacity(org)) {
+    const norm = normalizeTarget(target);
+    const inc = { scansUsed: 1, targetsUsed: 1, totalScansAllTime: 1 };
+
+    if (norm) {
+      const key = targetKey(norm);
+      const counts = org.targetScanCounts;
+      const thisTargetCount = mapGet(counts, key);
+      const isNewTarget = thisTargetCount === 0;
+
+      if (isNewTarget && targetsPerMonth != null && targetsPerMonth >= 0 && mapSize(counts) >= targetsPerMonth) {
+        return null;
+      }
+      if (scansPerTarget != null && thisTargetCount >= scansPerTarget) {
+        return null;
+      }
+
+      inc[`targetScanCounts.${key}`] = 1;
+    }
+
+    const sub = await Organization.findOneAndUpdate(
+      { _id: orgId, subscriptionStatus: { $in: ['active', 'trialing'] }, scansUsed: { $lt: org.scanLimit } },
+      { $inc: inc },
       { new: true }
     );
+    if (sub) return sub;
+    // Lost a race for the last subscription slot — fall through to credits,
+    // which mirrors "monthly allowance exhausted" becoming true concurrently.
   }
 
-  const norm = normalizeTarget(target);
-  const inc = { scansUsed: 1, targetsUsed: 1 };
+  // ── 2. Credit fallback — bypasses target caps, still records
+  //      targetScanCounts for reporting purposes only ─────────────────────
+  // ── 3. Legacy pre-scanCredits balance — decrement the bare scalar. Guarded
+  //      on $gt: 0 so concurrent scans can't drive it negative ─────────────
+  if (hasLegacyOneTimeBalance(org)) {
+    const legacy = await Organization.findOneAndUpdate(
+      { _id: orgId, billingCycle: 'onetime', oneTimeRemainingScans: { $gt: 0 } },
+      { $inc: { oneTimeRemainingScans: -1, totalScansAllTime: 1 } },
+      { new: true }
+    );
+    if (legacy) return legacy;
+  }
 
+  return consumeFromCreditBatch(orgId, target);
+}
+
+async function consumeFromCreditBatch(orgId, target, attempt = 0) {
+  const MAX_ATTEMPTS = 5;
+  if (attempt >= MAX_ATTEMPTS) return null;
+
+  const now = new Date();
+  const org = await Organization.findById(orgId);
+  if (!org) return null;
+
+  const liveBatches = (org.scanCredits || [])
+    .filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+    .sort((a, b) => a.expiresAt - b.expiresAt);
+  if (liveBatches.length === 0) return null;
+
+  const batch = liveBatches[0];
+  const norm = normalizeTarget(target);
+  const inc = { 'scanCredits.$.scansRemaining': -1, oneTimeRemainingScans: -1, totalScansAllTime: 1 };
   if (norm) {
     const key = targetKey(norm);
-    const counts = org.targetScanCounts;
-    const thisTargetCount = mapGet(counts, key);
-    const isNewTarget = thisTargetCount === 0;
-
-    if (isNewTarget && targetsPerMonth != null && targetsPerMonth >= 0 && mapSize(counts) >= targetsPerMonth) {
-      return null;
-    }
-    if (scansPerTarget != null && thisTargetCount >= scansPerTarget) {
-      return null;
-    }
-
-    inc[`targetScanCounts.${key}`] = 1;
+    inc[`targetScanCounts.${key}`] = 1; // bookkeeping only — not gated
+    inc.targetsUsed = 1;
   }
 
-  return Organization.findOneAndUpdate(
-    { _id: orgId, scansUsed: { $lt: org.scanLimit } },
+  const result = await Organization.findOneAndUpdate(
+    { _id: orgId, scanCredits: { $elemMatch: { _id: batch._id, scansRemaining: { $gt: 0 } } } },
     { $inc: inc },
     { new: true }
   );
+
+  if (result) return result;
+  // Lost the race for this specific batch — retry against the next-soonest.
+  return consumeFromCreditBatch(orgId, target, attempt + 1);
 }
 
 /**

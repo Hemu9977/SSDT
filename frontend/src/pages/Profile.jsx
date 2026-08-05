@@ -32,6 +32,69 @@ const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', one
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
 
+// Shared plan-card markup — used by both the full plan chooser (no active
+// plan) and the top-up section (subscribed users buying extra scans).
+const PlanCard = ({ plan, onSelect, loading, buttonLabel, t }) => (
+  <div key={plan.planType} style={{
+    border: plan.planType === 'basic' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
+    borderRadius: '1.5rem',
+    padding: '2rem 1.5rem',
+    background: plan.planType === 'basic' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem',
+    position: 'relative',
+    boxShadow: plan.planType === 'basic' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
+  }}>
+    {plan.planType === 'basic' && (
+      <div style={{
+        position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
+        background: 'var(--accent)', color: 'var(--background)',
+        fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
+        borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
+        whiteSpace: 'nowrap'
+      }}>{t('mostPopular')}</div>
+    )}
+
+    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'basic' ? '0.5rem' : 0 }}>
+      {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
+    </div>
+
+    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
+      {plan.price}
+      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
+    </div>
+
+    <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
+      <li>
+        ・{plan.planType === 'trial1'
+          ? t('trial1ScansAndDevice')
+          : plan.planType === 'trial2'
+          ? t('trial2ScansAndDevice')
+          : plan.billingCycle === 'onetime'
+          ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
+          : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
+      </li>
+      {plan.billingCycle === 'onetime' && (
+        <li>・{t('validityPeriod')}</li>
+      )}
+      <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
+        ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
+      </li>
+    </ul>
+
+    <button
+      onClick={() => onSelect(plan.planType, plan.billingCycle)}
+      disabled={loading}
+      className="btn-upgrade"
+      style={{ marginTop: 'auto', opacity: loading ? 0.7 : 1 }}
+    >
+      {loading ? t('startingCheckout') : buttonLabel}
+    </button>
+  </div>
+);
+
 const Profile = () => {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -341,7 +404,7 @@ const Profile = () => {
     );
   }
 
-  const { user, limits, recentScans } = profile;
+  const { user, recentScans } = profile;
   const org = user.organization;
   const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
   const accountTypeClass = hasPlan ? 'paid' : user.accountType;
@@ -445,21 +508,26 @@ const Profile = () => {
             <h2>{t('statistics')}</h2>
             <div className="stats-grid">
               <div className="stat-card">
-                <div className="stat-value">{user.totalScans}</div>
+                <div className="stat-value">{user.totalScansAllTime}</div>
                 <div className="stat-label">{t('totalScans')}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-value">{user.scansThisMonth}</div>
-                <div className="stat-label">{t('thisMonth')}</div>
+                <div className="stat-value">{org ? org.scansUsed : 0}</div>
+                <div className="stat-label">{t('scansUsedLabel')}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-value">{limits.scansPerDay === -1 ? '∞' : limits.scansPerDay}</div>
-                <div className="stat-label">{t('dailyLimit')}</div>
+                <div className="stat-value">{org && org.scanLimit > 0 ? org.scanLimit : t('noPlanScanLimit')}</div>
+                <div className="stat-label">{t('planScanLimitLabel')}</div>
               </div>
-              <div className="stat-card">
-                <div className="stat-value">{(limits.maxFileSize / (1024 * 1024)).toFixed(0)}MB</div>
-                <div className="stat-label">{t('maxFileSize')}</div>
-              </div>
+              {org && org.extraScansRemaining > 0 && (
+                <div className="stat-card">
+                  <div className="stat-value">{org.extraScansRemaining}</div>
+                  <div className="stat-label">{t('extraScansRemainingLabel')}</div>
+                  {org.extraScansExpiresAt && (
+                    <div className="stat-sublabel">{t('extraScansExpireOn', { date: formatDate(org.extraScansExpiresAt) })}</div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -536,13 +604,13 @@ const Profile = () => {
                 )}
 
                 {/* One-time scans remaining */}
-                {org.billingCycle === 'onetime' && (
+                {org.extraScansRemaining > 0 && (
                   <>
                     <p style={{ margin: '1rem 0 0.5rem 0', color: 'var(--foreground-darker)' }}>
-                      {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.oneTimeRemainingScans}</strong>
+                      {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.extraScansRemaining}</strong>
                     </p>
                     <p style={{ margin: '0.5rem 0', color: 'var(--foreground-darker)' }}>
-                      {t('validityPeriod')}
+                      {t('extraScansExpireOn', { date: formatDate(org.extraScansExpiresAt) })}
                     </p>
                   </>
                 )}
@@ -571,6 +639,35 @@ const Profile = () => {
                   </>
                 )}
               </div>
+
+              {/* ── Top-Up: extra scans, purchasable any time while subscribed ────── */}
+              {['owner', 'admin'].includes(org.role) && (
+                <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
+                  <h2 style={{ marginBottom: '1rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                    {t('topUpSectionTitle')}
+                  </h2>
+                  <p style={{ color: 'var(--foreground-darker)', marginBottom: '1.5rem' }}>
+                    {t('topUpSectionDescription')}
+                  </p>
+                  {org.scanLimit > 0 && org.scansUsed >= org.scanLimit && (
+                    <p className="save-message info" style={{ marginBottom: '1.5rem' }}>
+                      {t('planLimitExhaustedHint')}
+                    </p>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
+                    {PLANS.onetime.map(plan => (
+                      <PlanCard
+                        key={plan.planType}
+                        plan={plan}
+                        onSelect={startCheckout}
+                        loading={paymentLoading}
+                        buttonLabel={t('buyExtraScans')}
+                        t={t}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* ── Team Management Section ─────────────────────────────────────────── */}
               {org.seatsAllowed > 1 && (
@@ -643,7 +740,7 @@ const Profile = () => {
                             </div>
                             <div className="invite-status-group">
                               <span className="invite-status">{t('pending')}</span>
-                              {['owner', 'admin'].includes(user.role) && (
+                              {['owner', 'admin'].includes(org.role) && (
                                 <button 
                                   onClick={() => handleCancelInvite(invite.token)}
                                   className="btn-revoke"
@@ -703,64 +800,14 @@ const Profile = () => {
               {/* Plan cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
                 {PLANS[selectedBilling].map(plan => (
-                  <div key={plan.planType} style={{
-                    border: plan.planType === 'basic' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
-                    borderRadius: '1.5rem',
-                    padding: '2rem 1.5rem',
-                    background: plan.planType === 'basic' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '0.75rem',
-                    position: 'relative',
-                    boxShadow: plan.planType === 'basic' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
-                  }}>
-                    {plan.planType === 'basic' && (
-                      <div style={{
-                        position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
-                        background: 'var(--accent)', color: 'var(--background)',
-                        fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
-                        borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
-                        whiteSpace: 'nowrap'
-                      }}>{t('mostPopular')}</div>
-                    )}
-
-                    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'basic' ? '0.5rem' : 0 }}>
-                      {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
-                    </div>
-
-                    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
-                      {plan.price}
-                      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
-                    </div>
-
-                    <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
-                      <li>
-                        ・{plan.planType === 'trial1'
-                          ? t('trial1ScansAndDevice')
-                          : plan.planType === 'trial2'
-                          ? t('trial2ScansAndDevice')
-                          : plan.billingCycle === 'onetime'
-                          ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
-                          : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
-                      </li>
-                      {plan.billingCycle === 'onetime' && (
-                        <li>・{t('validityPeriod')}</li>
-                      )}
-                      <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
-                        ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
-                      </li>
-                    </ul>
-
-                    <button
-                      onClick={() => startCheckout(plan.planType, plan.billingCycle)}
-                      disabled={paymentLoading}
-                      className="btn-upgrade"
-                      style={{ marginTop: 'auto', opacity: paymentLoading ? 0.7 : 1 }}
-                    >
-                      {paymentLoading ? t('startingCheckout') : t('selectPlan')}
-                    </button>
-                  </div>
+                  <PlanCard
+                    key={plan.planType}
+                    plan={plan}
+                    onSelect={startCheckout}
+                    loading={paymentLoading}
+                    buttonLabel={t('selectPlan')}
+                    t={t}
+                  />
                 ))}
               </div>
             </div>
