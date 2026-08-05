@@ -46,6 +46,27 @@ function hasLiveCredit(org, now = new Date()) {
   return (org.scanCredits || []).some(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now);
 }
 
+// Back-compat for legacy one-time orgs created before scanCredits existed: their
+// balance lives only in the oneTimeRemainingScans scalar. Without this, every
+// unmigrated trial customer gets PLAN_LIMIT_EXCEEDED the moment this deploys,
+// making scripts/migrateOneTimeCredits.js a hard prerequisite of the release.
+// Honouring the scalar makes that migration ordinary cleanup instead.
+//
+// Gated on there being NO batches at all — not merely no *live* ones — because:
+//   • once migrated, the batch is authoritative and the scalar is just a mirror,
+//     so counting both would let the same scan be spent twice;
+//   • if every batch has expired, the scalar still reads high (nothing decrements
+//     it on expiry, see Organization.js), so trusting it would resurrect expired
+//     credits.
+// Residual gap, resolved by running the migration: an unmigrated org that buys a
+// new one-time plan gets a batch for the new purchase only, and its old scalar
+// remainder becomes unreachable.
+function hasLegacyOneTimeBalance(org) {
+  return org.billingCycle === 'onetime'
+    && (org.scanCredits || []).length === 0
+    && (org.oneTimeRemainingScans || 0) > 0;
+}
+
 /**
  * Check if the organization has quota to run a scan without consuming it.
  * Performs monthly reset if needed.
@@ -60,7 +81,7 @@ async function checkScanQuota(orgId, opts = {}) {
   const org = await Organization.findById(orgId);
   const now = new Date();
 
-  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now))) {
+  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now) && !hasLegacyOneTimeBalance(org))) {
     return null;
   }
 
@@ -122,6 +143,11 @@ async function checkScanQuota(orgId, opts = {}) {
     return org;
   }
 
+  // Legacy pre-scanCredits balance (see hasLegacyOneTimeBalance).
+  if (hasLegacyOneTimeBalance(org)) {
+    return org;
+  }
+
   return null;
 }
 
@@ -145,7 +171,7 @@ async function consumeScan(orgId, opts = {}) {
   const org = await Organization.findById(orgId);
   const now = new Date();
 
-  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now))) {
+  if (!org || (!hasActiveSubscription(org) && !hasLiveCredit(org, now) && !hasLegacyOneTimeBalance(org))) {
     return null;
   }
 
@@ -205,6 +231,17 @@ async function consumeScan(orgId, opts = {}) {
 
   // ── 2. Credit fallback — bypasses target caps, still records
   //      targetScanCounts for reporting purposes only ─────────────────────
+  // ── 3. Legacy pre-scanCredits balance — decrement the bare scalar. Guarded
+  //      on $gt: 0 so concurrent scans can't drive it negative ─────────────
+  if (hasLegacyOneTimeBalance(org)) {
+    const legacy = await Organization.findOneAndUpdate(
+      { _id: orgId, billingCycle: 'onetime', oneTimeRemainingScans: { $gt: 0 } },
+      { $inc: { oneTimeRemainingScans: -1, totalScansAllTime: 1 } },
+      { new: true }
+    );
+    if (legacy) return legacy;
+  }
+
   return consumeFromCreditBatch(orgId, target);
 }
 
