@@ -179,14 +179,17 @@ const Profile = () => {
 
   const refreshActivationStatus = async () => {
     setPaymentLoading(true);
-    setPaymentMessage({ type: 'info', text: t('checkingPlanStatus') });
+    setPaymentMessage({ type: 'info', text: t('checkingPlanStatus'), awaitingActivation: true });
 
     const data = await fetchProfile();
     const activated = isPlanActive(data);
 
+    // Keep awaitingActivation set while still unactivated so the refresh button
+    // survives for another attempt; drop it once the plan is live.
     setPaymentMessage({
       type: activated ? 'success' : 'info',
-      text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+      text: activated ? t('paymentSuccess') : t('paymentPendingActivation'),
+      awaitingActivation: !activated
     });
     setPaymentLoading(false);
   };
@@ -249,7 +252,7 @@ const Profile = () => {
 
       const activatePlan = async () => {
         setPaymentLoading(true);
-        setPaymentMessage({ type: 'info', text: t('paymentProcessing') });
+        setPaymentMessage({ type: 'info', text: t('paymentProcessing'), awaitingActivation: true });
 
         const synced = await syncCheckoutSession(sessionId);
         let latestProfile = await fetchProfile();
@@ -263,13 +266,18 @@ const Profile = () => {
 
         setPaymentMessage({
           type: activated ? 'success' : 'info',
-          text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+          text: activated ? t('paymentSuccess') : t('paymentPendingActivation'),
+          awaitingActivation: !activated
         });
         setPaymentLoading(false);
       };
 
       activatePlan();
     } else if (payment === 'cancelled') {
+      // No payment was taken, so there is nothing to poll for. Deliberately no
+      // awaitingActivation flag: offering "refresh" here previously led to
+      // "Payment succeeded, but activation is still syncing" for a user who had
+      // just cancelled and been charged nothing.
       setPaymentMessage({ type: 'info', text: t('paymentCancelled') });
       window.history.replaceState({}, '', '/profile');
     }
@@ -495,7 +503,11 @@ const Profile = () => {
               style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>{paymentMessage.text}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                {paymentMessage.type === 'info' && (
+                {/* Only offer a re-check when a payment actually completed and we are
+                    waiting on the webhook. Keying this off type === 'info' also matched
+                    the "payment cancelled" banner, where re-checking reported a payment
+                    that never happened. */}
+                {paymentMessage.awaitingActivation && (
                   <button
                     onClick={refreshActivationStatus}
                     disabled={paymentLoading}
