@@ -297,6 +297,8 @@ export const en = {
   planTrial2: 'Trial 2',
   periodMonth: '/month',
   periodYear: '/year',
+  priceExcludingTax: 'Excluding Tax',
+  priceIncludingTaxAmount: 'Including Tax: {amount}',
   planAccounts: '{count} account{plural}',
   planScansPerMonth: '{count} scans/month',
   planScansForTarget: '{count} scan{plural} for 1 target',

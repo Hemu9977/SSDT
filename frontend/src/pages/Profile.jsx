@@ -32,6 +32,14 @@ const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', one
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
 
+// Display-only 10% tax calculation. PLANS[...].price remains the
+// tax-excluded amount actually sent to Stripe via startCheckout() — this
+// only derives what to show alongside it.
+const TAX_RATE = 0.1;
+const parsePriceYen = (priceStr) => Number(String(priceStr).replace(/[^\d.]/g, '')) || 0;
+const formatPriceYen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
+const priceIncludingTax = (priceStr) => formatPriceYen(parsePriceYen(priceStr) * (1 + TAX_RATE));
+
 // Shared plan-card markup — used by both the full plan chooser (no active
 // plan) and the top-up section (subscribed users buying extra scans).
 const PlanCard = ({ plan, onSelect, loading, buttonLabel, t }) => (
@@ -63,6 +71,12 @@ const PlanCard = ({ plan, onSelect, loading, buttonLabel, t }) => (
     <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
       {plan.price}
       <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
+    </div>
+    <div style={{ fontSize: '0.7rem', color: 'var(--foreground-darker)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+      {t('priceExcludingTax')}
+    </div>
+    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--foreground-darker)' }}>
+      {t('priceIncludingTaxAmount', { amount: priceIncludingTax(plan.price) })}
     </div>
 
     <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
