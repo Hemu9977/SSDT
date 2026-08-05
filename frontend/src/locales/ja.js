@@ -250,6 +250,7 @@ export const ja = {
   selectPlan: 'プランを選択',
   startingCheckout: '決済ページに移動中...',
   checkoutFailed: '決済の開始に失敗しました。もう一度お試しください。',
+  billingUnavailable: '現在お支払いをご利用いただけません。しばらくしてから再度お試しいただくか、サポートまでお問い合わせください。',
   paymentProcessing: 'お支払いを確認しました。プランを有効化しています...',
   checkingPlanStatus: 'プラン状態を確認中...',
   refreshPlanStatus: '状態を更新',

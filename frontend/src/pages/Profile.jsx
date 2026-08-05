@@ -32,9 +32,12 @@ const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', one
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
 
-// Display-only 10% tax calculation. PLANS[...].price remains the
-// tax-excluded amount actually sent to Stripe via startCheckout() — this
-// only derives what to show alongside it.
+// PLANS[...].price is the TAX-EXCLUSIVE amount; the matching Stripe Price is set to
+// the same figure. Stripe adds the tax itself via the fixed Tax Rate referenced by
+// STRIPE_TAX_RATE_ID (see backend/routes/stripeRoutes.js), so the total charged
+// equals the tax-inclusive figure derived below.
+// IMPORTANT: this rate must match the percentage on that Stripe Tax Rate. Nothing
+// enforces it at runtime — if one changes, change the other.
 const TAX_RATE = 0.1;
 const parsePriceYen = (priceStr) => Number(String(priceStr).replace(/[^\d.]/g, '')) || 0;
 const formatPriceYen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
@@ -325,7 +328,11 @@ const Profile = () => {
         body: JSON.stringify({ planType, billingCycle })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t('checkoutFailed'));
+      if (!res.ok) {
+        // Backend error strings are English-only and internal; resolve known codes
+        // through t() and fall back to a generic localized message.
+        throw new Error(data.code === 'TAX_NOT_CONFIGURED' ? t('billingUnavailable') : t('checkoutFailed'));
+      }
       // Deliberately leave paymentLoading true — the page is navigating away. It is
       // reset if the user comes back without paying (see the bfcache effect below).
       awaitingCheckoutRedirectRef.current = true;

@@ -250,6 +250,7 @@ export const en = {
   selectPlan: 'Select Plan',
   startingCheckout: 'Redirecting to checkout...',
   checkoutFailed: 'Failed to start checkout. Please try again.',
+  billingUnavailable: 'Billing is temporarily unavailable. Please try again later or contact support.',
   paymentProcessing: 'Payment received. Activating your plan...',
   checkingPlanStatus: 'Checking plan status...',
   refreshPlanStatus: 'Refresh Status',

@@ -45,6 +45,30 @@ const ONETIME_SCANS = {
 // Validity window for a purchased one-off scan credit batch, from purchase.
 const CREDIT_VALIDITY_DAYS = 90;
 
+// ─── Japanese consumption tax ─────────────────────────────────────────────────
+// Every STRIPE_PRICE_* above is a TAX-EXCLUSIVE amount (e.g. Light monthly is
+// ¥30,000). The plan cards show that figure plus a tax-inclusive total derived at
+// TAX_RATE in frontend/src/pages/Profile.jsx, so Stripe must actually add the same
+// tax or the customer is charged less than the total they were shown.
+//
+// This uses a FIXED Stripe Tax Rate rather than automatic_tax on purpose: the UI
+// hardcodes 10%, whereas automatic_tax resolves by customer location and would
+// charge a different total than the page promised for anyone outside Japan.
+//
+// Create the rate once in the Stripe dashboard (Products -> Tax rates): 10%,
+// exclusive, region Japan. Put its id (trt_...) in STRIPE_TAX_RATE_ID.
+// IMPORTANT: if you change the percentage here, change TAX_RATE in Profile.jsx to
+// match — nothing enforces that at runtime.
+const TAX_RATE_ID = process.env.STRIPE_TAX_RATE_ID || null;
+
+if (!TAX_RATE_ID) {
+  console.warn(
+    '⚠️  [stripe] STRIPE_TAX_RATE_ID is not set. Checkout is DISABLED until it is: ' +
+    'the pricing UI quotes a tax-inclusive total, so taking payment without the tax ' +
+    'rate attached would charge customers less than they were shown.'
+  );
+}
+
 // ─── POST /api/stripe/create-checkout-session ─────────────────────────────────
 router.post('/create-checkout-session', auth, async (req, res) => {
   try {
@@ -52,6 +76,17 @@ router.post('/create-checkout-session', auth, async (req, res) => {
 
     if (!planType || !billingCycle) {
       return res.status(400).json({ error: 'planType and billingCycle are required' });
+    }
+
+    // Refuse rather than undercharge. The plan cards quote a tax-inclusive total, so
+    // creating a session without the tax rate attached would take LESS money than the
+    // customer was shown. Failing here is loud and fixable; a silent shortfall is not.
+    if (!TAX_RATE_ID) {
+      console.error('❌ [stripe] Checkout blocked: STRIPE_TAX_RATE_ID is not configured.');
+      return res.status(503).json({
+        code: 'TAX_NOT_CONFIGURED',
+        error: 'Billing is temporarily unavailable: tax configuration is missing.'
+      });
     }
 
     const key = `${planType}_${billingCycle}`;
@@ -124,7 +159,10 @@ router.post('/create-checkout-session', auth, async (req, res) => {
 
     const sessionParams = {
       customer: customerId,
-      line_items: [{ price: priceId, quantity: 1 }],
+      // tax_rates attaches the fixed consumption-tax rate so Stripe collects the same
+      // tax-inclusive total the plan card quoted. Works for both 'subscription' and
+      // one-time 'payment' modes.
+      line_items: [{ price: priceId, quantity: 1, tax_rates: [TAX_RATE_ID] }],
       mode: isOnetime ? 'payment' : 'subscription',
       success_url: `${frontendBase}/profile?payment=success&plan=${key}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${frontendBase}/profile?payment=cancelled`,
