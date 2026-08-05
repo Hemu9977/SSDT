@@ -288,6 +288,8 @@ export const ja = {
   planTrial2: 'トライアル2',
   periodMonth: '/月',
   periodYear: '/年',
+  priceExcludingTax: '税抜価格',
+  priceIncludingTaxAmount: '税込価格: {amount}',
   planAccounts: '{count}アカウント',
   planScansPerMonth: '月{count}回スキャン',
   planScansForTarget: '1ターゲットにつき{count}回スキャン',
