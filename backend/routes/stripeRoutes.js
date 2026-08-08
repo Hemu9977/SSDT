@@ -56,7 +56,7 @@ const CREDIT_VALIDITY_DAYS = 90;
 // charge a different total than the page promised for anyone outside Japan.
 //
 // Create the rate once in the Stripe dashboard (Products -> Tax rates): 10%,
-// exclusive, region Japan. Put its id (trt_...) in STRIPE_TAX_RATE_ID.
+// exclusive, region Japan. Put its id (txr_...) in STRIPE_TAX_RATE_ID.
 // IMPORTANT: if you change the percentage here, change TAX_RATE in Profile.jsx to
 // match — nothing enforces that at runtime.
 const TAX_RATE_ID = process.env.STRIPE_TAX_RATE_ID || null;

@@ -21,7 +21,7 @@ Products → **Tax rates** → *Create tax rate*
 | Region | Japan |
 | Description | Japanese consumption tax |
 
-Copy the id — it looks like `trt_1AbC...`.
+Copy the id — it looks like `txr_1AbC...`.
 
 **Why exclusive:** every `STRIPE_PRICE_*` is the tax-excluded amount (Light monthly = ¥30,000).
 Stripe adds 10% on top, so the customer is charged ¥33,000 — matching the "Including Tax"
@@ -37,7 +37,7 @@ Same naming convention as the existing secrets (`ssdt/<VARNAME>`, plaintext valu
 aws secretsmanager create-secret \
   --region ap-south-1 \
   --name ssdt/STRIPE_TAX_RATE_ID \
-  --secret-string 'trt_XXXXXXXXXXXX'
+  --secret-string 'txr_XXXXXXXXXXXX'
 ```
 
 **No IAM change needed.** The execution role already grants
