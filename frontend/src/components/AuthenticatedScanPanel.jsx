@@ -22,6 +22,16 @@ const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) =
   />
 );
 
+const LOGIN_ERROR_MESSAGE_KEYS = {
+  FIELD_NOT_FOUND: 'loginFieldNotFound',
+  FIELD_FILL_FAILED: 'loginFieldFillFailed',
+  LOGIN_ANALYSIS_FAILED: 'loginAnalysisFailed',
+  UNEXPECTED_ERROR: 'loginUnexpectedError'
+};
+
+const errorCodeToMessageKey = (errorCode) =>
+  LOGIN_ERROR_MESSAGE_KEYS[errorCode] || 'couldNotAuthenticateProvidedCredentials';
+
 const STEPS = [
   { id: 1, labelKey: 'configure' },
   { id: 2, labelKey: 'credentials' },
@@ -381,8 +391,8 @@ const AuthenticatedScanPanel = () => {
         setCredentials(clearedCreds);
         setStep(3);
       }
-    } catch (err) {
-      setTestResult({ authenticated: false, errorMessage: err.message });
+    } catch {
+      setTestResult({ authenticated: false, errorCode: 'UNEXPECTED_ERROR' });
     } finally {
       setTesting(false);
     }
@@ -943,7 +953,7 @@ const AuthenticatedScanPanel = () => {
                 <div className="warnings">
                   {detectedFields.warnings.map((warning, idx) => (
                     <div key={idx} className="warning-item">
-                      âš ï¸ {warning}
+                      ⚠️ {warning}
                     </div>
                   ))}
                 </div>
@@ -1060,8 +1070,8 @@ const AuthenticatedScanPanel = () => {
                   </>
                 ) : (
                   <>
-                    <strong>âŒ {t('loginFailed')}</strong>
-                    <p>{testResult.errorMessage || t('couldNotAuthenticateProvidedCredentials')}</p>
+                    <strong>❌ {t('loginFailed')}</strong>
+                    <p>{t(errorCodeToMessageKey(testResult.errorCode))}</p>
                   </>
                 )}
               </div>
@@ -1141,6 +1151,9 @@ const AuthenticatedScanPanel = () => {
                     {getScanStatusLine(report, t)}
                   </span>
                 </div>
+                <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: theme === 'light' ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>
+                  ⚠ {t('scanNotice')}
+                </p>
               </div>
             )}
 
@@ -1227,7 +1240,7 @@ const AuthenticatedScanPanel = () => {
 
               return (
                 <>
-                  <h3 className="report-title">{'📊'} {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
+                  <h3 className="report-title">{t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
 
                   <div className="score-cards-grid">
                     {/* OWASP ZAP (Authenticated) */}

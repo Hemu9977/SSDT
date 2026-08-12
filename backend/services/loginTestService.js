@@ -3,6 +3,31 @@
 const puppeteer = require('puppeteer');
 
 /**
+ * Some sites don't have a dedicated login page — the form lives in a
+ * hidden header dropdown/modal that only appears after clicking a toggle
+ * (e.g. an "account"/"login" icon). Try common toggles to reveal it.
+ */
+async function revealHiddenLoginPanel(page) {
+  const toggleSelectors = [
+    'a[href*="login" i]', 'button[class*="login" i]', 'a[class*="login" i]',
+    '[aria-label*="login" i]', '[aria-label*="account" i]', '[aria-label*="ログイン" i]',
+    'button[class*="account" i]', 'a[class*="account" i]', 'button[class*="user" i]',
+    'a[class*="user" i]'
+  ];
+  for (const sel of toggleSelectors) {
+    try {
+      const handle = await page.$(sel);
+      if (handle) {
+        await handle.click({ delay: 20 }).catch(() => null);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    } catch {
+      // Toggle not clickable, try next candidate
+    }
+  }
+}
+
+/**
  * Test login credentials by filling and submitting the login form with dynamic fields
  * @param {Object} options
  * @param {string} options.loginUrl - URL of the login page
@@ -46,14 +71,35 @@ async function testLogin(options) {
       try {
         await page.waitForSelector(credentials[0].selector, { visible: true, timeout: 10000 });
       } catch {
-        return {
-          success: false,
-          authenticated: false,
-          errorMessage: 'Could not find the first login field on the page.',
-          postLoginUrl: null,
-          cookies: [],
-          evidence: 'First field selector not found'
-        };
+        // Field exists in the DOM (it was found during detection) but may be
+        // hidden inside a collapsed login dropdown/modal on a fresh page load.
+        const existsInDom = await page.$(credentials[0].selector).catch(() => null);
+        if (existsInDom) {
+          await revealHiddenLoginPanel(page);
+          try {
+            await page.waitForSelector(credentials[0].selector, { visible: true, timeout: 5000 });
+          } catch {
+            return {
+              success: false,
+              authenticated: false,
+              errorCode: 'FIELD_NOT_FOUND',
+              errorMessage: 'Could not find the first login field on the page.',
+              postLoginUrl: null,
+              cookies: [],
+              evidence: 'First field selector present but not visible after attempting to open login panel'
+            };
+          }
+        } else {
+          return {
+            success: false,
+            authenticated: false,
+            errorCode: 'FIELD_NOT_FOUND',
+            errorMessage: 'Could not find the first login field on the page.',
+            postLoginUrl: null,
+            cookies: [],
+            evidence: 'First field selector not found'
+          };
+        }
       }
     }
 
@@ -76,6 +122,7 @@ async function testLogin(options) {
         return {
           success: false,
           authenticated: false,
+          errorCode: 'FIELD_FILL_FAILED',
           errorMessage: `Could not fill field: ${cred.selector}`,
           postLoginUrl: null,
           cookies: [],
@@ -212,6 +259,7 @@ async function testLogin(options) {
       postLoginUrl,
       cookies,
       evidence: evidence.join('; '),
+      errorCode: authenticated ? null : 'LOGIN_ANALYSIS_FAILED',
       errorMessage: authenticated ? null : 'Login appears to have failed based on page analysis'
     };
   } catch (error) {
@@ -228,6 +276,7 @@ async function testLogin(options) {
     return {
       success: false,
       authenticated: false,
+      errorCode: 'UNEXPECTED_ERROR',
       errorMessage: error.message || 'An unexpected error occurred during login test',
       postLoginUrl: null,
       cookies: [],

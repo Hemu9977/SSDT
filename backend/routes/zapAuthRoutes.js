@@ -190,6 +190,7 @@ router.post('/test-login', auth, async (req, res) => {
         authenticated: false,
         postLoginUrl: result.postLoginUrl,
         evidence: result.evidence,
+        errorCode: result.errorCode,
         errorMessage: result.errorMessage
       });
     }
