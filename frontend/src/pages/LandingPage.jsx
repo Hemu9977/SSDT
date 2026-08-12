@@ -5,10 +5,18 @@ import Hero from '../components/Hero';
 import ScanTypeSelector from '../components/ScanTypeSelector';
 import AuthenticatedScanPanel from '../components/AuthenticatedScanPanel';
 import ParticleBackground from '../components/ParticleBackground';
+import useDocumentMeta from '../hooks/useDocumentMeta';
 import '../styles/LandingPage.scss';
 
 const LandingPage = ({ historicalScan }) => {
   const location = useLocation();
+
+  useDocumentMeta({
+    title: 'Fortexa – Website Security Scanning & Vulnerability Detection',
+    description: 'Fortexa scans your website for security vulnerabilities, HTTP header issues, and performance problems, then delivers an AI-written report in plain language.',
+    path: '/',
+  });
+
   const searchParams = new URLSearchParams(location.search);
   const scanType = searchParams.get('type');
 
