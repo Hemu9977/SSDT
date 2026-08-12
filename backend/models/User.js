@@ -115,6 +115,13 @@ const UserSchema = new mongoose.Schema({
     default: '',
     maxlength: 500
   },
+  // Language used for transactional emails (OTP, scan notifications, etc).
+  // Mirrors the frontend's UI language choice (LanguageContext), synced via PUT /profile.
+  preferredLanguage: {
+    type: String,
+    enum: ['en', 'ja'],
+    default: 'ja'
+  },
   // Account statistics
   totalScans: {
     type: Number,

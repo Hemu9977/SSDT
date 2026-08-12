@@ -1,7 +1,22 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { defaultLanguage, locales, supportedLanguages } from '../locales';
+import { API_BASE } from '../config/api';
 
 const STORAGE_KEY = 'fortexa-language';
+
+// Mirrors the UI language choice onto the account so transactional emails (OTP, scan
+// notifications) go out in the same language. Best-effort and fire-and-forget: emails
+// aren't affected until the next send, so a dropped request just means it stays stale
+// until the next language change or login.
+const syncLanguageToAccount = (nextLanguage) => {
+  const token = window.localStorage.getItem('token');
+  if (!token) return;
+  fetch(`${API_BASE}/api/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+    body: JSON.stringify({ preferredLanguage: nextLanguage }),
+  }).catch(() => { /* best-effort */ });
+};
 
 const LanguageContext = createContext(null);
 
@@ -52,6 +67,7 @@ export const LanguageProvider = ({ children }) => {
     } catch {
       /* storage unavailable — choice applies for this session only */
     }
+    syncLanguageToAccount(nextLanguage);
   }, []);
 
   const toggleLanguage = useCallback(() => {
@@ -68,11 +84,17 @@ export const LanguageProvider = ({ children }) => {
     return interpolate(value !== undefined ? value : key, params);
   }, [language]);
 
+  // Exposed so auth flows (login/register) can push the current UI language onto the
+  // account right after a token is issued, without waiting for the user to touch the
+  // toggle. Safe to call whenever — it no-ops without a stored token.
+  const syncLanguage = useCallback(() => syncLanguageToAccount(language), [language]);
+
   const value = useMemo(() => ({
     language,
     currentLang: language,
     setLanguage,
     toggleLanguage,
+    syncLanguage,
     t,
     hasReport,
     setHasReport,
@@ -81,7 +103,7 @@ export const LanguageProvider = ({ children }) => {
     translatePage: setLanguage,
     clearTranslationCache: () => {},
     translationCache: null,
-  }), [language, setLanguage, toggleLanguage, t, hasReport]);
+  }), [language, setLanguage, toggleLanguage, syncLanguage, t, hasReport]);
 
   return (
     <LanguageContext.Provider value={value}>

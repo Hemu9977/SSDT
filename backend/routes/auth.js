@@ -83,7 +83,7 @@ router.post('/google', async (req, res) => {
 
 // Existing Register Route
 router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, language } = req.body;
   if (!name || typeof name !== 'string' || name.trim().length < 1) {
     return res.status(400).json({ message: 'Name is required' });
   }
@@ -98,6 +98,9 @@ router.post('/register', async (req, res) => {
     if (user) return res.status(400).json({ message: 'User already exists' });
 
     user = new User({ name, email: email.toLowerCase(), password });
+    // Seed the email language from the UI language the visitor registered under
+    // (frontend's LanguageContext); falls back to the schema default otherwise.
+    if (['en', 'ja'].includes(language)) user.preferredLanguage = language;
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(password, salt);
     await user.save();
@@ -106,9 +109,9 @@ router.post('/register', async (req, res) => {
     user.otp = otp;
     user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
     await user.save();
-    
+
     // Attempt email, but don't fail registration if email fails
-    try { await sendOTPEmail(user.email, otp); } catch(e) { console.error("Email failed", e); }
+    try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch(e) { console.error("Email failed", e); }
     
     res.status(201).json({ message: 'User registered', user: { id: user.id, email: user.email }});
   } catch (err) {
@@ -142,7 +145,7 @@ router.post('/login', async (req, res) => {
     user.otp = otp;
     user.otpExpires = new Date(Date.now() + 600000);
     await user.save();
-    try { await sendOTPEmail(user.email, otp); } catch(e) { console.error(e); }
+    try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch(e) { console.error(e); }
     res.json({ message: 'Check email for OTP', user: { id: user.id, email: user.email }});
   } catch (err) {
     res.status(500).json({ message: 'Server error' });

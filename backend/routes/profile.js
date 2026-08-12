@@ -79,6 +79,7 @@ router.get('/', auth, async (req, res) => {
         name: user.name,
         email: user.email,
         bio: user.bio,
+        preferredLanguage: user.preferredLanguage,
         accountType: user.accountType,
         isVerified: user.isVerified,
         totalScans: totalScans,
@@ -138,7 +139,7 @@ router.get('/', auth, async (req, res) => {
 // @access  Private
 router.put('/', auth, async (req, res) => {
   try {
-    const { name, bio } = req.body;
+    const { name, bio, preferredLanguage } = req.body;
 
     const user = await User.findById(req.user.id);
 
@@ -155,9 +156,14 @@ router.put('/', auth, async (req, res) => {
       return res.status(400).json({ message: 'Bio must not exceed 500 characters' });
     }
 
+    if (preferredLanguage !== undefined && !['en', 'ja'].includes(preferredLanguage)) {
+      return res.status(400).json({ message: 'Invalid preferredLanguage' });
+    }
+
     // Update fields
     if (name) user.name = name.trim();
     if (bio !== undefined) user.bio = bio.trim();
+    if (preferredLanguage !== undefined) user.preferredLanguage = preferredLanguage;
 
     await user.save();
 
@@ -169,6 +175,7 @@ router.put('/', auth, async (req, res) => {
         name: user.name,
         email: user.email,
         bio: user.bio,
+        preferredLanguage: user.preferredLanguage,
         accountType: user.accountType
       }
     });

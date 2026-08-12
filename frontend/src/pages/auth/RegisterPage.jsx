@@ -20,7 +20,7 @@ const RegisterPage = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   const googleSignup = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
@@ -63,7 +63,7 @@ const RegisterPage = () => {
       const response = await fetch(`${API_BASE}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, language }),
       });
       const data = await response.json();
       if (response.ok) {

@@ -328,7 +328,7 @@ async function handleScanComplete(scanId, userId, scanType, targetUrl) {
 
   // 2. Send email notification (async, don't block on failure)
   try {
-    const user = await User.findById(userId).select('name email');
+    const user = await User.findById(userId).select('name email preferredLanguage');
     if (user && user.email) {
       await sendScanCompletionEmail(user.email, user.name || 'User', {
         scanType,
@@ -336,7 +336,7 @@ async function handleScanComplete(scanId, userId, scanType, targetUrl) {
         scanId,
         completedAt,
         dashboardLink
-      });
+      }, user.preferredLanguage);
       console.log(`📧 Scan completion email sent to ${user.email} (Link: ${dashboardLink})`);
     } else {
       console.warn(`⚠️ Could not find user ${userId} for email notification`);
@@ -353,14 +353,14 @@ async function handleScanComplete(scanId, userId, scanType, targetUrl) {
  */
 async function handleScheduledScanTriggered(userId, scanType, targetUrl, scheduledFor, startedAt) {
   try {
-    const user = await User.findById(userId).select('name email');
+    const user = await User.findById(userId).select('name email preferredLanguage');
     if (user && user.email) {
       await sendScanTriggeredEmail(user.email, user.name || 'User', {
         scanType,
         targetUrl,
         scheduledFor,
         startedAt
-      });
+      }, user.preferredLanguage);
       console.log(`📧 Scan triggered email sent to ${user.email}`);
     }
   } catch (err) {
@@ -374,14 +374,14 @@ async function handleScheduledScanTriggered(userId, scanType, targetUrl, schedul
  */
 async function handleScanFailed(scanId, userId, scanType, targetUrl, failureReason) {
   try {
-    const user = await User.findById(userId).select('name email');
+    const user = await User.findById(userId).select('name email preferredLanguage');
     if (user && user.email) {
       await sendScanFailedEmail(user.email, user.name || 'User', {
         scanType,
         targetUrl,
         scanId,
         failureReason
-      });
+      }, user.preferredLanguage);
       console.log(`📧 Scan failed email sent to ${user.email}`);
     }
   } catch (err) {
@@ -410,14 +410,14 @@ function getIO() {
  */
 async function handleScheduleCreated(userId, targetUrl, scheduleType, displayTime) {
   try {
-    const user = await User.findById(userId).select('name email');
+    const user = await User.findById(userId).select('name email preferredLanguage');
     if (user && user.email) {
       await sendScheduleConfirmationEmail(user.email, user.name || 'User', {
         scanType: 'Security Scan',
         targetUrl,
         scheduleType,
         displayTime
-      });
+      }, user.preferredLanguage);
     }
     
     // Also emit a socket event if needed for instant UI feedback
