@@ -1099,7 +1099,7 @@ const Hero = ({ historicalScan }) => {
           </div>
         )}
 
-        <h3 className="report-title">📊 {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
+        <h3 className="report-title">{t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
         {report?.status && <p>Status: <b>{report.status}</b></p>}
 
         {/* AI Summary - Shows loading placeholder or content */}
@@ -1717,7 +1717,7 @@ const Hero = ({ historicalScan }) => {
         {report?.hasUrlscanResult && report?.urlscanData && (
           <details style={{ marginBottom: '2rem' }}>
             <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px', border: '1px solid #00d084' }}>
-              🌐 {t('viewUrlscanAnalysis')}
+              {t('viewUrlscanAnalysis')}
             </summary>
             <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
 
@@ -1966,7 +1966,7 @@ const Hero = ({ historicalScan }) => {
               </div>
             </form>
             {loading && (
-              <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>
+              <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: theme === 'light' ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>
                 ⚠ {t('scanNotice')}
               </p>
             )}

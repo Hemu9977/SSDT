@@ -243,7 +243,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
     return (
         <div className="zap-report-enhanced">
             <div className="report-header">
-                <h3>⚡ {t('vulnerabilityAnalysisResults')}</h3>
+                <h3>{t('vulnerabilityAnalysisResults')}</h3>
                 <div className="report-stats">
                     <span className="stat">
                         <strong>{zapData.totalAlerts}</strong> {t('alertTypes')}
