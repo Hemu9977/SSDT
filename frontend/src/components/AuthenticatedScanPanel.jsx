@@ -12,6 +12,7 @@ import { useNotifications } from '../contexts/NotificationContext';
 
 import { API_BASE } from '../config/api';
 import { getScanStatusLine } from '../utils/scanStatus';
+import { downloadPdfReport } from '../utils/pdfDownload';
 
 // Loading placeholder for progressive loading (same as Hero.jsx)
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -241,11 +242,14 @@ const AuthenticatedScanPanel = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Detection failed');
+        // Backend error text is English-only and can name the scan engines.
+        console.error('Login-field detection failed:', data);
+        throw new Error(t('couldNotAnalyzeLogin'));
       }
 
       if (!data.success) {
-        setDetectionError(data.error || t('couldNotAnalyzeLogin'));
+        console.error('Login-field detection unsuccessful:', data);
+        setDetectionError(t('couldNotAnalyzeLogin'));
         return;
       }
 
@@ -421,11 +425,14 @@ const AuthenticatedScanPanel = () => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create schedule');
+      if (!res.ok) {
+        console.error('Schedule creation failed:', data);
+        throw new Error(t('failedSaveSchedule'));
+      }
 
       sessionStorage.removeItem('pendingScheduleConfig');
       setPendingSchedule(null);
-      alert('Authenticated Schedule created successfully!');
+      alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
       setError(err.message);
@@ -472,7 +479,12 @@ const AuthenticatedScanPanel = () => {
           setScanning(false);
           return;
         }
-        throw new Error(data.error || t('failedStartScan'));
+        // `data.error` is an English backend string that can name the scan
+        // engines — log it, never render it.
+        console.error('Auth scan start failed:', res.status, data);
+        if (res.status === 429) throw new Error(t('scanRateLimited'));
+        if (res.status === 403) throw new Error(t('planLimitReached'));
+        throw new Error(t('failedStartScan'));
       }
 
       setScanId(data.scanId);
@@ -537,8 +549,13 @@ const AuthenticatedScanPanel = () => {
         clearTimeout(wsWatchdogRef.current);
         wsWatchdogRef.current = null;
       }
-      // data.error can be e.g. 'ZAP scan timed out' — never surface it.
-      setError(t('scanFailed'));
+      // data.error can be e.g. 'ZAP scan timed out' — never surface it. Resolve
+      // the message from the structured reason instead (parity with Hero).
+      setError(
+        data.failureReason === 'vulnerability_scan_failed'
+          ? t('scanFailedVulnerability')
+          : t('scanFailedGeneric')
+      );
       localStorage.removeItem('activeAuthScan');
       return;
     }
@@ -635,7 +652,11 @@ const AuthenticatedScanPanel = () => {
           isPollingRef.current = false;
           localStorage.removeItem('activeAuthScan');
           // data.error can be e.g. 'ZAP scan timed out' — never surface it.
-          setError(t('scanFailed'));
+          setError(
+            data.failureReason === 'vulnerability_scan_failed'
+              ? t('scanFailedVulnerability')
+              : t('scanFailedGeneric')
+          );
           setScanning(false);
         }
       } catch (err) {
@@ -650,6 +671,65 @@ const AuthenticatedScanPanel = () => {
 
   // Keep pollRef pointed at the latest closure
   pollRef.current = startPolling;
+
+  // ========== PDF Download ==========
+  // Mirrors Hero.handlePdfDownload — CLAUDE.md requires feature parity between
+  // the two panels, so both use the shared utils/pdfDownload helper.
+  //
+  // The scan identity is snapshotted before any awaiting: `report` is mutable
+  // state that a background update can replace mid-generation, which previously
+  // produced a file named for one scan containing another's data.
+  const handlePdfDownload = useCallback(async (lang) => {
+    setPdfDropdownOpen(false);
+    if (pdfDownloading) return;
+
+    const snapshot = {
+      analysisId: report?.analysisId || scanId,
+      target: report?.target,
+    };
+
+    setPdfDownloading(true);
+    setPdfProgress(0);
+    setPdfProgressMessage(lang === 'ja' ? t('initializingJapanesePdf') : t('initializingEnglishPdf'));
+
+    const steps = [
+      t('formattingScanData'),
+      t('formattingAiAnalysis'),
+      ...(lang === 'ja' ? [t('translatingToJapanese')] : []),
+      t('renderingPdfDocument'),
+      t('finalizing'),
+    ];
+
+    try {
+      await downloadPdfReport({
+        ...snapshot,
+        lang,
+        apiBase: API_BASE,
+        token: localStorage.getItem('token'),
+        onPoll: (pollCount) => {
+          const idx = Math.min(pollCount - 1, steps.length - 1);
+          setPdfProgress(Math.min(15 + pollCount * 12, 92));
+          setPdfProgressMessage(steps[idx]);
+        },
+      });
+      setPdfProgress(100);
+      setPdfProgressMessage(t('downloadComplete'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 2000);
+    } catch (err) {
+      // err.messageKey is an i18n key; the backend's English text is never shown.
+      console.error('PDF download failed:', err);
+      setPdfProgressMessage(t(err.messageKey || 'pdfGenerationFailed'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 4000);
+    }
+  }, [pdfDownloading, report, scanId, t]);
 
   // ========== Stop Scan ==========
   const handleStopScan = async () => {
@@ -1709,8 +1789,8 @@ const AuthenticatedScanPanel = () => {
                   {/* Download Reports Section */}
                   {report?.analysisId && report?.status === 'completed' && (
                     <div className="download-section">
-                      <h4>Download Scan Reports</h4>
-                      <p>Download your complete security scan results in your preferred format</p>
+                      <h4>{t('downloadScanReports')}</h4>
+                      <p>{t('downloadCompleteSecurityResults')}</p>
                       <div className="download-buttons">
                         {/* PDF Download Dropdown */}
                         <div className="pdf-dropdown-container">
@@ -1719,233 +1799,15 @@ const AuthenticatedScanPanel = () => {
                             disabled={pdfDownloading}
                             onClick={() => !pdfDownloading && setPdfDropdownOpen(!pdfDropdownOpen)}
                           >
-                            {pdfDownloading ? 'Generating...' : 'Download PDF Report'}
+                            {pdfDownloading ? t('generating') : t('downloadPdfReport')}
                           </button>
                           {pdfDropdownOpen && !pdfDownloading && (
                             <div className="pdf-dropdown-menu">
-                              <button
-                                className="pdf-dropdown-item"
-                                onClick={async () => {
-                                  setPdfDropdownOpen(false);
-                                  setPdfDownloading(true);
-                                  setPdfProgress(0);
-                                  setPdfProgressMessage('Initializing English PDF...');
-                                  try {
-                                    const token = localStorage.getItem('token');
-                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                      method: 'POST',
-                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
-                                    });
-                                    if (!startRes.ok) {
-                                      const e = await startRes.json().catch(() => ({}));
-                                      throw new Error(e.error || 'Failed to start PDF generation');
-                                    }
-                                    let { jobId } = await startRes.json();
-                                    const progressSteps = [
-                                      { progress: 15, message: 'Formatting scan data...' },
-                                      { progress: 35, message: 'Waiting for API rate limit...' },
-                                      { progress: 55, message: 'Formatting AI analysis...' },
-                                      { progress: 75, message: 'Rendering PDF document...' },
-                                      { progress: 90, message: 'Finalizing...' },
-                                    ];
-                                    let pollCount = 0;
-                                    let consecutive404 = 0;
-                                    let restarted = false;
-                                    const MAX_404_RETRIES = 3;
-
-                                    while (true) {
-                                      await new Promise(r => setTimeout(r, 5000));
-                                      pollCount++;
-                                      if (pollCount > 120) throw new Error('PDF generation timed out');
-                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                                      setPdfProgress(progressSteps[stepIdx].progress);
-                                      setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      
-                                      let pollRes;
-                                      try {
-                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                          headers: { 'x-auth-token': token }
-                                        });
-                                      } catch (networkErr) {
-                                        console.warn('PDF poll network error, retrying…', networkErr.message);
-                                        continue;
-                                      }
-
-                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
-
-                                      if (pollRes.status === 200) {
-                                        consecutive404 = 0;
-                                        setPdfProgress(100);
-                                        setPdfProgressMessage('Download complete!');
-                                        const blob = await pollRes.blob();
-                                        const url = window.URL.createObjectURL(blob);
-                                        const a = document.createElement('a');
-                                        a.href = url;
-                                        a.download = `security_report_EN_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                        document.body.appendChild(a);
-                                        a.click();
-                                        window.URL.revokeObjectURL(url);
-                                        document.body.removeChild(a);
-                                        break;
-                                      }
-
-                                      // 404 = job meta gone; 409 = a completed job's file expired.
-                                      // Both are recoverable: start ONE fresh job, then fall back
-                                      // to the bounded retry budget.
-                                      if (pollRes.status === 404 || pollRes.status === 409) {
-                                        if (!restarted) {
-                                          restarted = true;
-                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                          try {
-                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                              method: 'POST',
-                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
-                                            });
-                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                          } catch (e) { /* fall through to retry budget */ }
-                                        }
-                                        consecutive404++;
-                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                                        if (consecutive404 < MAX_404_RETRIES) continue;
-                                        throw new Error('PDF job not found after multiple retries — it may have expired');
-                                      }
-                                      
-                                      consecutive404 = 0;
-                                      const errorData = await pollRes.json().catch(() => ({}));
-                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                                        alert(t('geminiKeyExhausted'));
-                                        throw new Error(t('geminiKeyExhausted'));
-                                      }
-                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                                        alert(t('englishPdfOnly'));
-                                        throw new Error(errorData.error || 'English-only validation failed');
-                                      }
-                                      throw new Error(errorData.error || 'PDF generation failed');
-                                    }
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
-                                  } catch (err) {
-                                    console.error('PDF download failed:', err);
-                                    setPdfProgressMessage(`Error: ${err.message}`);
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
-                                  }
-                                }}
-                              >
-                                English Version
+                              <button className="pdf-dropdown-item" onClick={() => handlePdfDownload('en')}>
+                                {t('englishVersion')}
                               </button>
-                              <button
-                                className="pdf-dropdown-item"
-                                onClick={async () => {
-                                  setPdfDropdownOpen(false);
-                                  setPdfDownloading(true);
-                                  setPdfProgress(0);
-                                  setPdfProgressMessage('Initializing Japanese PDF...');
-                                  try {
-                                    const token = localStorage.getItem('token');
-                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                      method: 'POST',
-                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
-                                    });
-                                    if (!startRes.ok) {
-                                      const e = await startRes.json().catch(() => ({}));
-                                      throw new Error(e.error || 'Failed to start PDF generation');
-                                    }
-                                    let { jobId } = await startRes.json();
-                                    const progressSteps = [
-                                      { progress: 10, message: 'Formatting scan data...' },
-                                      { progress: 25, message: 'Waiting for API rate limit...' },
-                                      { progress: 40, message: 'Formatting AI analysis...' },
-                                      { progress: 55, message: 'Waiting for API rate limit...' },
-                                      { progress: 70, message: 'Translating to Japanese...' },
-                                      { progress: 85, message: 'Rendering PDF document...' },
-                                      { progress: 92, message: 'Finalizing...' },
-                                    ];
-                                    let pollCount = 0;
-                                    let consecutive404 = 0;
-                                    let restarted = false;
-                                    const MAX_404_RETRIES = 3;
-
-                                    while (true) {
-                                      await new Promise(r => setTimeout(r, 5000));
-                                      pollCount++;
-                                      if (pollCount > 120) throw new Error('PDF generation timed out');
-                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                                      setPdfProgress(progressSteps[stepIdx].progress);
-                                      setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      
-                                      let pollRes;
-                                      try {
-                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                          headers: { 'x-auth-token': token }
-                                        });
-                                      } catch (networkErr) {
-                                        console.warn('PDF poll network error, retrying…', networkErr.message);
-                                        continue;
-                                      }
-
-                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
-                                      
-                                      if (pollRes.status === 200) {
-                                        consecutive404 = 0;
-                                        setPdfProgress(100);
-                                        setPdfProgressMessage('Download complete!');
-                                        const blob = await pollRes.blob();
-                                        const url = window.URL.createObjectURL(blob);
-                                        const a = document.createElement('a');
-                                        a.href = url;
-                                        a.download = `security_report_JA_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                        document.body.appendChild(a);
-                                        a.click();
-                                        window.URL.revokeObjectURL(url);
-                                        document.body.removeChild(a);
-                                        break;
-                                      }
-
-                                      // 404 = job meta gone; 409 = a completed job's file expired.
-                                      // Both are recoverable: start ONE fresh job, then fall back
-                                      // to the bounded retry budget.
-                                      if (pollRes.status === 404 || pollRes.status === 409) {
-                                        if (!restarted) {
-                                          restarted = true;
-                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                          try {
-                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                              method: 'POST',
-                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
-                                            });
-                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                          } catch (e) { /* fall through to retry budget */ }
-                                        }
-                                        consecutive404++;
-                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                                        if (consecutive404 < MAX_404_RETRIES) continue;
-                                        throw new Error('PDF job not found after multiple retries — it may have expired');
-                                      }
-                                      
-                                      consecutive404 = 0;
-                                      const errorData = await pollRes.json().catch(() => ({}));
-                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                                        alert(t('geminiKeyExhausted'));
-                                        throw new Error(t('geminiKeyExhausted'));
-                                      }
-                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                                        alert(t('englishPdfOnly'));
-                                        throw new Error(errorData.error || 'English-only validation failed');
-                                      }
-                                      throw new Error(errorData.error || 'PDF generation failed');
-                                    }
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
-                                  } catch (err) {
-                                    console.error('PDF download failed:', err);
-                                    setPdfProgressMessage(`Error: ${err.message}`);
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
-                                  }
-                                }}
-                              >
-                                Japanese Version
+                              <button className="pdf-dropdown-item" onClick={() => handlePdfDownload('ja')}>
+                                {t('japaneseVersion')}
                               </button>
                             </div>
                           )}

@@ -13,6 +13,7 @@ import '../styles/ScoreCards.scss';
 
 import { API_BASE } from '../config/api';
 import { getScanStatusLine } from '../utils/scanStatus';
+import { downloadPdfReport } from '../utils/pdfDownload';
 
 // 🔄 Loading Placeholder Component for progressive loading
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -37,6 +38,9 @@ const Hero = ({ historicalScan }) => {
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStage, setLoadingStage] = useState('');
   const [error, setError] = useState(null);
+  // Structured reason a scan ended in `failed`, so the failure block can offer a
+  // rescan and explain that the attempt was not charged.
+  const [failureReason, setFailureReason] = useState(null);
   const [isHistorical, setIsHistorical] = useState(false);
   const [pendingSchedule, setPendingSchedule] = useState(null);
 
@@ -132,6 +136,14 @@ const Hero = ({ historicalScan }) => {
   useEffect(() => {
     if (historicalScan) {
       console.log('Loading historical scan data:', historicalScan.target);
+      // A stored scan that failed shows the failure block, not an empty report.
+      if (historicalScan.status === 'failed') {
+        setFailureReason(historicalScan.failureReason || 'internal_error');
+        setIsHistorical(true);
+        setLoading(false);
+        return;
+      }
+      setFailureReason(null);
       // Transform historical scan data to match the report structure Hero expects
       // Hero uses specific property names - must match exactly!
       const transformedReport = {
@@ -272,9 +284,17 @@ const Hero = ({ historicalScan }) => {
       if (!token) return;
 
       try {
-        // First, check the backend for any active scan (most reliable source)
+        // First, check the backend for any active scan (most reliable source).
+        // Send the scan we were actually watching so the server resolves that one
+        // instead of "whatever this user ran most recently".
+        let persistedScanId = null;
+        try {
+          persistedScanId = JSON.parse(localStorage.getItem('activeScan') || 'null')?.scanId || null;
+        } catch { /* malformed entry — fall back to the server's own lookup */ }
+
         console.log('🔄 Checking for active scan in database...');
-        const response = await fetch(`${API_BASE}/api/scan/active-scan`, {
+        const query = persistedScanId ? `?scanId=${encodeURIComponent(persistedScanId)}` : '';
+        const response = await fetch(`${API_BASE}/api/scan/active-scan${query}`, {
           headers: { 'x-auth-token': token }
         });
 
@@ -298,11 +318,22 @@ const Hero = ({ historicalScan }) => {
         console.log('   Status:', data.status);
         console.log('   Target:', data.target);
 
+        // Never replace a report the user is already looking at. This resume path
+        // exists to restore state after a refresh — but /active-scan answers for
+        // the USER, not for the scan on screen, so without this guard a scheduled
+        // or second-tab scan silently swapped out the displayed results (and, if a
+        // PDF was generating, the file was saved under the wrong target's name).
+        if (reportRef.current?.analysisId && reportRef.current.analysisId !== data.analysisId) {
+          console.log('↩️ A different scan is already displayed — not replacing it');
+          return;
+        }
+
         // CASE 1: Scan is COMPLETED - show results directly, no polling needed
         if (data.status === 'completed') {
           console.log('✅ Scan already completed - showing results');
 
           // Set the full report from database (includes WebCheck results)
+          reportRef.current = { ...data, isPartial: false };
           setReport({
             ...data,
             isPartial: false
@@ -472,6 +503,18 @@ const Hero = ({ historicalScan }) => {
   // applyUpdateData — merges a scan:update payload (from WS or poll) into state
   // ──────────────────────────────────────────────────────────────────────────
   const applyUpdateData = useCallback((data) => {
+    // Only merge updates that belong to the scan currently on screen. Payloads
+    // are spread into the existing report, so an event from a different scan
+    // (a scheduled run, a second tab, a stale listener) would blend two scans'
+    // fields into one object — which is how a report ended up carrying one
+    // scan's id and another's target.
+    const incomingId = data.scanId || data.analysisId;
+    const currentId = activeScanIdRef.current || reportRef.current?.analysisId;
+    if (incomingId && currentId && incomingId !== currentId) {
+      console.warn(`Ignoring scan update for ${incomingId}; showing ${currentId}`);
+      return;
+    }
+
     const status = data.status;
 
     if (status === 'completed') {
@@ -510,8 +553,9 @@ const Hero = ({ historicalScan }) => {
       setLoadingStage('');
       wsListeningRef.current = false;
       if (wsWatchdogRef.current) { clearTimeout(wsWatchdogRef.current); wsWatchdogRef.current = null; }
-      // data.error is a raw backend string that can name the scan engines — never show it.
-      setError(t('analysisFailed', { reason: t('unknownError') }));
+      // Resolve the message from the structured `failureReason`. `data.error` is a
+      // raw backend string that can name the scan engines — never show it.
+      setFailureReason(data.failureReason || 'internal_error');
       localStorage.removeItem('activeScan');
       setActiveScanId(null);
       activeScanIdRef.current = null;
@@ -621,7 +665,14 @@ const Hero = ({ historicalScan }) => {
           return;
         }
 
-        // Progressive Loading: Update report with partial data
+        // Progressive Loading: Update report with partial data.
+        // Guard on scan identity for the same reason as applyUpdateData: a late
+        // response from a previous scan must not merge into the current report.
+        const respId = analysisData.analysisId || analysisData.scanId;
+        if (respId && respId !== analysisId) {
+          console.warn(`Ignoring poll response for ${respId}; polling ${analysisId}`);
+          return;
+        }
         if (analysisData.target) {
           setReport(prevReport => ({
             ...prevReport,
@@ -646,8 +697,13 @@ const Hero = ({ historicalScan }) => {
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
           isPollingRef.current = false; // Reset polling flag
+          setLoading(false);
+          setLoadingProgress(0);
+          setLoadingStage('');
           // analysisData.error can be e.g. 'ZAP scan timed out' — never surface it.
-          throw new Error(t('analysisFailed', { reason: t('unknownError') }));
+          // The structured reason drives a localized failure block instead.
+          setFailureReason(analysisData.failureReason || 'internal_error');
+          return;
         } else if (status === 'stopped') {
           localStorage.removeItem('activeScan');
           setActiveScanId(null);
@@ -774,6 +830,7 @@ const Hero = ({ historicalScan }) => {
     setLoadingProgress(0);
     setLoadingStage(t('initializingScan'));
     setError(null);
+    setFailureReason(null);
     setReport(null);
     setScanUrl(url);
     stopPollingRef.current = false; // Reset stop flag for new scan
@@ -804,17 +861,24 @@ const Hero = ({ historicalScan }) => {
           navigate('/login');
           return;
         }
+        // Every branch below resolves a LOCAL i18n string. Backend `error` /
+        // `message` fields are English-only and can name the scan engines, so they
+        // are logged for diagnostics but never rendered.
         if (res.status === 429) {
-          const retryAfter = errorData.retryAfter || '1 minute';
-          throw new Error(`Rate limit exceeded. Please wait ${retryAfter}.`);
+          console.error('❌ Scan rate limited:', errorData);
+          throw new Error(t('scanRateLimited'));
         }
         // Plan quota exceeded — guide user to upgrade
-        if (res.status === 403 && (errorData.code === 'PLAN_LIMIT_EXCEEDED' || errorData.error === 'PLAN_LIMIT_EXCEEDED' || errorData.code === 'NO_ORGANIZATION')) {
+        if (res.status === 403 && (errorData.code === 'PLAN_LIMIT_EXCEEDED' || errorData.error === 'PLAN_LIMIT_EXCEEDED')) {
           console.error('❌ Scan 403 Plan limit exceeded:', errorData);
-          throw new Error(`${errorData.message || 'Plan limit reached.'} Visit your Profile page to upgrade.`);
+          throw new Error(t('planLimitReached'));
+        }
+        if (res.status === 403 && errorData.code === 'NO_ORGANIZATION') {
+          console.error('❌ Scan 403 No organization:', errorData);
+          throw new Error(t('organizationRequired'));
         }
         console.error('❌ Scan request failed:', res.status, errorData);
-        throw new Error(errorData.error || errorData.details || `HTTP ${res.status}`);
+        throw new Error(t('scanFailedGeneric'));
       }
 
       const data = await res.json();
@@ -859,11 +923,8 @@ const Hero = ({ historicalScan }) => {
 
     } catch (err) {
       console.error('Analysis error:', err);
-      let errorMessage = t('analysisFailed', { reason: '' });
-      if (err.message.includes('429')) errorMessage = err.message;
-      else errorMessage += err.message;
-
-      setError(errorMessage);
+      // err.message is already a resolved i18n string from the branches above.
+      setError(err.message || t('scanFailedGeneric'));
       setLoading(false);
       setLoadingProgress(0);
       localStorage.removeItem('activeScan');
@@ -871,9 +932,101 @@ const Hero = ({ historicalScan }) => {
     }
   };
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // handlePdfDownload — request, poll and save a report
+  //
+  // The scan identity is snapshotted BEFORE any awaiting. `report` is mutable
+  // state that a background scan update can replace while the job is still
+  // generating; reading `report.target` after the await produced a file named
+  // for one scan containing another's data.
+  // ──────────────────────────────────────────────────────────────────────────
+  const handlePdfDownload = useCallback(async (lang) => {
+    setPdfDropdownOpen(false);
+    if (pdfDownloading) return; // Prevent duplicate clicks
+
+    const snapshot = {
+      analysisId: report?.analysisId || report?.scanId || activeScanIdRef.current,
+      target: report?.target,
+    };
+
+    setPdfDownloading(true);
+    setPdfProgress(0);
+    setPdfProgressMessage(lang === 'ja' ? t('initializingJapanesePdf') : t('initializingEnglishPdf'));
+
+    const steps = [
+      t('formattingScanData'),
+      t('formattingAiAnalysis'),
+      ...(lang === 'ja' ? [t('translatingToJapanese')] : []),
+      t('renderingPdfDocument'),
+      t('finalizing'),
+    ];
+
+    try {
+      await downloadPdfReport({
+        ...snapshot,
+        lang,
+        apiBase: API_BASE,
+        token: localStorage.getItem('token'),
+        onPoll: (pollCount) => {
+          const idx = Math.min(pollCount - 1, steps.length - 1);
+          setPdfProgress(Math.min(15 + pollCount * 12, 92));
+          setPdfProgressMessage(steps[idx]);
+        },
+      });
+      setPdfProgress(100);
+      setPdfProgressMessage(t('downloadComplete'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 2000);
+    } catch (err) {
+      // err.messageKey is an i18n key; the backend's English text is never shown.
+      console.error('PDF download failed:', err);
+      setPdfProgressMessage(t(err.messageKey || 'pdfGenerationFailed'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 4000);
+    }
+  }, [pdfDownloading, report, t]);
+
   // Note: renderPartialReport removed - replaced by progressive loading in main report layout
 
   const renderReport = () => {
+    // A scan that ended in failure gets an explicit block rather than an empty
+    // results view: the customer must be able to tell "we found nothing" apart
+    // from "we could not look".
+    if (failureReason) {
+      return (
+        <div className="report-summary scan-failed" style={{ marginTop: '2rem' }}>
+          <h4 style={{ color: '#e81123' }}>⚠ {t('scanFailedTitle')}</h4>
+          <p>
+            {failureReason === 'vulnerability_scan_failed'
+              ? t('scanFailedVulnerability')
+              : t('scanFailedGeneric')}
+          </p>
+          <button
+            className="scan-button"
+            style={{ maxWidth: '260px', marginTop: '1rem' }}
+            onClick={() => {
+              setFailureReason(null);
+              setError(null);
+              setReport(null);
+              setHasReport(false);
+              // Must navigate, not just clear state: this block also renders on the
+              // historical-scan route, where clearing alone would leave a blank page
+              // because the report only loads from the `historicalScan` prop.
+              navigate('/?type=normal');
+            }}
+          >
+            {t('rescanNow')}
+          </button>
+        </div>
+      );
+    }
+
     // Show error if present
     if (error) return <p className="error-msg">{error}</p>;
 
@@ -1692,254 +1845,10 @@ const Hero = ({ historicalScan }) => {
 
                 {pdfDropdownOpen && !pdfDownloading && (
                   <div className="pdf-dropdown-menu">
-                    <button
-                      onClick={async () => {
-                        setPdfDropdownOpen(false);
-                        if (pdfDownloading) return; // Prevent duplicate clicks
-                        try {
-                          setPdfDownloading(true);
-                          setPdfProgress(0);
-                          setPdfProgressMessage(t('initializingEnglishPdf'));
-
-                          const token = localStorage.getItem('token');
-                          const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                            method: 'POST',
-                            headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'en' })
-                          });
-                          if (!startRes.ok) {
-                            const e = await startRes.json().catch(() => ({}));
-                            throw new Error(e.error || 'Failed to start PDF generation');
-                          }
-                          let { jobId } = await startRes.json();
-
-                          const progressSteps = [
-                            { progress: 15, message: t('formattingScanData') },
-                            { progress: 35, message: t('waitingRateLimit') },
-                            { progress: 55, message: t('formattingAiAnalysis') },
-                            { progress: 75, message: t('renderingPdfDocument') },
-                            { progress: 90, message: t('finalizing') },
-                          ];
-                          let pollCount = 0;
-                          let consecutive404 = 0; // Track transient 404s
-                          let restarted = false;
-                          const MAX_404_RETRIES = 3;
-
-                          while (true) {
-                            await new Promise(r => setTimeout(r, 5000));
-                            pollCount++;
-                            if (pollCount > 120) throw new Error('PDF generation timed out');
-
-                            const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                            setPdfProgress(progressSteps[stepIdx].progress);
-                            setPdfProgressMessage(progressSteps[stepIdx].message);
-
-                            let pollRes;
-                            try {
-                              pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                headers: { 'x-auth-token': token }
-                              });
-                            } catch (networkErr) {
-                              console.warn('PDF poll network error, retrying…', networkErr.message);
-                              continue; // Retry on network failures
-                            }
-
-                            if (pollRes.status === 202) { consecutive404 = 0; continue; }
-
-                            if (pollRes.status === 200) {
-                              consecutive404 = 0;
-                              setPdfProgress(100);
-                              setPdfProgressMessage(t('downloadComplete'));
-                              const blob = await pollRes.blob();
-                              const url = window.URL.createObjectURL(blob);
-                              const a = document.createElement('a');
-                              a.href = url;
-                              a.download = `security_report_EN_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                              document.body.appendChild(a);
-                              a.click();
-                              window.URL.revokeObjectURL(url);
-                              document.body.removeChild(a);
-                              console.log('PDF EN report downloaded');
-                              break;
-                            }
-
-                            // 404 = job meta gone (e.g. Redis miss); 409 = a completed
-                            // job's file expired. Both are recoverable: start ONE fresh
-                            // job, then fall back to the bounded retry budget.
-                            if (pollRes.status === 404 || pollRes.status === 409) {
-                              if (!restarted) {
-                                restarted = true;
-                                console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                try {
-                                  const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                    method: 'POST',
-                                    headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'en' })
-                                  });
-                                  if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                } catch (e) { /* fall through to retry budget */ }
-                              }
-                              consecutive404++;
-                              console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                              if (consecutive404 < MAX_404_RETRIES) continue;
-                              throw new Error('PDF job not found after multiple retries — it may have expired');
-                            }
-
-                            consecutive404 = 0;
-                            const errorData = await pollRes.json().catch(() => ({}));
-                            if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                              alert(t('geminiKeyExhausted'));
-                              throw new Error(t('geminiKeyExhausted'));
-                            }
-                            if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                              alert(t('englishPdfOnly'));
-                              throw new Error(errorData.error || 'English-only validation failed');
-                            }
-                            throw new Error(errorData.error || 'PDF generation failed');
-                          }
-
-                          setTimeout(() => {
-                            setPdfDownloading(false);
-                            setPdfProgress(0);
-                            setPdfProgressMessage('');
-                          }, 2000);
-                        } catch (err) {
-                          console.error('PDF download failed:', err);
-                          setPdfProgressMessage(`Error: ${err.message}`);
-                          setTimeout(() => {
-                            setPdfDownloading(false);
-                            setPdfProgress(0);
-                            setPdfProgressMessage('');
-                          }, 3000);
-                        }
-                      }}
-                    >
+                    <button onClick={() => handlePdfDownload('en')}>
                       {t('englishVersion')}
                     </button>
-                    <button
-                      onClick={async () => {
-                        setPdfDropdownOpen(false);
-                        if (pdfDownloading) return; // Prevent duplicate clicks
-                        try {
-                          setPdfDownloading(true);
-                          setPdfProgress(0);
-                          setPdfProgressMessage(t('initializingJapanesePdf'));
-
-                          const token = localStorage.getItem('token');
-                          const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                            method: 'POST',
-                            headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'ja' })
-                          });
-                          if (!startRes.ok) {
-                            const e = await startRes.json().catch(() => ({}));
-                            throw new Error(e.error || 'Failed to start PDF generation');
-                          }
-                          let { jobId } = await startRes.json();
-
-                          const progressSteps = [
-                            { progress: 10, message: t('formattingScanData') },
-                            { progress: 25, message: t('waitingRateLimit') },
-                            { progress: 40, message: t('formattingAiAnalysis') },
-                            { progress: 55, message: t('waitingRateLimit') },
-                            { progress: 70, message: t('translatingToJapanese') },
-                            { progress: 85, message: t('renderingPdfDocument') },
-                            { progress: 92, message: t('finalizing') },
-                          ];
-                          let pollCount = 0;
-                          let consecutive404 = 0;
-                          let restarted = false;
-                          const MAX_404_RETRIES = 3;
-
-                          while (true) {
-                            await new Promise(r => setTimeout(r, 5000));
-                            pollCount++;
-                            if (pollCount > 120) throw new Error('PDF generation timed out');
-
-                            const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                            setPdfProgress(progressSteps[stepIdx].progress);
-                            setPdfProgressMessage(progressSteps[stepIdx].message);
-
-                            let pollRes;
-                            try {
-                              pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                headers: { 'x-auth-token': token }
-                              });
-                            } catch (networkErr) {
-                              console.warn('PDF poll network error, retrying…', networkErr.message);
-                              continue;
-                            }
-
-                            if (pollRes.status === 202) { consecutive404 = 0; continue; }
-
-                            if (pollRes.status === 200) {
-                              consecutive404 = 0;
-                              setPdfProgress(100);
-                              setPdfProgressMessage(t('downloadComplete'));
-                              const blob = await pollRes.blob();
-                              const url = window.URL.createObjectURL(blob);
-                              const a = document.createElement('a');
-                              a.href = url;
-                              a.download = `security_report_JA_${report.target.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                              document.body.appendChild(a);
-                              a.click();
-                              window.URL.revokeObjectURL(url);
-                              document.body.removeChild(a);
-                              console.log('PDF JA report downloaded');
-                              break;
-                            }
-
-                            // 404 = job meta gone (e.g. Redis miss); 409 = a completed
-                            // job's file expired. Both are recoverable: start ONE fresh
-                            // job, then fall back to the bounded retry budget.
-                            if (pollRes.status === 404 || pollRes.status === 409) {
-                              if (!restarted) {
-                                restarted = true;
-                                console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                try {
-                                  const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                    method: 'POST',
-                                    headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ analysisId: report.analysisId || report.scanId || activeScanId, lang: 'ja' })
-                                  });
-                                  if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                } catch (e) { /* fall through to retry budget */ }
-                              }
-                              consecutive404++;
-                              console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                              if (consecutive404 < MAX_404_RETRIES) continue;
-                              throw new Error('PDF job not found after multiple retries — it may have expired');
-                            }
-
-                            consecutive404 = 0;
-                            const errorData = await pollRes.json().catch(() => ({}));
-                            if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                              alert(t('geminiKeyExhausted'));
-                              throw new Error(t('geminiKeyExhausted'));
-                            }
-                            if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                              alert(t('englishPdfOnly'));
-                              throw new Error(errorData.error || 'English-only validation failed');
-                            }
-                            throw new Error(errorData.error || 'PDF generation failed');
-                          }
-
-                          setTimeout(() => {
-                            setPdfDownloading(false);
-                            setPdfProgress(0);
-                            setPdfProgressMessage('');
-                          }, 2000);
-                        } catch (err) {
-                          console.error('PDF download failed:', err);
-                          setPdfProgressMessage(`Error: ${err.message}`);
-                          setTimeout(() => {
-                            setPdfDownloading(false);
-                            setPdfProgress(0);
-                            setPdfProgressMessage('');
-                          }, 3000);
-                        }
-                      }}
-                    >
+                    <button onClick={() => handlePdfDownload('ja')}>
                       {t('japaneseVersion')}
                     </button>
                   </div>

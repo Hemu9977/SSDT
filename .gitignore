@@ -61,3 +61,9 @@ backend/uploads/
 # Local CLI binaries (should never be committed)
 stripe.exe
 *.exe
+
+# Generated customer security reports — CONFIDENTIAL, NEVER COMMIT.
+# These contain real clients' vulnerability findings, server IPs and the
+# operator's email. They are deliverables, not source.
+security_report_*.pdf
+issue/

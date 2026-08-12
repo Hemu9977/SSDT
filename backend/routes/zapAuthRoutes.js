@@ -32,6 +32,8 @@ const { startAsyncWebCheckScan, getFullResults } = require('../services/webCheck
 const { refineReport } = require('../services/geminiService');
 const User = require('../models/User');
 const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+const { lighthouseScores } = require('../utils/scoreFormat');
+const { scanLimiter } = require('../middleware/rateLimiter');
 const { sanitizeScanForLLM } = require('../services/geminiSanitizer');
 
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
@@ -205,7 +207,9 @@ router.post('/test-login', auth, async (req, res) => {
  * Body: { targetUrl, loginUrl, tempSessionId }
  * Returns: { success, scanId, message }
  */
-router.post('/scan', auth, planCheck, async (req, res) => {
+// Strict limiter is per-route: this starts a scan, while /status/:scanId below is
+// polled every few seconds by the browser and must not share the same budget.
+router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
   try {
     const { targetUrl, loginUrl, tempSessionId, triggerSource, lang } = req.body;
 
@@ -444,7 +448,12 @@ router.get('/status/:scanId', auth, async (req, res) => {
 
     // If entire scan was failed by watchdog, return immediately
     if (scan.status === 'failed') {
-      return res.json({ status: 'failed', error: 'Background scan timed out. Please try again.', target: scan.target, analysisId: scanId });
+      return res.json({
+        status: 'failed',
+        failureReason: scan.failureReason || 'internal_error',
+        target: scan.target,
+        analysisId: scanId
+      });
     }
 
     // ── STEP C: Check if auth ZAP + WebCheck are done → generate Gemini report ──
@@ -455,18 +464,33 @@ router.get('/status/:scanId', auth, async (req, res) => {
     const webCheckDone = webCheckStatus === 'completed' || webCheckStatus === 'completed_partial' ||
       webCheckStatus === 'completed_with_errors' || webCheckStatus === 'failed';
 
-    // If either auth ZAP or WebCheck failed entirely, fail the whole scan
-    if ((authZapStatus === 'failed' || webCheckStatus === 'failed') && !scan.refinedReport) {
-      const failedParts = [];
-      if (authZapStatus === 'failed') failedParts.push(`Auth ZAP: ${scan.authScanResult?.error || 'unknown error'}`);
-      if (webCheckStatus === 'failed') failedParts.push(`WebCheck: ${scan.webCheckResult?.error || 'unknown error'}`);
-      console.error(`[ZAP-AUTH] ❌ Background scan(s) failed: ${failedParts.join(', ')}. Failing entire scan.`);
+    // Only the vulnerability assessment is fatal — it is the product. Without it
+    // the report would read "No vulnerabilities detected" for a site that was
+    // never assessed. This mirrors geminiCompletionService for the normal scan
+    // flow, which CLAUDE.md requires to stay in parity.
+    //
+    // A failed WebCheck is NOT fatal: its report section renders N/A. Failing the
+    // whole scan on WebCheck also billed the customer, because a successful auth
+    // ZAP has already charged the quota by this point (zapAuthService).
+    if (authZapStatus === 'failed' && !scan.refinedReport) {
+      console.error(`[ZAP-AUTH] ❌ Vulnerability scan failed: ${scan.authScanResult?.error || 'unknown error'}. Failing entire scan.`);
       await ScanResult.updateOne(
         { analysisId: scanId },
-        { $set: { status: 'failed', updatedAt: new Date() } }
+        { $set: { status: 'failed', failureReason: 'vulnerability_scan_failed', updatedAt: new Date() } }
       );
       scan.status = 'failed';
-      return res.json({ status: 'failed', error: `Scan failed: ${failedParts.join('; ')}`, target: scan.target, analysisId: scanId });
+      // Structured reason only — the raw scanner error names the engine and is
+      // English-only, so it stays in the server log.
+      return res.json({
+        status: 'failed',
+        failureReason: 'vulnerability_scan_failed',
+        target: scan.target,
+        analysisId: scanId
+      });
+    }
+
+    if (webCheckStatus === 'failed') {
+      console.warn(`[ZAP-AUTH] WebCheck failed for ${scanId} (non-fatal): ${scan.webCheckResult?.error || 'unknown error'}`);
     }
 
     // Copy authScanResult to zapResult so existing download/history endpoints work
@@ -566,15 +590,10 @@ router.get('/status/:scanId', auth, async (req, res) => {
     }
 
     // ── STEP D: Build response with all scan data (progressive loading) ──
-    const lighthouseResult = scan.pagespeedResult?.lighthouseResult || {};
-    const categories = lighthouseResult.categories || {};
-
-    const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error ? {
-      performance: categories.performance?.score ? Math.round(categories.performance.score * 100) : null,
-      accessibility: categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : null,
-      bestPractices: categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : null,
-      seo: categories.seo?.score ? Math.round(categories.seo.score * 100) : null
-    } : null;
+    // null per category when PageSpeed didn't return it; a genuine 0 is preserved.
+    const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error
+      ? lighthouseScores(scan.pagespeedResult)
+      : null;
 
     const observatoryData = scan.observatoryResult && !scan.observatoryResult.error ? {
       grade: scan.observatoryResult.grade,

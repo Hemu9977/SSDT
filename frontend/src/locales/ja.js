@@ -485,6 +485,21 @@ export const ja = {
   failedDownloadPdfReport: 'PDFレポートのダウンロードに失敗しました: {message}',
   geminiKeyExhausted: 'AIサービスが一時的に利用できません。しばらくしてから再度お試しください。',
   englishPdfOnly: '英語PDFには英語のみを含める必要があります',
+  // PDFダウンロードの結果 — バックエンドの英語エラー文字列ではなく、構造化された
+  // フィールドから判定する。
+  pdfRateLimited: 'リクエストが多すぎます。しばらくしてから再度お試しください。',
+  pdfGenerationFailed: 'レポートを生成できませんでした。再度お試しください。',
+  pdfGenerationTimedOut: 'レポートの生成に時間がかかっています。再度お試しください。',
+  pdfJobExpired: 'このレポートは利用できなくなりました。再度生成してください。',
+  pdfScanIncomplete: 'このスキャンには利用可能なレポートがまだありません。',
+  // スキャン失敗時の状態
+  scanFailedTitle: 'スキャンを完了できませんでした',
+  scanFailedVulnerability: 'セキュリティ診断を完了できなかったため、レポートは作成されていません。このスキャンはプランの利用回数に加算されていません。再度実行してください。',
+  scanFailedGeneric: 'このスキャンは正常に完了しませんでした。プランの利用回数には加算されていません。再度実行してください。',
+  rescanNow: 'スキャンを再実行',
+  scanRateLimited: '次のスキャンを開始するまで、しばらくお待ちください。',
+  planLimitReached: 'プランの上限に達しました。プロフィールページからアップグレードしてください。',
+  organizationRequired: 'スキャンを実行するには有効なプランが必要です。',
   pdfDownloadFailed: 'PDFのダウンロードに失敗しました',
   downloadScanReports: 'スキャンレポートをダウンロード',
   downloadCompleteSecurityResults: '完全なセキュリティスキャン結果を希望の形式でダウンロードできます',

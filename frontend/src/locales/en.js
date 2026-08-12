@@ -486,6 +486,21 @@ export const en = {
   failedDownloadPdfReport: 'Failed to download PDF report: {message}',
   geminiKeyExhausted: 'AI service temporarily unavailable. Please try again later.',
   englishPdfOnly: 'English PDF must contain English only',
+  // PDF download outcomes — resolved from structured fields, never from a
+  // backend-supplied English `error` string.
+  pdfRateLimited: 'Too many requests just now. Please wait a moment and try again.',
+  pdfGenerationFailed: 'The report could not be generated. Please try again.',
+  pdfGenerationTimedOut: 'The report is taking longer than expected. Please try again.',
+  pdfJobExpired: 'This report is no longer available. Please generate it again.',
+  pdfScanIncomplete: 'This scan has no report available yet.',
+  // Scan failure states
+  scanFailedTitle: 'Scan could not be completed',
+  scanFailedVulnerability: 'The security assessment could not finish, so no report was produced. This scan was not counted against your plan — please run it again.',
+  scanFailedGeneric: 'This scan did not complete successfully. It was not counted against your plan — please run it again.',
+  rescanNow: 'Run the scan again',
+  scanRateLimited: 'Please wait a moment before starting another scan.',
+  planLimitReached: 'Your plan limit has been reached. Visit your Profile page to upgrade.',
+  organizationRequired: 'An active plan is required to run a scan.',
   pdfDownloadFailed: 'PDF download failed',
   downloadScanReports: 'Download Scan Reports',
   downloadCompleteSecurityResults: 'Download your complete security scan results in your preferred format',

@@ -7,10 +7,13 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 const { consumeScan } = require('../services/planService');
+const { scanLimiter } = require('../middleware/rateLimiter');
 
 // POST /api/webcheck/scan
 // Body: { url: "example.com", type: "ssl" }
-router.post('/scan', auth, planCheck, async (req, res) => {
+// Strict limiter is per-route: the router mount now carries the generous poll
+// limiter so browser status polling can't exhaust the scan-start budget.
+router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     const { url, type } = req.body;
 
     if (!url) {
