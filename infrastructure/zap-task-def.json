@@ -22,18 +22,12 @@
           "appProtocol": "http"
         }
       ],
+      "entryPoint": ["sh", "-c"],
       "command": [
-        "zap.sh", "-daemon",
-        "-host", "0.0.0.0",
-        "-port", "8080",
-        "-config", "api.disablekey=true",
-        "-config", "api.addrs.addr.name=.*",
-        "-config", "api.addrs.addr.regex=true",
-        "-Xmx2g"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx2g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
       "environment": [
-        { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" },
-        { "name": "JAVA_TOOL_OPTIONS",      "value": "-Xms2g" }
+        { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" }
       ],
       "healthCheck": {
         "command": ["CMD-SHELL", "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"],
