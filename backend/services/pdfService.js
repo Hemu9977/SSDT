@@ -674,7 +674,11 @@ function buildFallbackScanDataForPdf(scanResult) {
   // claims: a missing WAF probe must read "N/A", never "No".
   const wcOk = ['completed', 'completed_partial', 'completed_with_errors']
     .includes(scanResult?.webCheckResult?.status);
-  const wcYesNo = (present, yesJa, noJa) => wcOk
+  // `checked` must reflect whether THIS SPECIFIC sub-scan returned data, not just
+  // whether the overall WebCheck run was non-fatal — a run can be wcOk (partial
+  // success) while the firewall/hsts probe itself individually errored or never
+  // got a turn (both are HEAVY_SCANS, serialized behind WEBCHECK_HEAVY_SCAN_CONCURRENCY=1).
+  const wcYesNo = (checked, present, yesJa, noJa) => checked
     ? { en: present ? 'Yes' : 'No', ja: present ? yesJa : noJa }
     : { en: NOT_AVAILABLE, ja: NOT_AVAILABLE };
 
@@ -758,8 +762,8 @@ function buildFallbackScanDataForPdf(scanResult) {
         title: { en: 'Web Security Configuration', ja: 'Webセキュリティ設定' },
         items: [
           { label: { en: 'TLS Grade',    ja: 'TLS評価'      }, value: (wcOk && (wc?.tls?.tlsInfo?.grade || wc?.ssl?.grade)) || NOT_AVAILABLE, type: 'grade' },
-          { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: wcYesNo(wc?.firewall?.hasWaf, 'はい', 'いいえ'), type: !wcOk ? 'stat' : (wc?.firewall?.hasWaf ? 'success' : 'warning') },
-          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: wcYesNo(wc?.hsts?.enabled, '有効', '無効'),     type: !wcOk ? 'stat' : (wc?.hsts?.enabled ? 'success' : 'warning') },
+          { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: wcYesNo(wcOk && !!wc?.firewall && !wc.firewall.error, wc?.firewall?.hasWaf, 'はい', 'いいえ'), type: (!wcOk || !wc?.firewall || wc.firewall.error) ? 'stat' : (wc?.firewall?.hasWaf ? 'success' : 'warning') },
+          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: wcYesNo(wcOk && !!wc?.hsts && !wc.hsts.error, wc?.hsts?.enabled, '有効', '無効'),     type: (!wcOk || !wc?.hsts || wc.hsts.error) ? 'stat' : (wc?.hsts?.enabled ? 'success' : 'warning') },
           { label: { en: 'Technologies', ja: 'テクノロジー' }, value: (wcOk && Array.isArray(wc?.['tech-stack']?.technologies)) ? wc['tech-stack'].technologies.slice(0, 5).map(t => t.name || t).join(', ') : NOT_AVAILABLE, type: 'stat' }
         ]
       }

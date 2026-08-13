@@ -19,6 +19,10 @@ const { finalizeSuccessfulScan } = require('./planService');
 const ZAP_AUTH_URL = process.env.ZAP_AUTH_API_URL || 'http://127.0.0.1:8081';
 const ZAP_AUTH_API_KEY = process.env.ZAP_AUTH_API_KEY; // Optional when ZAP runs with api.disablekey=true
 
+// Mirrors AJAX_SPIDER_BROWSERS in zapService.js — headless Firefox processes count
+// against the ZAP container's memory limit, not the JVM heap.
+const AJAX_SPIDER_BROWSERS = Number(process.env.ZAP_AJAX_BROWSERS) || 1;
+
 const httpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 30000,
@@ -607,7 +611,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         params: { Integer: 5 }
       });
       await zapAuthApi.get('/JSON/ajaxSpider/action/setOptionNumberOfBrowsers/', {
-        params: { Integer: 3 }
+        params: { Integer: AJAX_SPIDER_BROWSERS }
       });
     } catch (_) {
       // Continue with defaults

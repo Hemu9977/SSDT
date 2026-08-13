@@ -405,8 +405,10 @@ async function refineReport(_unused, psiReport, observatoryReport, url, zapRepor
   const webCheckTls       = webCheckReport?.tls            || webCheckReport?.ssl || {};
   const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
   const webCheckFirewall  = webCheckReport?.firewall       || {};
+  const webCheckFirewallChecked = !!webCheckReport?.firewall && !webCheckReport.firewall.error;
   const webCheckDns       = webCheckReport?.dns            || {};
   const webCheckHsts      = webCheckReport?.hsts           || {};
+  const webCheckHstsChecked = !!webCheckReport?.hsts && !webCheckReport.hsts.error;
   const webCheckSecurityTxt= webCheckReport?.['security-txt'] || {};
   const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
   const webCheckCookies   = webCheckReport?.cookies        || {};
@@ -454,8 +456,8 @@ ${hasWebCheckData ? `Web Security Configuration Report:
 - Security Headers: ${JSON.stringify(webCheckHeaders?.headers || webCheckHeaders || 'N/A')}
 - TLS/SSL Configuration: ${webCheckTls?.grade || webCheckTls?.valid ? `Grade: ${webCheckTls.grade || 'Valid'}, Protocol: ${webCheckTls.protocol || 'N/A'}, Cipher: ${webCheckTls.cipher || 'N/A'}` : 'N/A'}
 - Technology Stack: ${Array.isArray(webCheckTechStack?.technologies) ? webCheckTechStack.technologies.map(t => t.name || t).join(', ') : 'N/A'}
-- Firewall/WAF Detection: ${webCheckFirewall?.hasWaf ? `Detected: ${webCheckFirewall.waf || 'Yes'}` : 'No WAF detected'}
-- HSTS Status: ${webCheckHsts?.enabled ? `Enabled (max-age: ${webCheckHsts.maxAge || 'N/A'})` : 'Not enabled'}
+- Firewall/WAF Detection: ${webCheckFirewallChecked ? (webCheckFirewall?.hasWaf ? `Detected: ${webCheckFirewall.waf || 'Yes'}` : 'No WAF detected') : 'Not checked (probe unavailable this scan)'}
+- HSTS Status: ${webCheckHstsChecked ? (webCheckHsts?.enabled ? `Enabled (max-age: ${webCheckHsts.maxAge || 'N/A'})` : 'Not enabled') : 'Not checked (probe unavailable this scan)'}
 - DNS Configuration: ${webCheckDns?.a ? `A Records: ${webCheckDns.a.join(', ')}` : 'N/A'}
 - Security.txt: ${webCheckSecurityTxt?.present ? 'Present' : 'Not found'}
 - Robots.txt: ${webCheckRobotsTxt?.present ? 'Present' : 'Not found'}
@@ -618,9 +620,15 @@ async function formatScanDataForPdf(scanResult, options = {}) {
   // finding that was never measured.
   const wcOk = ['completed', 'completed_partial', 'completed_with_errors']
     .includes(scanResult.webCheckResult?.status);
-  const wcYesNo = (present) => wcOk ? (present ? 'Yes' : 'No') : 'N/A';
+  // A field's own sub-scan can fail even when the overall run is wcOk (partial
+  // success) — firewall/hsts are HEAVY_SCANS serialized behind concurrency=1 and
+  // frequently miss their turn. Gate each field on its own presence, not just wcOk,
+  // so a missing probe reads "N/A" instead of a false negative "No".
+  const wcYesNo = (checked, present) => checked ? (present ? 'Yes' : 'No') : 'N/A';
   const wcTlsGrade = (wcOk && (webCheck.tls?.tlsInfo?.grade || webCheck.ssl?.grade)) || 'N/A';
-  const wcWaf = wcOk
+  const wcFirewallChecked = wcOk && !!webCheck.firewall && !webCheck.firewall.error;
+  const wcHstsChecked     = wcOk && !!webCheck.hsts && !webCheck.hsts.error;
+  const wcWaf = wcFirewallChecked
     ? (webCheck.firewall?.hasWaf ? `Yes (${webCheck.firewall.waf})` : 'No')
     : 'N/A';
   const wcTech = (wcOk && webCheck['tech-stack']?.technologies?.slice(0, 5).map(t => t.name || t).join(', ')) || 'N/A';
@@ -665,7 +673,7 @@ URLSCAN.IO ANALYSIS:
 WEBCHECK ANALYSIS:
 - TLS Grade: ${wcTlsGrade}
 - WAF Detected: ${wcWaf}
-- HSTS Enabled: ${wcYesNo(webCheck.hsts?.enabled)}
+- HSTS Enabled: ${wcYesNo(wcHstsChecked, webCheck.hsts?.enabled)}
 - Technologies: ${wcTech}
 `;
 
@@ -764,8 +772,8 @@ Return a JSON object with this EXACT structure:
       "title": { "en": "Web Security Configuration", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "TLS Grade", "ja": "Japanese" }, "value": "${wcTlsGrade}", "type": "grade" },
-        { "label": { "en": "WAF Detected", "ja": "Japanese" }, "value": { "en": "${wcYesNo(webCheck.firewall?.hasWaf)}", "ja": "Japanese" }, "type": "${!wcOk ? 'stat' : (webCheck.firewall?.hasWaf ? 'success' : 'warning')}" },
-        { "label": { "en": "HSTS Enabled", "ja": "Japanese" }, "value": { "en": "${wcYesNo(webCheck.hsts?.enabled)}", "ja": "Japanese" }, "type": "${!wcOk ? 'stat' : (webCheck.hsts?.enabled ? 'success' : 'warning')}" },
+        { "label": { "en": "WAF Detected", "ja": "Japanese" }, "value": { "en": "${wcYesNo(wcFirewallChecked, webCheck.firewall?.hasWaf)}", "ja": "Japanese" }, "type": "${!wcFirewallChecked ? 'stat' : (webCheck.firewall?.hasWaf ? 'success' : 'warning')}" },
+        { "label": { "en": "HSTS Enabled", "ja": "Japanese" }, "value": { "en": "${wcYesNo(wcHstsChecked, webCheck.hsts?.enabled)}", "ja": "Japanese" }, "type": "${!wcHstsChecked ? 'stat' : (webCheck.hsts?.enabled ? 'success' : 'warning')}" },
         { "label": { "en": "Technologies", "ja": "Japanese" }, "value": "${wcTech}", "type": "stat" }
       ]
     }

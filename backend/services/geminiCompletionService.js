@@ -141,8 +141,13 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
 
   const wc      = webCheckReport || {};
   const tlsGrade= wc.tls?.tlsInfo?.grade || wc.ssl?.grade || 'N/A';
-  const hasWaf  = wc.firewall?.hasWaf    || false;
-  const hstsOn  = wc.hsts?.enabled      || false;
+  // A missing/errored probe (firewall, hsts are HEAVY_SCANS, easily starved by
+  // concurrency=1) is not the same claim as "checked, not present" — track each
+  // separately so the report never states a negative finding it never measured.
+  const firewallChecked = !!wc.firewall && !wc.firewall.error;
+  const hstsChecked      = !!wc.hsts     && !wc.hsts.error;
+  const hasWaf  = firewallChecked && !!wc.firewall.hasWaf;
+  const hstsOn  = hstsChecked && !!wc.hsts.enabled;
   const techs   = (wc['tech-stack']?.technologies || []).slice(0, 6).map(t => t.name || t).filter(Boolean);
 
   const lines = [];
@@ -167,8 +172,8 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   lines.push(`- Security Grade: ${obsGrade} (Score: ${obsScore}/100)`);
   lines.push(`- Tests Passed: ${obsPassed} / Tests Failed: ${obsFailed}`);
   if (tlsGrade !== 'N/A') lines.push(`- TLS/SSL Grade: ${tlsGrade}`);
-  lines.push(`- HSTS Enabled: ${hstsOn ? 'Yes' : 'No'}`);
-  lines.push(`- WAF Detected: ${hasWaf ? 'Yes' : 'No'}`);
+  lines.push(`- HSTS Enabled: ${hstsChecked ? (hstsOn ? 'Yes' : 'No') : 'N/A (not checked this scan)'}`);
+  lines.push(`- WAF Detected: ${firewallChecked ? (hasWaf ? 'Yes' : 'No') : 'N/A (not checked this scan)'}`);
   if (techs.length) lines.push(`- Technology Stack: ${techs.join(', ')}`);
   lines.push('');
 
@@ -201,8 +206,8 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   if (isMalicious)        lines.push('- URGENT: Site flagged as malicious. Investigate and remediate immediately.');
   if (zapRisk.High > 0)   lines.push('- Remediate all High risk vulnerabilities identified in the vulnerability scan.');
   if (zapRisk.Medium > 0) lines.push('- Review and address Medium risk vulnerabilities.');
-  if (!hstsOn)            lines.push('- Enable HSTS (HTTP Strict Transport Security) to enforce secure connections.');
-  if (!hasWaf)            lines.push('- Consider deploying a Web Application Firewall (WAF) for additional protection.');
+  if (hstsChecked && !hstsOn)     lines.push('- Enable HSTS (HTTP Strict Transport Security) to enforce secure connections.');
+  if (firewallChecked && !hasWaf) lines.push('- Consider deploying a Web Application Firewall (WAF) for additional protection.');
   if (obsFailed > 0)      lines.push(`- Resolve ${obsFailed} failed security header test(s) to improve your security grade.`);
   // `null < 80` is true in JS (null coerces to 0) — guard so an unmeasured score
   // never produces a recommendation about a number we don't have.
