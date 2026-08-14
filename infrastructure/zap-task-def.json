@@ -3,7 +3,7 @@
   "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
   "cpu": "1024",
-  "memory": "4096",
+  "memory": "7168",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
@@ -11,8 +11,8 @@
       "image": "ghcr.io/zaproxy/zaproxy:stable",
       "essential": true,
       "cpu": 1024,
-      "memory": 4096,
-      "memoryReservation": 4096,
+      "memory": 7168,
+      "memoryReservation": 7168,
       "portMappings": [
         {
           "containerPort": 8080,
@@ -24,7 +24,7 @@
       ],
       "entryPoint": ["sh", "-c"],
       "command": [
-        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx2g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx5g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
       "environment": [
         { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" }

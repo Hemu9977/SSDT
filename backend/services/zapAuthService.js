@@ -480,6 +480,19 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
   };
 
   try {
+    // Clear state left by a previous scan on this ZAP instance — see the matching
+    // reset in zapService.js. Must run before configureAuthContext below, since
+    // newSession discards contexts (including the auth context it creates).
+    try {
+      await zapAuthApi.get('/JSON/core/action/newSession/', {
+        params: { name: `authscan-${scanId}`, overwrite: 'true' },
+        timeout: 60000
+      });
+      console.log(`[ZAP-AUTH] Session reset for scan ${scanId}`);
+    } catch (sessionErr) {
+      console.warn(`[ZAP-AUTH] Session reset failed (continuing): ${sessionErr.message}`);
+    }
+
     // Phase 1: Configure authentication
     await updateProgress('configuring', 5, { status: 'running', message: 'Configuring authentication...' });
 

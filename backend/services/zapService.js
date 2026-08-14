@@ -731,6 +731,19 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
       }
     };
 
+    // Clear any state left behind by a previous scan on this ZAP instance — see the
+    // matching reset in runAsyncZapScanBackground. Must precede context/exclusion
+    // setup, since newSession discards contexts.
+    try {
+      await zapApi.get('/JSON/core/action/newSession/', {
+        params: { name: `scan-${scanId}`, overwrite: 'true' },
+        timeout: 60000
+      });
+      console.log(`[ZAP] Session reset for scan ${scanId}`);
+    } catch (sessionErr) {
+      console.warn(`[ZAP] Session reset failed (continuing): ${sessionErr.message}`);
+    }
+
     // Phase 1: Configure file exclusions BEFORE scanning
     await updateProgress('configuring', 3);
     console.log('⚙️ Configuring file type exclusions...');
@@ -1675,6 +1688,23 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
       }
     };
 
+    // ZAP is a single long-lived shared instance and never releases scan state on its
+    // own: after one large scan its memory stayed pinned at 87% of the container for
+    // 29 hours while idle, so the next scan began with ~500 MB of headroom and
+    // saturated almost immediately. Reset the session at scan START rather than on
+    // completion, so this stays correct even when the previous scan crashed, timed out
+    // or was force-stopped. Must run before the context/exclusion setup below —
+    // newSession discards contexts. Non-fatal: a failed reset should degrade, not abort.
+    try {
+      await zapApi.get('/JSON/core/action/newSession/', {
+        params: { name: `scan-${scanId}`, overwrite: 'true' },
+        timeout: 60000
+      });
+      console.log(`[ZAP] Session reset for scan ${scanId}`);
+    } catch (sessionErr) {
+      console.warn(`[ZAP] Session reset failed (continuing): ${sessionErr.message}`);
+    }
+
     // Phase 1: Configure file exclusions
     await updateProgress('configuring', 3, { message: 'Configuring file exclusions...' });
     console.log('⚙️ [BACKGROUND] Configuring file type exclusions...');
@@ -2567,27 +2597,46 @@ async function stopZapScan(scanId, userId) {
  * @returns {Promise<Object>} Result of restart operation
  */
 async function restartZapContainer() {
-  const { exec } = require('child_process');
-  const util = require('util');
-  const execPromise = util.promisify(exec);
-
   const containerName = 'zap-scanner';
 
+  // ZAP runs as an ECS service, not a local Docker container — `docker restart` is not
+  // available inside the backend task and previously failed every time with
+  // "Command failed: docker restart zap-scanner", leaving a wedged ZAP unrecovered.
+  // Stop the task through the ECS API instead and let the service replace it.
+  const cluster = process.env.ECS_CLUSTER_NAME || 'fortexa-cluster';
+  const serviceName = process.env.ECS_ZAP_SERVICE || 'zap-scan-ec2';
+
   try {
-    console.log(`🔄 Restarting Docker container: ${containerName}`);
+    console.log(`🔄 Restarting ZAP via ECS: cluster=${cluster} service=${serviceName}`);
 
-    // Restart the ZAP container
-    await execPromise(`docker restart ${containerName}`);
-    console.log(`✅ Docker container ${containerName} restart initiated`);
+    const { ECSClient, ListTasksCommand, StopTaskCommand } = require('@aws-sdk/client-ecs');
+    const ecs = new ECSClient({ region: process.env.AWS_REGION || 'ap-northeast-1' });
 
-    // Wait for container to be healthy (max 90 seconds)
-    console.log('⏳ Waiting for ZAP container to be ready...');
+    const { taskArns } = await ecs.send(new ListTasksCommand({ cluster, serviceName }));
+
+    if (!taskArns || taskArns.length === 0) {
+      console.warn(`⚠️ No running tasks found for service ${serviceName}`);
+    }
+
+    for (const taskArn of taskArns || []) {
+      await ecs.send(new StopTaskCommand({
+        cluster,
+        task: taskArn,
+        reason: 'ZAP restart requested after scan stop'
+      }));
+      console.log(`🛑 Stopped ECS task: ${taskArn}`);
+    }
+
+    // ECS replaces the stopped task automatically. Poll until the replacement answers.
+    // Allow longer than the old Docker path: an ECS task must be scheduled, placed and
+    // pull/start before ZAP's own ~60s startup.
+    console.log('⏳ Waiting for replacement ZAP task to become ready...');
     let healthy = false;
     let attempts = 0;
-    const maxAttempts = 30; // 30 attempts * 3 seconds = 90 seconds max
+    const maxAttempts = 60; // 60 attempts * 5 seconds = 300 seconds max
 
     while (!healthy && attempts < maxAttempts) {
-      await sleep(3000); // Wait 3 seconds between checks
+      await sleep(5000); // Wait 5 seconds between checks
       attempts++;
 
       try {
@@ -2598,7 +2647,7 @@ async function restartZapContainer() {
 
         if (healthCheck.data && healthCheck.data.version) {
           healthy = true;
-          console.log(`✅ ZAP container is healthy (v${healthCheck.data.version}) after ${attempts * 3} seconds`);
+          console.log(`✅ ZAP is healthy (v${healthCheck.data.version}) after ${attempts * 5} seconds`);
         }
       } catch (healthError) {
         console.log(`⏳ Waiting for ZAP... (attempt ${attempts}/${maxAttempts})`);

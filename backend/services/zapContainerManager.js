@@ -9,7 +9,12 @@
 
 const axios = require('axios');
 
-const IS_AWS = !!(process.env.ECS_CLUSTER_NAME);
+// Gated on an explicit opt-in rather than on ECS_CLUSTER_NAME. That variable is also
+// read by restartZapContainer() in zapService.js, and keying off it there would silently
+// activate the per-scan container path below — which still targets Fargate, the container
+// name 'zap' and the family 'ssdt-zap-task', none of which match the live EC2 setup.
+// Leave this false until that drift is fixed and per-scan routing is wired up.
+const IS_AWS = process.env.ZAP_EPHEMERAL_CONTAINERS === 'true';
 
 // Eagerly load SDK only when running in AWS — avoids ~10MB parse cost in local dev
 // and eliminates repeated require() calls inside hot-path functions.
