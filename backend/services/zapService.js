@@ -77,12 +77,20 @@ async function zapApiWithRetry(apiCall, maxRetries = 3, baseDelay = 1000, operat
       return await apiCall();
     } catch (error) {
       lastError = error;
+      // A 504 from the Service Connect proxy — ZAP not answering inside the client's
+      // 120s timeout — arrives as an HTTP response rather than a socket error, so it
+      // matched none of the conditions below and gave up on the first try. That is why
+      // production logged "Alerts retrieval failed after 1 attempt(s): Request failed
+      // with status code 504" even though this is called with maxRetries=5.
+      const status = error.response?.status;
       const isRetryable = error.code === 'ECONNRESET' ||
                           error.code === 'ETIMEDOUT' ||
                           error.code === 'ENOTFOUND' ||
                           error.message?.includes('socket hang up') ||
                           error.message?.includes('ECONNREFUSED') ||
-                          error.message?.includes('timeout');
+                          error.message?.includes('timeout') ||
+                          status === 429 ||
+                          (status >= 500 && status <= 599);
 
       if (!isRetryable || attempt === maxRetries) {
         console.error(`❌ ${operationName} failed after ${attempt} attempt(s): ${error.message}`);
@@ -96,6 +104,42 @@ async function zapApiWithRetry(apiCall, maxRetries = 3, baseDelay = 1000, operat
   }
 
   throw lastError;
+}
+
+/**
+ * Retrieve a scan's alerts in pages.
+ *
+ * Asking for the whole result set in one call (count=10000) makes ZAP serialise every
+ * alert — each carrying its full request/response evidence — into a single response.
+ * On large targets that took longer to build than the client's 120s timeout, and the
+ * Service Connect proxy returned 504, failing the scan at the very last step after an
+ * hour of successful scanning. Paging keeps each response small enough to return well
+ * inside the timeout.
+ *
+ * @param {object} client     - axios client for the ZAP instance running this scan
+ * @param {string} targetUrl  - baseurl filter
+ * @param {number} pageSize   - alerts per request
+ * @param {number} maxAlerts  - hard ceiling, matches the previous single-call limit
+ */
+async function fetchAlertsPaged(client, targetUrl, pageSize = 500, maxAlerts = 10000) {
+  const collected = [];
+
+  for (let start = 0; start < maxAlerts; start += pageSize) {
+    const response = await zapApiWithRetry(
+      () => client.get('/JSON/core/view/alerts/', {
+        params: { baseurl: targetUrl, start, count: pageSize }
+      }),
+      5, 3000, `Alerts retrieval (offset ${start})`
+    );
+
+    const page = response.data.alerts || [];
+    collected.push(...page);
+
+    // Short page means we've reached the end of the result set.
+    if (page.length < pageSize) break;
+  }
+
+  return collected;
 }
 
 // ============================================================================
@@ -470,15 +514,8 @@ async function runZapScanWithUrlTracking(options) {
     // Step 3: Retrieve alerts with URL details
     console.log('📊 Retrieving alerts...');
 
-    const alertsResponse = await zapApi.get('/JSON/core/view/alerts/', {
-      params: {
-        baseurl: target,
-        start: 0,
-        count: 10000 // Get all alerts
-      }
-    });
-
-    const rawAlerts = alertsResponse.data.alerts || [];
+    // Paged + retried — see fetchAlertsPaged for why a single count=10000 call 504s.
+    const rawAlerts = await fetchAlertsPaged(zapApi, target);
     console.log(`📊 Retrieved ${rawAlerts.length} raw alerts`);
 
     // Step 4: Generate HTML report (for GridFS storage)
@@ -1271,15 +1308,8 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     await updateProgress('processing', 92, { message: 'Collecting vulnerability data...' });
     console.log('📊 Retrieving alerts...');
 
-    const alertsResponse = await zapApi.get('/JSON/core/view/alerts/', {
-      params: {
-        baseurl: targetUrl,
-        start: 0,
-        count: 10000
-      }
-    });
-
-    const rawAlerts = alertsResponse.data.alerts || [];
+    // Paged + retried — see fetchAlertsPaged for why a single count=10000 call 504s.
+    const rawAlerts = await fetchAlertsPaged(zapApi, targetUrl);
     console.log(`📊 Retrieved ${rawAlerts.length} raw alerts`);
 
     // Generate HTML report
@@ -2256,14 +2286,9 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     let rawAlerts = [];
     let htmlReportResponse = null;
 
-    // Alert retrieval uses 5 retries — if still failing, throw so BullMQ retries the job.
-    const alertsResponse = await zapApiWithRetry(
-      () => zapApi.get('/JSON/core/view/alerts/', {
-        params: { baseurl: targetUrl, start: 0, count: 10000 }
-      }),
-      5, 3000, 'Alerts retrieval'
-    );
-    rawAlerts = alertsResponse.data.alerts || [];
+    // Paged so a large result set can't blow past the client timeout; each page still
+    // gets 5 retries, and a final failure throws so BullMQ retries the job.
+    rawAlerts = await fetchAlertsPaged(zapApi, targetUrl);
     console.log(`📊 [BACKGROUND] Retrieved ${rawAlerts.length} raw alerts`);
 
     // HTML report is a bonus artifact — non-fatal if ZAP can't generate it.

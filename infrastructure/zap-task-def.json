@@ -1,18 +1,20 @@
 {
   "family": "zap-scanner-task",
-  "requiresCompatibilities": ["EC2"],
+  "requiresCompatibilities": [
+    "EC2"
+  ],
   "networkMode": "awsvpc",
-  "cpu": "1024",
-  "memory": "7168",
+  "cpu": "2048",
+  "memory": "8192",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "zap-scanner",
       "image": "ghcr.io/zaproxy/zaproxy:stable",
       "essential": true,
-      "cpu": 1024,
-      "memory": 7168,
-      "memoryReservation": 7168,
+      "cpu": 2048,
+      "memory": 8192,
+      "memoryReservation": 8192,
       "portMappings": [
         {
           "containerPort": 8080,
@@ -22,15 +24,24 @@
           "appProtocol": "http"
         }
       ],
-      "entryPoint": ["sh", "-c"],
+      "entryPoint": [
+        "sh",
+        "-c"
+      ],
       "command": [
-        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx5g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx6g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
       "environment": [
-        { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" }
+        {
+          "name": "ZAP_WORKER_CONCURRENCY",
+          "value": "1"
+        }
       ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"],
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"
+        ],
         "interval": 30,
         "timeout": 5,
         "retries": 5,
