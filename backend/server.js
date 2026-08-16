@@ -11,7 +11,8 @@ const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const connectDB = require('./db');
-const { apiLimiter, authLimiter, scanLimiter } = require('./middleware/rateLimiter');
+const { apiLimiter, authLimiter, pollLimiter } = require('./middleware/rateLimiter');
+const { identifyUser } = require('./middleware/auth');
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
 const {
@@ -49,7 +50,21 @@ app.use(helmet({
   // helmet's default "same-origin" blocks it → use allow-popups variant.
   crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
 }));
-app.set('trust proxy', 1);
+// Hop count from the app back out to the client, so req.ip resolves to the real
+// viewer rather than a proxy.
+//
+// Verified 2026-08-12: api.fortexa.aevus.jp is a CNAME straight to
+// fortexa-alb-…elb.amazonaws.com, and responses carry no CloudFront headers — so
+// the API path is ALB -> ECS, exactly ONE trusted hop. (The frontend is behind
+// CloudFront; the API is not. infrastructure/api-cloudfront-response-headers.json
+// describes a distribution that is not in the live DNS path.)
+//
+// This value must match the real topology. Too LOW and req.ip is a proxy address,
+// so every user shares one rate-limit bucket. Too HIGH and Express trusts one more
+// X-Forwarded-For entry than exists — which the client controls, letting anyone
+// forge their own rate-limit key. Raise it to 2 only if a CDN is put in front.
+const TRUSTED_PROXY_HOPS = Number.parseInt(process.env.TRUSTED_PROXY_HOPS, 10);
+app.set('trust proxy', Number.isFinite(TRUSTED_PROXY_HOPS) ? TRUSTED_PROXY_HOPS : 1);
 
 // Comma-separated list in FRONTEND_URL supports multiple production domains,
 // e.g. "https://fortexa.aevus.jp"
@@ -108,44 +123,71 @@ app.use(express.json({ extended: false, limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - IP: ${req.ip}`);
+  // req.ips shows the full resolved X-Forwarded-For chain — use it to confirm the
+  // 'trust proxy' hop count is right for the deployed topology.
+  const chain = req.ips?.length ? ` chain: ${req.ips.join(' -> ')}` : '';
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - IP: ${req.ip}${chain}`);
   next();
 });
 
+// Everything under /api is per-user data behind a bearer token — scan results,
+// PDF reports, profile and billing. A shared cache in front of the origin
+// (CloudFront, a corporate proxy) that keys on the URL alone would hand one
+// customer's report to another, so mark the whole API uncacheable and vary on the
+// auth headers. Static assets are served separately and are unaffected.
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, private');
+  // res.vary() APPENDS. setHeader() would clobber the `Vary: Origin` that the
+  // cors middleware adds, and this API reflects the request Origin — losing it
+  // lets a shared cache pair a response with the wrong Access-Control-Allow-Origin.
+  res.vary('x-auth-token');
+  res.vary('Authorization');
+  next();
+});
+
+// `identifyUser` must run BEFORE every limiter so keyGenerator sees the caller's
+// user id. It never rejects — the per-route `auth` still enforces access.
+//
+// The scan routers carry browser-driven status polling (PDF job status, scan
+// progress), so they get the generous per-user `pollLimiter` as their umbrella.
+// The strict `scanLimiter` is applied per-route to the endpoints that actually
+// START work — see each router. Previously the strict limiter covered the whole
+// router, so ordinary polling exhausted it and downloads began failing.
 app.use('/auth', authLimiter, require('./routes/auth'));
-app.use('/api/scan', apiLimiter, scanLimiter, require('./routes/virustotalRoutes'));
-app.use('/api/pagespeed', apiLimiter, require('./routes/pageSpeedRoutes'));
+app.use('/api/scan', identifyUser, pollLimiter, require('./routes/virustotalRoutes'));
+app.use('/api/pagespeed', identifyUser, apiLimiter, require('./routes/pageSpeedRoutes'));
 
 // 👇 REGISTER PROFILE ROUTE
-app.use('/api/profile', apiLimiter, require('./routes/profile'));
+app.use('/api/profile', identifyUser, apiLimiter, require('./routes/profile'));
 
 // 👇 REGISTER STRIPE ROUTES (authenticated plan/checkout endpoints)
 if (process.env.STRIPE_SECRET_KEY) {
-  app.use('/api/stripe', apiLimiter, require('./routes/stripeRoutes'));
+  app.use('/api/stripe', identifyUser, apiLimiter, require('./routes/stripeRoutes'));
   console.log('✅ Stripe API routes mounted at /api/stripe');
 }
 
 // 👇 REGISTER ZAP ROUTE
-app.use('/api/zap', apiLimiter, scanLimiter, zapRoutes);
+app.use('/api/zap', identifyUser, pollLimiter, zapRoutes);
 
 // 👇 REGISTER ZAP AUTH ROUTES (Authenticated scanning on port 8081)
-app.use('/api/zap-auth', apiLimiter, scanLimiter, zapAuthRoutes);
+app.use('/api/zap-auth', identifyUser, pollLimiter, zapAuthRoutes);
 
 // 👇 REGISTER WEBCHECK ROUTES
-app.use('/api/webcheck', apiLimiter, scanLimiter, webCheckRoutes);
+app.use('/api/webcheck', identifyUser, pollLimiter, webCheckRoutes);
 
 // 👇 REGISTER TRANSLATE ROUTES (Gemini-powered translation)
-app.use('/api/translate', apiLimiter, require('./routes/translateRoutes'));
+app.use('/api/translate', identifyUser, apiLimiter, require('./routes/translateRoutes'));
 
 // 👇 REGISTER URLSCAN ROUTES
-app.use('/api/urlscan', apiLimiter, require('./routes/urlscanRoutes'));
+app.use('/api/urlscan', identifyUser, apiLimiter, require('./routes/urlscanRoutes'));
 
 // 👇 REGISTER ORGANIZATION ROUTES
-app.use('/api/org', apiLimiter, require('./routes/orgRoutes'));
+app.use('/api/org', identifyUser, apiLimiter, require('./routes/orgRoutes'));
 
 // 👇 REGISTER SCHEDULE + NOTIFICATION ROUTES
-app.use('/api/schedules', apiLimiter, require('./routes/scheduleRoutes'));
-app.use('/api/notifications', apiLimiter, require('./routes/notificationRoutes'));
+app.use('/api/schedules', identifyUser, apiLimiter, require('./routes/scheduleRoutes'));
+// Notifications are polled by the browser as a WebSocket fallback.
+app.use('/api/notifications', identifyUser, pollLimiter, require('./routes/notificationRoutes'));
 
 // 👇 REGISTER GLOBAL ADMIN ROUTES
 app.use('/api/admin', apiLimiter, require('./routes/admin'));

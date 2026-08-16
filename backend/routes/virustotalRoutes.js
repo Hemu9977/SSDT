@@ -10,8 +10,9 @@ const User = require('../models/User');
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
-const { combinedScanLimiter } = require('../middleware/rateLimiter');
+const { combinedScanLimiter, scanLimiter } = require('../middleware/rateLimiter');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
+const { lighthouseScores } = require('../utils/scoreFormat');
 const { addScanJob } = require('../queues/scanQueue');
 const { getPublisher, executeWithRetry } = require('../config/redis');
 const { PDF_BUCKET, resolvePdfJobResponse, shouldReuseJob } = require('../services/pdfJobStore');
@@ -139,6 +140,8 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       analysisId: scan.analysisId,
       target: scan.target,
       status: scan.status,
+      // Structured reason so the UI can localize it; never send the raw scanner error.
+      failureReason: scan.failureReason || null,
       createdAt: scan.createdAt,
       updatedAt: scan.updatedAt
     };
@@ -267,24 +270,38 @@ router.get('/active-scan', auth, async (req, res) => {
   try {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    // First, check for in-progress scans (highest priority)
-    let activeScan = await ScanResult.findOne({
-      userId: req.user.id,
-      status: { $in: ['queued', 'pending', 'combining'] },
-      // If a stop was requested, don't ever resume it as an "active" scan.
-      // This protects against partial updates where overall status wasn't flipped to 'stopped'.
-      'zapResult.status': { $nin: ['stopped', 'cancelled'] },
-      'webCheckResult.status': { $nin: ['stopped', 'cancelled'] },
-      createdAt: { $gte: twentyFourHoursAgo }
-    }).sort({ createdAt: -1 });
+    // The client passes the scan it was actually watching (persisted in
+    // localStorage). Resolve that one directly — this endpoint otherwise answers
+    // for the USER, and returning "some other recent scan" silently replaced
+    // whatever the user had on screen.
+    const requestedScanId = typeof req.query.scanId === 'string' ? req.query.scanId : null;
+    let activeScan = requestedScanId
+      ? await ScanResult.findOne({ analysisId: requestedScanId, userId: req.user.id })
+      : null;
 
-    // If no in-progress scan, check for recently completed scan (within last hour)
-    // This handles the case where scan completed while user was away
+    // First, check for in-progress scans (highest priority)
+    if (!activeScan) {
+      activeScan = await ScanResult.findOne({
+        userId: req.user.id,
+        status: { $in: ['queued', 'pending', 'combining'] },
+        // If a stop was requested, don't ever resume it as an "active" scan.
+        // This protects against partial updates where overall status wasn't flipped to 'stopped'.
+        'zapResult.status': { $nin: ['stopped', 'cancelled'] },
+        'webCheckResult.status': { $nin: ['stopped', 'cancelled'] },
+        createdAt: { $gte: twentyFourHoursAgo }
+      }).sort({ createdAt: -1 });
+    }
+
+    // If no in-progress scan, check for a recently completed one (within the last
+    // hour) so a scan that finished while the user was away is still shown.
+    // Only manual scans qualify: a scheduled run happens without the user
+    // watching, so surfacing it would hijack the page they are actually on.
     if (!activeScan) {
       const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
       activeScan = await ScanResult.findOne({
         userId: req.user.id,
         status: 'completed',
+        triggerSource: { $ne: 'scheduled' },
         updatedAt: { $gte: oneHourAgo } // Completed within last hour
       }).sort({ updatedAt: -1 });
 
@@ -302,16 +319,12 @@ router.get('/active-scan', auth, async (req, res) => {
       });
     }
 
-    // Extract key metrics for the response (same as combined-analysis)
-    const lighthouseResult = activeScan.pagespeedResult?.lighthouseResult || {};
-    const categories = lighthouseResult.categories || {};
-
-    const psiScores = activeScan.pagespeedResult && !activeScan.pagespeedResult.error ? {
-      performance: categories.performance?.score ? Math.round(categories.performance.score * 100) : null,
-      accessibility: categories.accessibility?.score ? Math.round(categories.accessibility.score * 100) : null,
-      bestPractices: categories['best-practices']?.score ? Math.round(categories['best-practices'].score * 100) : null,
-      seo: categories.seo?.score ? Math.round(categories.seo.score * 100) : null
-    } : null;
+    // Extract key metrics for the response (same as combined-analysis).
+    // lighthouseScores() returns null per category when PageSpeed didn't return it,
+    // while preserving a genuine score of 0.
+    const psiScores = activeScan.pagespeedResult && !activeScan.pagespeedResult.error
+      ? lighthouseScores(activeScan.pagespeedResult)
+      : null;
 
     const observatoryData = activeScan.observatoryResult && !activeScan.observatoryResult.error ? {
       grade: activeScan.observatoryResult.grade,
@@ -436,6 +449,7 @@ router.get('/active-scan', auth, async (req, res) => {
       analysisId: activeScan.analysisId,
       target: activeScan.target,
       status: activeScan.status,
+      failureReason: activeScan.failureReason || null,
       // Progress indicators
       hasPsiResult: !!activeScan.pagespeedResult,
       hasObservatoryResult: !!activeScan.observatoryResult,
@@ -473,7 +487,10 @@ router.get('/active-scan', auth, async (req, res) => {
 
 // 5️⃣ Combined URL Scan — creates DB record, enqueues BullMQ job, returns immediately
 // Auth → Plan enforcement → Rate limiting → Handler
-router.post('/combined-url-scan', auth, planCheck, combinedScanLimiter, async (req, res) => {
+// scanLimiter/combinedScanLimiter are applied HERE rather than on the router
+// mount: this endpoint starts real work, whereas the router's read-only status
+// endpoints are polled on a timer and must not consume the same budget.
+router.post('/combined-url-scan', auth, planCheck, scanLimiter, combinedScanLimiter, async (req, res) => {
   try {
     const { url } = req.body;
 
@@ -585,14 +602,9 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     }
 
     // ── Build response (same shape as before so frontend code is unchanged) ──
-    const lighthouseResult = scan.pagespeedResult?.lighthouseResult || {};
-    const categories = lighthouseResult.categories || {};
-    const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error ? {
-      performance:   categories.performance?.score   != null ? Math.round(categories.performance.score * 100)   : null,
-      accessibility: categories.accessibility?.score  != null ? Math.round(categories.accessibility.score * 100)  : null,
-      bestPractices: categories['best-practices']?.score != null ? Math.round(categories['best-practices'].score * 100) : null,
-      seo:           categories.seo?.score            != null ? Math.round(categories.seo.score * 100)            : null
-    } : null;
+    const psiScores = scan.pagespeedResult && !scan.pagespeedResult.error
+      ? lighthouseScores(scan.pagespeedResult)
+      : null;
 
     const observatoryData = scan.observatoryResult && !scan.observatoryResult.error ? {
       grade: scan.observatoryResult.grade, score: scan.observatoryResult.score,
@@ -688,6 +700,7 @@ router.get('/combined-analysis/:id', auth, async (req, res) => {
     return res.json({
       success: true,
       status: scan.status,
+      failureReason: scan.failureReason || null,
       analysisId: id,
       target: scan.target,
       hasPsiResult:        !!scan.pagespeedResult,
@@ -992,9 +1005,27 @@ router.post('/pdf-job', auth, async (req, res) => {
   const scan = await ScanResult.findOne({ analysisId, userId: req.user.id });
   if (!scan) return res.status(404).json({ error: 'Scan not found or access denied' });
 
+  // A scan that ended in a terminal failure never produces a report, regardless of
+  // how much partial data it collected. Previously the `hasSomeData` escape hatch
+  // below let a failed scan render a PDF whose vulnerability section read
+  // "No vulnerabilities detected" — a clean bill of health for a site that was
+  // never assessed.
+  if (['failed', 'stopped', 'cancelled'].includes(scan.status)) {
+    return res.status(400).json({
+      errorCode: 'SCAN_NOT_COMPLETE',
+      error: 'Scan did not complete; no report is available',
+      status: scan.status,
+      failureReason: scan.failureReason || null
+    });
+  }
+
   const hasSomeData = scan.pagespeedResult || scan.observatoryResult || scan.urlscanResult;
-  if (!['completed', 'partial_complete'].includes(scan.status) && !hasSomeData) {
-    return res.status(400).json({ error: 'Scan is not yet complete', status: scan.status });
+  if (scan.status !== 'completed' && !hasSomeData) {
+    return res.status(400).json({
+      errorCode: 'SCAN_NOT_COMPLETE',
+      error: 'Scan is not yet complete',
+      status: scan.status
+    });
   }
 
   // ── Validate scan has real data ─────────────────────────────────────────────
@@ -1194,16 +1225,29 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
       });
     }
 
-    // Allow PDF for completed scans and for partial_complete (ZAP failed but other data available).
-    // Block only truly in-progress or terminal-failure scans with no usable data.
-    const hasSomeData = scan.pagespeedResult || scan.observatoryResult || scan.urlscanResult;
-    if (!['completed', 'partial_complete'].includes(scan.status) && !hasSomeData) {
+    // A terminally failed scan never produces a report, however much partial data
+    // it collected — otherwise the vulnerability section reads "No vulnerabilities
+    // detected" for a site that was never assessed. ('partial_complete' was
+    // checked here historically but is not a value in the ScanResult status enum,
+    // so it never matched.)
+    if (['failed', 'stopped', 'cancelled'].includes(scan.status)) {
       return res.status(400).json({
+        errorCode: 'SCAN_NOT_COMPLETE',
+        error: 'Scan did not complete; no report is available',
+        status: scan.status,
+        failureReason: scan.failureReason || null
+      });
+    }
+
+    const hasSomeData = scan.pagespeedResult || scan.observatoryResult || scan.urlscanResult;
+    if (scan.status !== 'completed' && !hasSomeData) {
+      return res.status(400).json({
+        errorCode: 'SCAN_NOT_COMPLETE',
         error: 'Scan is not yet complete. Please wait for all scans to finish.',
         status: scan.status
       });
     }
-    if (!['completed', 'partial_complete'].includes(scan.status) && hasSomeData) {
+    if (scan.status !== 'completed' && hasSomeData) {
       console.log(`📄 Generating PDF with partial results for scan ${id} (status: ${scan.status})`);
     }
 

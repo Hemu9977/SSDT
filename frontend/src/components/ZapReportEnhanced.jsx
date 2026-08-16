@@ -8,7 +8,7 @@ import '../styles/ZapReportEnhanced.scss';
 import { API_BASE } from '../config/api';
 import { useTranslation } from '../contexts/TranslationContext';
 
-const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLang = 'en' }) => {
+const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLang = 'ja' }) => {
     const { t } = useTranslation();
     const [expandedAlerts, setExpandedAlerts] = useState(new Set());
     const [downloadingDetailed, setDownloadingDetailed] = useState(false);
@@ -186,7 +186,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                 const errorData = await response.json().catch(() => ({}));
                 if (response.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
                     alert(t('geminiKeyExhausted'));
-                    throw new Error('Gemini key is exhausted');
+                    throw new Error(t('geminiKeyExhausted'));
                 }
                 if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
                     alert(t('englishPdfOnly'));
@@ -243,7 +243,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
     return (
         <div className="zap-report-enhanced">
             <div className="report-header">
-                <h3>⚡ {t('vulnerabilityAnalysisResults')}</h3>
+                <h3>{t('vulnerabilityAnalysisResults')}</h3>
                 <div className="report-stats">
                     <span className="stat">
                         <strong>{zapData.totalAlerts}</strong> {t('alertTypes')}

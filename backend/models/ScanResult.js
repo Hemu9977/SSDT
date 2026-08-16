@@ -54,6 +54,14 @@ const scanResultSchema = new mongoose.Schema({
     enum: ['queued', 'pending', 'combining', 'completed', 'failed', 'stopped', 'cancelled'],
     default: 'queued'
   },
+  // Machine-readable reason a scan ended in `failed`, so the UI can show a
+  // localized explanation. Never surface the raw scanner error to the browser:
+  // those strings are English-only and name the third-party scan engines.
+  failureReason: {
+    type: String,
+    enum: ['vulnerability_scan_failed', 'scan_data_unavailable', 'internal_error', null],
+    default: null
+  },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

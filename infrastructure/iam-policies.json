@@ -1,8 +1,30 @@
 {
-  "_comment": "IAM policies for SSDT ECS deployment. Account: 459181228792",
+  "_comment": "IAM policies for Fortexa/SSDT ECS deployment. Account: 459181228792, region ap-northeast-1.",
+  "_known_issue": "SECURITY-RELEVANT DRIFT, checked 2026-08-13: neither 'ecsBackendTaskRole' nor 'ecsTaskRole' exist in the account anymore (confirmed via iam:GetRole — NoSuchEntity for both). The role actually attached to the backend task (fortexa-backend-task-role) does NOT use the scoped policy below — it has the AWS-managed SecretsManagerReadWrite, AmazonSESFullAccess, AmazonS3FullAccess, and CloudWatchLogsFullAccess policies attached (full read/write across ALL secrets/SES identities/S3 buckets in the account, not just this app's), plus one inline policy (FortexaGeminiSTSAccess: sts:GetCallerIdentity only). This file's scoped 'secretsmanager:GetSecretValue on ssdt/*' intent was never carried over when the role was renamed/rebuilt for the ap-northeast-1 migration. Worth deciding: tighten the live role back to least-privilege, or accept broad access and treat this file as historical/aspirational.",
+  "fortexaBackendTaskRole-liveReality": {
+    "_comment": "What is actually attached to arn:aws:iam::459181228792:role/fortexa-backend-task-role today — AWS-managed policies, not a custom scoped document.",
+    "attachedManagedPolicies": [
+      "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess",
+      "arn:aws:iam::aws:policy/SecretsManagerReadWrite",
+      "arn:aws:iam::aws:policy/AmazonSESFullAccess",
+      "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+    ],
+    "inlinePolicies": {
+      "FortexaGeminiSTSAccess": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": ["sts:GetCallerIdentity"],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  },
 
-  "ecsBackendTaskRole": {
-    "_comment": "Attached to backend ECS task — allows it to spawn/stop ZAP tasks",
+  "fortexaBackendTaskRole-scopedIntent": {
+    "_comment": "Least-privilege version of what fortexa-backend-task-role needs, updated to ap-northeast-1 and the current consolidated secret. NOT currently applied — see _known_issue above.",
     "Version": "2012-10-17",
     "Statement": [
       {
@@ -19,8 +41,7 @@
         "Effect": "Allow",
         "Action": "iam:PassRole",
         "Resource": [
-          "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
-          "arn:aws:iam::459181228792:role/ecsTaskRole"
+          "arn:aws:iam::459181228792:role/ecsTaskExecutionRole"
         ]
       },
       {
@@ -28,7 +49,7 @@
         "Action": [
           "secretsmanager:GetSecretValue"
         ],
-        "Resource": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/*"
+        "Resource": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-*"
       },
       {
         "Effect": "Allow",
@@ -36,13 +57,13 @@
           "ses:SendEmail",
           "ses:SendRawEmail"
         ],
-        "Resource": "arn:aws:ses:ap-south-1:459181228792:identity/*"
+        "Resource": "arn:aws:ses:ap-northeast-1:459181228792:identity/*"
       }
     ]
   },
 
   "ecsTaskExecutionRole": {
-    "_comment": "Standard ECS execution role — allows pulling images and writing logs",
+    "_comment": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole — verified live 2026-08-13: has AmazonECSTaskExecutionRolePolicy plus CloudWatchLogsFullAccess, SecretsManagerReadWrite, and AWSKeyManagementServicePowerUser attached (also broader than the scoped document below).",
     "Version": "2012-10-17",
     "Statement": [
       {

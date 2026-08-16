@@ -4,6 +4,7 @@ import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScanForm.scss';
 
 import { API_BASE } from '../config/api';
+import { getScanStatusLine } from '../utils/scanStatus';
 
 const ScanForm = () => {
   const [url, setUrl] = useState('');
@@ -34,20 +35,11 @@ const ScanForm = () => {
 
       const data = await response.json();
 
-      // Update progress based on scan phases
+      // Update progress. The backend `phase` (spidering / ajax_spider / ...) names
+      // the scan engine's internals, so it is never displayed — report neutral steps.
       if (data.zapData) {
-        const zapPhase = data.zapData.phase || 'scanning';
-        const zapProgress = data.zapData.progress || 0;
-
-        // Show URL count during spider phases
-        if (zapPhase === 'spidering' || zapPhase === 'ajax_spider') {
-          const urlsFound = data.zapData.urlsFound || 0;
-          setScanStage(`${zapPhase === 'ajax_spider' ? 'Deep Web Crawling' : 'Web Crawling'}: ${urlsFound} URLs found (${zapProgress}%)`);
-        } else {
-          setScanStage(`Vulnerability Analysis: ${zapPhase} (${zapProgress}%)`);
-        }
-
-        setScanProgress(zapProgress);
+        setScanStage(getScanStatusLine(data, t));
+        setScanProgress(data.zapData.progress || 0);
       } else if (data.status === 'queued' || data.status === 'pending') {
         setScanStage(t('initializingScan'));
         setScanProgress(5);
@@ -66,7 +58,8 @@ const ScanForm = () => {
         if (data.status === 'stopped') {
           setError(t('scanStoppedByUser'));
         } else {
-          setError(`${t('scanFailed')}: ${data.error || t('unknownError')}`);
+          // data.error is a raw backend string that can name the scan engines.
+          setError(`${t('scanFailed')}: ${t('unknownError')}`);
         }
         setLoading(false);
         setScanId(null);

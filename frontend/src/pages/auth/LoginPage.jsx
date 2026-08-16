@@ -19,7 +19,7 @@ const LoginPage = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, syncLanguage } = useTranslation();
 
   const googleLogin = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
@@ -32,11 +32,12 @@ const LoginPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ googleAccessToken: tokenResponse.access_token }),
         });
-        
+
         const data = await response.json();
-        
+
         if (response.ok) {
           localStorage.setItem('token', data.token);
+          syncLanguage();
           setMessage(t('googleLoginSuccessful'));
           const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
           setTimeout(() => navigate(target), 2000);
@@ -69,6 +70,7 @@ const LoginPage = () => {
       if (response.ok) {
         if (data.token) {
           localStorage.setItem('token', data.token);
+          syncLanguage();
           setMessage(data.message);
           const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
           setTimeout(() => navigate(target), 2000);

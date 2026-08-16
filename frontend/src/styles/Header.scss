@@ -76,7 +76,8 @@
     &:hover { border-color: var(--accent); }
   }
 
-  .signup-button {
+  .signup-button,
+  .about-button {
     background: var(--accent);
     color: var(--background);
     padding: 0.6rem 1.25rem;
@@ -142,6 +143,7 @@
 
     .header-controls { gap: 0.5rem; }
 
+    .about-button,
     .schedules-link,
     .profile-button,
     .logout-button {
@@ -186,7 +188,8 @@
       .signup-button,
       .profile-button,
       .logout-button,
-      .schedules-link {
+      .schedules-link,
+      .about-button {
         text-align: center;
         justify-content: center;
         padding: 0.85rem 1rem;

@@ -1,5 +1,5 @@
 {
-  "family": "zap-scanner-task",
+  "family": "zap-auth-task",
   "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
   "cpu": "1024",
@@ -7,7 +7,7 @@
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
-      "name": "zap-scanner",
+      "name": "zap-auth-scanner",
       "image": "ghcr.io/zaproxy/zaproxy:stable",
       "essential": true,
       "cpu": 1024,
@@ -18,7 +18,7 @@
           "containerPort": 8080,
           "hostPort": 8080,
           "protocol": "tcp",
-          "name": "zap-scanner-8080-tcp",
+          "name": "zap-auth-8080-tcp",
           "appProtocol": "http"
         }
       ],
@@ -45,7 +45,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/zap-scanner",
+          "awslogs-group": "/ecs/zap-auth-task",
           "awslogs-region": "ap-northeast-1",
           "awslogs-stream-prefix": "ecs",
           "awslogs-create-group": "true"

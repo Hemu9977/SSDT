@@ -18,6 +18,7 @@ const { refineReport } = require('./geminiService');
 const { getFullResults } = require('./webCheckService');
 const { handleScanComplete } = require('./notificationService');
 const { publishScanProgress } = require('./scanProgressService');
+const { lighthouseScores, formatScore } = require('../utils/scoreFormat');
 const { getPublisher } = require('../config/redis');
 const { getSanitizedZapReport } = require('../utils/vulnFilter');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
@@ -114,11 +115,12 @@ async function _dbUpdate(filter, update, scanId, label, maxAttempts = 3) {
 // Used when all Gemini retries are exhausted so the scan always has real content.
 
 function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
-  const cats   = scan.pagespeedResult?.lighthouseResult?.categories || {};
-  const perf   = Math.round((cats.performance?.score      || 0) * 100);
-  const access = Math.round((cats.accessibility?.score    || 0) * 100);
-  const bp     = Math.round((cats['best-practices']?.score|| 0) * 100);
-  const seo    = Math.round((cats.seo?.score              || 0) * 100);
+  // null when the category was never returned — printed as "N/A", not "0/100".
+  const psi    = lighthouseScores(scan.pagespeedResult);
+  const perf   = psi.performance;
+  const access = psi.accessibility;
+  const bp     = psi.bestPractices;
+  const seo    = psi.seo;
 
   const obs      = scan.observatoryResult || {};
   const obsGrade = obs.grade  || 'N/A';
@@ -139,8 +141,13 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
 
   const wc      = webCheckReport || {};
   const tlsGrade= wc.tls?.tlsInfo?.grade || wc.ssl?.grade || 'N/A';
-  const hasWaf  = wc.firewall?.hasWaf    || false;
-  const hstsOn  = wc.hsts?.enabled      || false;
+  // A missing/errored probe (firewall, hsts are HEAVY_SCANS, easily starved by
+  // concurrency=1) is not the same claim as "checked, not present" — track each
+  // separately so the report never states a negative finding it never measured.
+  const firewallChecked = !!wc.firewall && !wc.firewall.error;
+  const hstsChecked      = !!wc.hsts     && !wc.hsts.error;
+  const hasWaf  = firewallChecked && !!wc.firewall.hasWaf;
+  const hstsOn  = hstsChecked && !!wc.hsts.enabled;
   const techs   = (wc['tech-stack']?.technologies || []).slice(0, 6).map(t => t.name || t).filter(Boolean);
 
   const lines = [];
@@ -155,18 +162,18 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   lines.push('');
 
   lines.push('## Performance Analysis');
-  lines.push(`- Performance Score: ${perf}/100`);
-  lines.push(`- Accessibility Score: ${access}/100`);
-  lines.push(`- Best Practices Score: ${bp}/100`);
-  lines.push(`- SEO Score: ${seo}/100`);
+  lines.push(`- Performance Score: ${formatScore(perf)}`);
+  lines.push(`- Accessibility Score: ${formatScore(access)}`);
+  lines.push(`- Best Practices Score: ${formatScore(bp)}`);
+  lines.push(`- SEO Score: ${formatScore(seo)}`);
   lines.push('');
 
   lines.push('## Security Configuration');
   lines.push(`- Security Grade: ${obsGrade} (Score: ${obsScore}/100)`);
   lines.push(`- Tests Passed: ${obsPassed} / Tests Failed: ${obsFailed}`);
   if (tlsGrade !== 'N/A') lines.push(`- TLS/SSL Grade: ${tlsGrade}`);
-  lines.push(`- HSTS Enabled: ${hstsOn ? 'Yes' : 'No'}`);
-  lines.push(`- WAF Detected: ${hasWaf ? 'Yes' : 'No'}`);
+  lines.push(`- HSTS Enabled: ${hstsChecked ? (hstsOn ? 'Yes' : 'No') : 'N/A (not checked this scan)'}`);
+  lines.push(`- WAF Detected: ${firewallChecked ? (hasWaf ? 'Yes' : 'No') : 'N/A (not checked this scan)'}`);
   if (techs.length) lines.push(`- Technology Stack: ${techs.join(', ')}`);
   lines.push('');
 
@@ -199,11 +206,16 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   if (isMalicious)        lines.push('- URGENT: Site flagged as malicious. Investigate and remediate immediately.');
   if (zapRisk.High > 0)   lines.push('- Remediate all High risk vulnerabilities identified in the vulnerability scan.');
   if (zapRisk.Medium > 0) lines.push('- Review and address Medium risk vulnerabilities.');
-  if (!hstsOn)            lines.push('- Enable HSTS (HTTP Strict Transport Security) to enforce secure connections.');
-  if (!hasWaf)            lines.push('- Consider deploying a Web Application Firewall (WAF) for additional protection.');
+  if (hstsChecked && !hstsOn)     lines.push('- Enable HSTS (HTTP Strict Transport Security) to enforce secure connections.');
+  if (firewallChecked && !hasWaf) lines.push('- Consider deploying a Web Application Firewall (WAF) for additional protection.');
   if (obsFailed > 0)      lines.push(`- Resolve ${obsFailed} failed security header test(s) to improve your security grade.`);
-  if (perf < 80)          lines.push('- Performance score is below 80 — optimize images, scripts, and server response times.');
-  if (access < 80)        lines.push('- Accessibility score is below 80 — review WCAG guidelines and improve compliance.');
+  // `null < 80` is true in JS (null coerces to 0) — guard so an unmeasured score
+  // never produces a recommendation about a number we don't have.
+  if (perf !== null && perf < 80)     lines.push('- Performance score is below 80 — optimize images, scripts, and server response times.');
+  if (access !== null && access < 80) lines.push('- Accessibility score is below 80 — review WCAG guidelines and improve compliance.');
+  if (access === null || bp === null || seo === null) {
+    lines.push('- One or more quality scores could not be measured in this scan — rerun to obtain a complete assessment.');
+  }
   lines.push('- Conduct regular security scans to track remediation progress.');
   lines.push('');
 
@@ -211,6 +223,44 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   lines.push('This report was generated from raw scan data. An AI-enhanced analysis with deeper insights and recommendations will be available on the next scan.');
 
   return lines.join('\n');
+}
+
+// ─── Failure completion ────────────────────────────────────────────────────────
+
+/**
+ * End a scan as FAILED without charging the customer's quota.
+ *
+ * Used when the vulnerability scanner produced no result. The other scanners'
+ * data is kept in the document for diagnostics, but the scan must not present as
+ * completed: with no vulnerability data the report renders "Total Alerts: 0" and
+ * "No vulnerabilities detected" at risk level "Low", i.e. it tells the customer
+ * their site is clean when nothing was actually checked.
+ *
+ * `finalizeSuccessfulScan` is deliberately NOT called — a scan that could not
+ * assess vulnerabilities is not the product that was sold, so it does not consume
+ * an allowance.
+ *
+ * @param {string} failureReason machine-readable; the UI localizes it. Never send
+ *                               the raw scanner error to the browser.
+ */
+async function _finishAsFailed(scan, scanId, userId, failureReason) {
+  console.warn(`[Gemini][${scanId}] Ending scan as failed — reason=${failureReason} (quota NOT charged)`);
+
+  await _dbUpdate(
+    { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
+    { $set: { status: 'failed', failureReason, updatedAt: new Date() } },
+    scanId,
+    'fail-incomplete-scan'
+  );
+
+  // Stop the readiness check from re-running for this scan.
+  _markGeminiDone(scanId).catch(() => {});
+
+  await publishScanProgress(scanId, userId, {
+    status: 'failed',
+    progress: 0,
+    failureReason
+  });
 }
 
 // ─── Fallback completion ───────────────────────────────────────────────────────
@@ -313,13 +363,25 @@ async function _doGenerate(scanId, userId) {
   }
 
   // ── Readiness check ─────────────────────────────────────────────────────────
+  // 'completed_partial' is included for ZAP so a future partial-completion path
+  // can't leave scans wedged in "combining" forever.
   const zapStatus      = scan.zapResult?.status;
   const webCheckStatus = scan.webCheckResult?.status;
-  const zapDone        = ['completed', 'failed'].includes(zapStatus);
+  const zapDone        = ['completed', 'completed_partial', 'failed'].includes(zapStatus);
   const webChkDone     = ['completed', 'completed_partial', 'completed_with_errors', 'failed'].includes(webCheckStatus);
 
   if (!zapDone || !webChkDone) {
     console.log(`[Gemini][${scanId}] Not ready — ZAP: ${zapStatus}, WebCheck: ${webCheckStatus}`);
+    return;
+  }
+
+  // ── The vulnerability assessment is the product ─────────────────────────────
+  // Without it the report would state "No vulnerabilities detected" at risk level
+  // "Low" for a site that was never assessed. Fail the scan instead, and don't
+  // charge the customer for it. WebCheck failing is NOT fatal by comparison — its
+  // report section renders N/A (see pdfService/geminiService).
+  if (zapStatus === 'failed') {
+    await _finishAsFailed(scan, scanId, userId, 'vulnerability_scan_failed');
     return;
   }
 

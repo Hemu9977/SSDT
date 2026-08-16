@@ -1,28 +1,27 @@
 {
   "_comment": "Dedicated BullMQ worker task definition (scan + ZAP workers). Deploy this as a SEPARATE ECS service from the backend API so scan CPU/memory does not starve HTTP/WebSocket traffic.",
-  "family": "ssdt-worker-task",
-  "requiresCompatibilities": ["FARGATE"],
+  "_known_issue": "NOT CURRENTLY DEPLOYED. Checked against the live fortexa-cluster on 2026-08-13 — there is no separate worker ECS service; the only services are fortexa-ec2-backend, webcheck-task-ec2, zap-scan-ec2, zap-auth-task-ec2. The backend task (fortexa-backend:63) runs with DISABLE_WORKER=false, i.e. the worker currently runs in-process inside the backend container, not as a split-out service. This file documents an intended-but-unrealized split; values below are updated to match live region/image/secrets conventions for whenever it is actually deployed.",
+  "family": "fortexa-worker-task",
+  "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
   "cpu": "1024",
   "memory": "2048",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsBackendTaskRole",
+  "taskRoleArn": "arn:aws:iam::459181228792:role/fortexa-backend-task-role",
   "containerDefinitions": [
     {
       "name": "worker",
-      "image": "459181228792.dkr.ecr.ap-south-1.amazonaws.com/ssdt-backend:latest",
+      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/fortexa-backend:v40",
       "essential": true,
       "command": ["npm", "run", "worker"],
       "secrets": [
-        { "name": "MONGO_URI",            "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/MONGO_URI" },
-        { "name": "JWT_SECRET",           "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/JWT_SECRET" },
-        { "name": "PSI_API_KEY",          "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/PSI_API_KEY" },
-        { "name": "URLSCAN_API_KEY",      "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/URLSCAN_API_KEY" },
-        { "name": "GOOGLE_CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_ID" },
-        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/GOOGLE_CLIENT_SECRET" },
-        { "name": "REDIS_URL",            "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/REDIS_URL" },
-        { "name": "ZAP_API_KEY",          "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/ZAP_API_KEY" },
-        { "name": "ZAP_AUTH_API_KEY",     "valueFrom": "arn:aws:secretsmanager:ap-south-1:459181228792:secret:ssdt/ZAP_AUTH_API_KEY" }
+        { "name": "MONGO_URI",         "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:MONGO_URI::" },
+        { "name": "JWT_SECRET",        "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:JWT_SECRET::" },
+        { "name": "PSI_API_KEY",       "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:PSI_API_KEY::" },
+        { "name": "URLSCAN_API_KEY",   "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:URLSCAN_API_KEY::" },
+        { "name": "REDIS_URL",         "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:REDIS_URL::" },
+        { "name": "ELASTICACHE_REDIS_URL", "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:ELASTICACHE_REDIS_URL::" },
+        { "name": "ZAP_AUTH_API_KEY",  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:ZAP_AUTH_API_KEY::" }
       ],
       "environment": [
         { "name": "NODE_ENV",    "value": "production" },
@@ -37,32 +36,29 @@
         { "name": "WEBCHECK_MAX_ACTIVE_SCANS",         "value": "2" },
         { "name": "WEBCHECK_RETRY_ATTEMPTS",           "value": "2" },
         { "name": "WEBCHECK_REQUEST_TIMEOUT_MS",       "value": "90000" },
-        { "name": "WEBCHECK_URI",                      "value": "http://webcheck:3002" },
+        { "name": "WEBCHECK_URI",                      "value": "http://webcheck:3000" },
 
-        { "name": "ZAP_API_URL",      "value": "http://127.0.0.1:8080" },
-        { "name": "ZAP_AUTH_API_URL", "value": "http://127.0.0.1:8081" },
+        { "name": "ZAP_API_URL",      "value": "http://zap-scanner:8080" },
+        { "name": "ZAP_AUTH_API_URL", "value": "http://zap-auth-scanner:8080" },
 
-        { "name": "ECS_CLUSTER_NAME",  "value": "ssdt-cluster" },
-        { "name": "ECS_ZAP_TASK_DEF",  "value": "ssdt-zap-task" },
-
-        { "name": "AWS_REGION",                     "value": "ap-south-1" },
+        { "name": "AWS_REGION",                     "value": "ap-northeast-1" },
         { "name": "AWS_EC2_METADATA_DISABLED",      "value": "true" },
         { "name": "GOOGLE_APPLICATION_CREDENTIALS", "value": "/app/config/gcp-wif.json" },
         { "name": "VERTEX_PROJECT",                 "value": "fortexa-495604" },
         { "name": "VERTEX_LOCATION",                "value": "us-central1" },
-        { "name": "GEMINI_MODEL_PRO",               "value": "gemini-2.5-flash" },
+        { "name": "GEMINI_MODEL_PRO",               "value": "gemini-2.5-pro" },
         { "name": "GEMINI_MODEL_FLASH",             "value": "gemini-2.5-flash" },
 
-        { "name": "RATE_LIMIT_ENABLED", "value": "false" },
+        { "name": "RATE_LIMIT_ENABLED", "value": "true" },
         { "name": "USE_AWS_SES",        "value": "true" },
-        { "name": "SES_FROM_EMAIL",     "value": "ssdt.nitte@gmail.com" },
-        { "name": "FRONTEND_URL",       "value": "https://fortexa.aevus.jp,https://d30r1phhqv8s7f.cloudfront.net" }
+        { "name": "SES_FROM_EMAIL",     "value": "fortexa@aevus.jp" },
+        { "name": "FRONTEND_URL",       "value": "https://fortexa.aevus.jp" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/ssdt-worker",
-          "awslogs-region": "ap-south-1",
+          "awslogs-group": "/ecs/fortexa-worker",
+          "awslogs-region": "ap-northeast-1",
           "awslogs-stream-prefix": "worker",
           "awslogs-create-group": "true"
         }

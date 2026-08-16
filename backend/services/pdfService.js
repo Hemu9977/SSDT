@@ -25,6 +25,7 @@ const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, t
 const gridfsService = require('./gridfsService');
 const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
+const { lighthouseScores, formatScore, formatMetric, NOT_AVAILABLE } = require('../utils/scoreFormat');
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 // Spec requirement: PDFKit-only (no Puppeteer/HTML renderer)
@@ -439,7 +440,11 @@ async function fetchScanHistoryRows(scanResult, limit = 8) {
   if (!scanResult?.userId) return fallback;
 
   try {
-    const records = await ScanResult.find({ userId: scanResult.userId })
+    // Scoped to THIS target. Without the filter the table listed the operator's
+    // recent scans across every target, so a report delivered to one client
+    // disclosed when other clients' sites were scanned — and the table did not
+    // mean what its heading claimed.
+    const records = await ScanResult.find({ userId: scanResult.userId, target: scanResult.target })
       .sort({ createdAt: -1 }).limit(limit)
       .select('analysisId target createdAt userId status')
       .populate('userId', 'name email').lean();
@@ -636,7 +641,8 @@ async function getDiagnosisHistoryTable(scanResult, lang, limit = 8) {
   if (!scanResult?.userId) return { title, headers, rows: fallback };
 
   try {
-    const records = await ScanResult.find({ userId: scanResult.userId })
+    // Scoped to THIS target — see fetchScanHistoryRows for why.
+    const records = await ScanResult.find({ userId: scanResult.userId, target: scanResult.target })
       .sort({ createdAt: -1 }).limit(limit)
       .select('analysisId target createdAt userId status')
       .populate('userId', 'name email').lean();
@@ -655,16 +661,26 @@ async function getDiagnosisHistoryTable(scanResult, lang, limit = 8) {
 
 function buildFallbackScanDataForPdf(scanResult) {
   const safe = (v, fb = 0) => { const n = Number(v); return isFinite(n) ? n : fb; };
-  const cats  = scanResult?.pagespeedResult?.lighthouseResult?.categories || {};
-  const perf  = safe(Math.round((cats.performance?.score   || 0) * 100));
-  const a11y  = safe(Math.round((cats.accessibility?.score || 0) * 100));
-  const bp    = safe(Math.round((cats['best-practices']?.score || 0) * 100));
-  const seo   = safe(Math.round((cats.seo?.score            || 0) * 100));
+  // null when PageSpeed never returned the category — rendered "N/A", not "0/100".
+  const psi = lighthouseScores(scanResult?.pagespeedResult);
 
   const obs   = scanResult?.observatoryResult  || {};
   const zap   = scanResult?.zapResult          || {};
   const urlsc = scanResult?.urlscanResult      || {};
   const wc    = scanResult?.webCheckResult?.fullResults || {};
+
+  // WebCheck failing is not fatal to a scan, but its findings must not be
+  // presented as measurements. "Not checked" and "checked, absent" are different
+  // claims: a missing WAF probe must read "N/A", never "No".
+  const wcOk = ['completed', 'completed_partial', 'completed_with_errors']
+    .includes(scanResult?.webCheckResult?.status);
+  // `checked` must reflect whether THIS SPECIFIC sub-scan returned data, not just
+  // whether the overall WebCheck run was non-fatal — a run can be wcOk (partial
+  // success) while the firewall/hsts probe itself individually errored or never
+  // got a turn (both are HEAVY_SCANS, serialized behind WEBCHECK_HEAVY_SCAN_CONCURRENCY=1).
+  const wcYesNo = (checked, present, yesJa, noJa) => checked
+    ? { en: present ? 'Yes' : 'No', ja: present ? yesJa : noJa }
+    : { en: NOT_AVAILABLE, ja: NOT_AVAILABLE };
 
   const hiCnt = safe(zap?.riskCounts?.High, 0);
   const mdCnt = safe(zap?.riskCounts?.Medium, 0);
@@ -692,10 +708,10 @@ function buildFallbackScanDataForPdf(scanResult) {
         id: 'pagespeed',
         title: { en: 'Performance & Accessibility Analysis', ja: 'パフォーマンス・アクセシビリティ分析' },
         items: [
-          { label: { en: 'Performance',    ja: 'パフォーマンス'     }, value: `${perf}/100`,  type: 'score' },
-          { label: { en: 'Accessibility',  ja: 'アクセシビリティ'    }, value: `${a11y}/100`,  type: 'score' },
-          { label: { en: 'Best Practices', ja: 'ベストプラクティス'  }, value: `${bp}/100`,    type: 'score' },
-          { label: { en: 'SEO',            ja: 'SEO'               }, value: `${seo}/100`,   type: 'score' }
+          { label: { en: 'Performance',    ja: 'パフォーマンス'     }, value: formatScore(psi.performance),   type: 'score' },
+          { label: { en: 'Accessibility',  ja: 'アクセシビリティ'    }, value: formatScore(psi.accessibility), type: 'score' },
+          { label: { en: 'Best Practices', ja: 'ベストプラクティス'  }, value: formatScore(psi.bestPractices), type: 'score' },
+          { label: { en: 'SEO',            ja: 'SEO'               }, value: formatScore(psi.seo),           type: 'score' }
         ]
       },
       {
@@ -703,7 +719,7 @@ function buildFallbackScanDataForPdf(scanResult) {
         title: { en: 'Security Configuration Assessment', ja: 'セキュリティ設定評価' },
         items: [
           { label: { en: 'Security Grade',  ja: 'セキュリティ評価'  }, value: obs.grade || 'N/A',              type: 'grade'   },
-          { label: { en: 'Score',           ja: 'スコア'            }, value: `${safe(obs.score, 0)}/100`,      type: 'score'   },
+          { label: { en: 'Score',           ja: 'スコア'            }, value: formatMetric(obs.score),          type: 'score'   },
           { label: { en: 'Tests Passed',    ja: '合格テスト数'      }, value: safe(obs.tests_passed, 0),        type: 'success' },
           { label: { en: 'Tests Failed',    ja: '不合格テスト数'    }, value: safe(obs.tests_failed, 0),        type: 'danger'  }
         ]
@@ -734,7 +750,7 @@ function buildFallbackScanDataForPdf(scanResult) {
         title: { en: 'Threat & Reputation Analysis', ja: '脅威・レピュテーション分析' },
         items: [
           { label: { en: 'Verdict',      ja: '判定'        }, value: { en: isMal ? 'MALICIOUS' : 'Clean', ja: isMal ? '悪性' : 'クリーン' }, type: isMal ? 'danger' : 'success' },
-          { label: { en: 'Threat Score', ja: '脅威スコア'  }, value: `${safe(urlsc?.verdicts?.overall?.score, 0)}/100`, type: 'score' },
+          { label: { en: 'Threat Score', ja: '脅威スコア'  }, value: formatMetric(urlsc?.verdicts?.overall?.score), type: 'score' },
           { label: { en: 'Domain',       ja: 'ドメイン'    }, value: urlsc?.page?.domain  || 'N/A', type: 'stat' },
           { label: { en: 'Server IP',    ja: 'サーバーIP'  }, value: urlsc?.page?.ip      || 'N/A', type: 'stat' },
           { label: { en: 'Country',      ja: '国'          }, value: urlsc?.page?.country || 'N/A', type: 'stat' },
@@ -745,10 +761,10 @@ function buildFallbackScanDataForPdf(scanResult) {
         id: 'webcheck',
         title: { en: 'Web Security Configuration', ja: 'Webセキュリティ設定' },
         items: [
-          { label: { en: 'TLS Grade',    ja: 'TLS評価'      }, value: wc?.tls?.tlsInfo?.grade || wc?.ssl?.grade || 'N/A', type: 'grade' },
-          { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: { en: wc?.firewall?.hasWaf ? 'Yes' : 'No', ja: wc?.firewall?.hasWaf ? 'はい' : 'いいえ' }, type: wc?.firewall?.hasWaf ? 'success' : 'warning' },
-          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: { en: wc?.hsts?.enabled ? 'Yes' : 'No',    ja: wc?.hsts?.enabled ? '有効' : '無効'     }, type: wc?.hsts?.enabled ? 'success' : 'warning' },
-          { label: { en: 'Technologies', ja: 'テクノロジー' }, value: Array.isArray(wc?.['tech-stack']?.technologies) ? wc['tech-stack'].technologies.slice(0, 5).map(t => t.name || t).join(', ') : 'N/A', type: 'stat' }
+          { label: { en: 'TLS Grade',    ja: 'TLS評価'      }, value: (wcOk && (wc?.tls?.tlsInfo?.grade || wc?.ssl?.grade)) || NOT_AVAILABLE, type: 'grade' },
+          { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: wcYesNo(wcOk && !!wc?.firewall && !wc.firewall.error, wc?.firewall?.hasWaf, 'はい', 'いいえ'), type: (!wcOk || !wc?.firewall || wc.firewall.error) ? 'stat' : (wc?.firewall?.hasWaf ? 'success' : 'warning') },
+          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: wcYesNo(wcOk && !!wc?.hsts && !wc.hsts.error, wc?.hsts?.enabled, '有効', '無効'),     type: (!wcOk || !wc?.hsts || wc.hsts.error) ? 'stat' : (wc?.hsts?.enabled ? 'success' : 'warning') },
+          { label: { en: 'Technologies', ja: 'テクノロジー' }, value: (wcOk && Array.isArray(wc?.['tech-stack']?.technologies)) ? wc['tech-stack'].technologies.slice(0, 5).map(t => t.name || t).join(', ') : NOT_AVAILABLE, type: 'stat' }
         ]
       }
     ]
@@ -1821,8 +1837,10 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   const tsFinal = buildTemplateStaticOverrides(ts, { lang });
 
   const doc = makePdfDoc({
-    Title:   `ZAP Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
-    Author:  'SSDT - OWASP ZAP',
+    // Document properties are client-visible in any PDF reader — keep them free of
+    // third-party engine names.
+    Title:   `Vulnerability Report (${lang.toUpperCase()}) - ${scanResult.target}`,
+    Author:  'SSD',
     Subject: 'Detailed Vulnerability Analysis'
   });
   const buf = collectBuffer(doc);

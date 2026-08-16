@@ -28,10 +28,11 @@ router.get('/', auth, async (req, res) => {
       .limit(5)
       .select('analysisId target status createdAt triggerSource');
 
-    // Calculate scans this month
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    // Calculate scans this month — UTC boundary, matching planService.js's
+    // UTC monthly reset. (This count is still limited by ScanResult's 7-day
+    // TTL, so it's cosmetic only; org.scansUsed is the authoritative value.)
+    const now = new Date();
+    const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
 
     const scansThisMonth = await ScanResult.countDocuments({
       userId: req.user.id,
@@ -60,6 +61,17 @@ router.get('/', auth, async (req, res) => {
     // Get account limits (org-aware)
     const limits = user.getAccountLimits(org);
 
+    // Purchased one-off scan credits — derived from live batches, never the
+    // (drift-prone) oneTimeRemainingScans mirror, so expired batches don't
+    // count.
+    const liveCreditBatches = org
+      ? (org.scanCredits || []).filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+      : [];
+    const extraScansRemaining = liveCreditBatches.reduce((sum, c) => sum + c.scansRemaining, 0);
+    const extraScansExpiresAt = liveCreditBatches.length
+      ? liveCreditBatches.reduce((earliest, c) => (c.expiresAt < earliest ? c.expiresAt : earliest), liveCreditBatches[0].expiresAt)
+      : null;
+
     res.json({
       success: true,
       user: {
@@ -67,9 +79,11 @@ router.get('/', auth, async (req, res) => {
         name: user.name,
         email: user.email,
         bio: user.bio,
+        preferredLanguage: user.preferredLanguage,
         accountType: user.accountType,
         isVerified: user.isVerified,
         totalScans: totalScans,
+        totalScansAllTime: org ? (org.totalScansAllTime || 0) : 0,
         scansThisMonth: scansThisMonth,
         monthlyScansUsed: org ? org.scansUsed : 0,
         createdAt: user.createdAt,
@@ -94,6 +108,9 @@ router.get('/', auth, async (req, res) => {
           scansUsed: org.scansUsed,
           targetsUsed: org.targetsUsed,
           oneTimeRemainingScans: org.oneTimeRemainingScans,
+          extraScansRemaining,
+          extraScansExpiresAt,
+          totalScansAllTime: org.totalScansAllTime || 0,
           expiresAt: org.expiresAt,
           members: members,
           pendingInvites: pendingInvites
@@ -125,7 +142,7 @@ router.get('/', auth, async (req, res) => {
 // @access  Private
 router.put('/', auth, async (req, res) => {
   try {
-    const { name, bio } = req.body;
+    const { name, bio, preferredLanguage } = req.body;
 
     const user = await User.findById(req.user.id);
 
@@ -142,9 +159,14 @@ router.put('/', auth, async (req, res) => {
       return res.status(400).json({ message: 'Bio must not exceed 500 characters' });
     }
 
+    if (preferredLanguage !== undefined && !['en', 'ja'].includes(preferredLanguage)) {
+      return res.status(400).json({ message: 'Invalid preferredLanguage' });
+    }
+
     // Update fields
     if (name) user.name = name.trim();
     if (bio !== undefined) user.bio = bio.trim();
+    if (preferredLanguage !== undefined) user.preferredLanguage = preferredLanguage;
 
     await user.save();
 
@@ -156,6 +178,7 @@ router.put('/', auth, async (req, res) => {
         name: user.name,
         email: user.email,
         bio: user.bio,
+        preferredLanguage: user.preferredLanguage,
         accountType: user.accountType
       }
     });
@@ -216,90 +239,14 @@ router.get('/stats', auth, async (req, res) => {
   }
 });
 
-// @route   POST /profile/upgrade-to-pro
-// @desc    Upgrade to Pro account (PROTOTYPE ONLY - for testing purposes)
-// @access  Private
-router.post('/upgrade-to-pro', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    if (user.isPro()) {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have an active Pro account'
-      });
-    }
-
-    // PROTOTYPE: Upgrade user to PRO
-    user.accountType = 'pro';
-    user.proExpiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 year from now
-
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Successfully upgraded to Pro!',
-      user: {
-        accountType: user.accountType,
-        proExpiresAt: user.proExpiresAt,
-        isPro: user.isPro()
-      },
-      note: 'This is a prototype build for testing. Payment integration will be added in production.'
-    });
-  } catch (err) {
-    console.error('Pro upgrade error:', err.message);
-    res.status(500).json({
-      message: 'Server error',
-      error: devMsg(err)
-    });
-  }
-});
-
-// @route   POST /profile/downgrade-to-free
-// @desc    Downgrade to Free account (PROTOTYPE ONLY - for testing purposes)
-// @access  Private
-router.post('/downgrade-to-free', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    if (user.accountType === 'free') {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have a Free account'
-      });
-    }
-
-    // PROTOTYPE: Downgrade user to FREE
-    user.accountType = 'free';
-    user.proExpiresAt = null;
-
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Successfully downgraded to Free account',
-      user: {
-        accountType: user.accountType,
-        proExpiresAt: user.proExpiresAt,
-        isPro: user.isPro()
-      },
-      note: 'This is a prototype build for testing. In production, this would handle subscription cancellation.'
-    });
-  } catch (err) {
-    console.error('Downgrade error:', err.message);
-    res.status(500).json({
-      message: 'Server error',
-      error: devMsg(err)
-    });
-  }
-});
+// NOTE: POST /profile/upgrade-to-pro and POST /profile/downgrade-to-free used to live
+// here. They were prototype routes that set accountType='pro' (plus a one-year
+// proExpiresAt) behind nothing but `auth` — no payment, no plan check — so any logged-in
+// user could grant themselves a "Pro" account. Neither had a frontend caller.
+//
+// They were harmless only by accident: getAccountLimits() derives every real limit from
+// planType_billingCycle and never reads accountType, so the flag granted no entitlement,
+// but it did surface as a misleading "PRO" badge on the profile. Plan changes now go
+// through Stripe (backend/routes/stripeRoutes.js). Do not reintroduce these.
 
 module.exports = router;

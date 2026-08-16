@@ -125,6 +125,7 @@
    HEADER BUTTONS - Hollow to Fill
    ======================================== */
 .signup-button,
+.about-button,
 .logout-button,
 .profile-button {
   font-family: 'Orbitron', var(--font-sans) !important;
@@ -147,6 +148,7 @@
 }
 
 .signup-button:hover,
+.about-button:hover,
 .logout-button:hover,
 .profile-button:hover {
   color: #000 !important;
@@ -157,6 +159,7 @@
 }
 
 .signup-button:active,
+.about-button:active,
 .logout-button:active,
 .profile-button:active {
   transform: translateY(0) !important;
@@ -263,6 +266,7 @@
 body.light .analyze-form button,
 body.light .auth-form button,
 body.light .signup-button,
+body.light .about-button,
 body.light .logout-button,
 body.light .profile-button {
   color: var(--accent-dark) !important;
@@ -273,6 +277,7 @@ body.light .profile-button {
 body.light .analyze-form button:hover:not(:disabled),
 body.light .auth-form button:hover:not(:disabled),
 body.light .signup-button:hover,
+body.light .about-button:hover,
 body.light .logout-button:hover,
 body.light .profile-button:hover {
   color: white !important;
@@ -284,6 +289,7 @@ body.light .profile-button:hover {
 body.dark .analyze-form button,
 body.dark .auth-form button,
 body.dark .signup-button,
+body.dark .about-button,
 body.dark .logout-button,
 body.dark .profile-button {
   color: var(--accent) !important;
@@ -294,6 +300,7 @@ body.dark .profile-button {
 body.dark .analyze-form button:hover:not(:disabled),
 body.dark .auth-form button:hover:not(:disabled),
 body.dark .signup-button:hover,
+body.dark .about-button:hover,
 body.dark .logout-button:hover,
 body.dark .profile-button:hover {
   color: #000 !important;

@@ -5,6 +5,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 import SplashScreen from './components/SplashScreen';
 import LandingPage from './pages/LandingPage';
+import About from './pages/About';
 // Updated import paths
 import LoginPage from './pages/auth/LoginPage';
 import RegisterPage from './pages/auth/RegisterPage';
@@ -42,6 +43,7 @@ function AppContent() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/about" element={<About />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/verify-otp" element={<OTPVerification />} />

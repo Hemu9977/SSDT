@@ -6,6 +6,7 @@ const {
   sanitizeTextsForLLM,
   assertNoLeakage,
 } = require('./geminiSanitizer');
+const { lighthouseScores, formatScore, formatMetric } = require('../utils/scoreFormat');
 
 // gemini-2.5-pro  → deep analysis, final reports, vulnerability reasoning
 // gemini-2.5-flash → formatting, translation, summaries (lower latency / cost)
@@ -404,8 +405,10 @@ async function refineReport(_unused, psiReport, observatoryReport, url, zapRepor
   const webCheckTls       = webCheckReport?.tls            || webCheckReport?.ssl || {};
   const webCheckTechStack = webCheckReport?.['tech-stack'] || {};
   const webCheckFirewall  = webCheckReport?.firewall       || {};
+  const webCheckFirewallChecked = !!webCheckReport?.firewall && !webCheckReport.firewall.error;
   const webCheckDns       = webCheckReport?.dns            || {};
   const webCheckHsts      = webCheckReport?.hsts           || {};
+  const webCheckHstsChecked = !!webCheckReport?.hsts && !webCheckReport.hsts.error;
   const webCheckSecurityTxt= webCheckReport?.['security-txt'] || {};
   const webCheckRobotsTxt = webCheckReport?.['robots-txt'] || {};
   const webCheckCookies   = webCheckReport?.cookies        || {};
@@ -453,8 +456,8 @@ ${hasWebCheckData ? `Web Security Configuration Report:
 - Security Headers: ${JSON.stringify(webCheckHeaders?.headers || webCheckHeaders || 'N/A')}
 - TLS/SSL Configuration: ${webCheckTls?.grade || webCheckTls?.valid ? `Grade: ${webCheckTls.grade || 'Valid'}, Protocol: ${webCheckTls.protocol || 'N/A'}, Cipher: ${webCheckTls.cipher || 'N/A'}` : 'N/A'}
 - Technology Stack: ${Array.isArray(webCheckTechStack?.technologies) ? webCheckTechStack.technologies.map(t => t.name || t).join(', ') : 'N/A'}
-- Firewall/WAF Detection: ${webCheckFirewall?.hasWaf ? `Detected: ${webCheckFirewall.waf || 'Yes'}` : 'No WAF detected'}
-- HSTS Status: ${webCheckHsts?.enabled ? `Enabled (max-age: ${webCheckHsts.maxAge || 'N/A'})` : 'Not enabled'}
+- Firewall/WAF Detection: ${webCheckFirewallChecked ? (webCheckFirewall?.hasWaf ? `Detected: ${webCheckFirewall.waf || 'Yes'}` : 'No WAF detected') : 'Not checked (probe unavailable this scan)'}
+- HSTS Status: ${webCheckHstsChecked ? (webCheckHsts?.enabled ? `Enabled (max-age: ${webCheckHsts.maxAge || 'N/A'})` : 'Not enabled') : 'Not checked (probe unavailable this scan)'}
 - DNS Configuration: ${webCheckDns?.a ? `A Records: ${webCheckDns.a.join(', ')}` : 'N/A'}
 - Security.txt: ${webCheckSecurityTxt?.present ? 'Present' : 'Not found'}
 - Robots.txt: ${webCheckRobotsTxt?.present ? 'Present' : 'Not found'}
@@ -599,16 +602,36 @@ async function formatScanDataForPdf(scanResult, options = {}) {
   const urlscanMalicious = scanResult.urlscanResult?.verdicts?.overall?.malicious || false;
   const overallRisk = (zapHighCount > 0 || urlscanMalicious) ? 'High' : zapMediumCount > 0 ? 'Medium' : 'Low';
 
-  const categories        = scanResult.pagespeedResult?.lighthouseResult?.categories || {};
-  const performanceScore  = Math.round((categories.performance?.score       || 0) * 100);
-  const accessibilityScore= Math.round((categories.accessibility?.score     || 0) * 100);
-  const bestPracticesScore= Math.round((categories['best-practices']?.score || 0) * 100);
-  const seoScore          = Math.round((categories.seo?.score               || 0) * 100);
+  // Scores are `null` when PageSpeed never returned the category — rendered as
+  // "N/A", never as "0/100" (see utils/scoreFormat.js).
+  const psi               = lighthouseScores(scanResult.pagespeedResult);
+  const performanceScore  = formatScore(psi.performance);
+  const accessibilityScore= formatScore(psi.accessibility);
+  const bestPracticesScore= formatScore(psi.bestPractices);
+  const seoScore          = formatScore(psi.seo);
 
   const obs      = scanResult.observatoryResult || {};
   const zap      = scanResult.zapResult        || {};
   const urlscan  = scanResult.urlscanResult    || {};
   const webCheck = scanResult.webCheckResult?.fullResults || {};
+
+  // A WebCheck that never completed has not "found no WAF" — it found nothing.
+  // Report those fields as N/A so neither Gemini nor the PDF states a negative
+  // finding that was never measured.
+  const wcOk = ['completed', 'completed_partial', 'completed_with_errors']
+    .includes(scanResult.webCheckResult?.status);
+  // A field's own sub-scan can fail even when the overall run is wcOk (partial
+  // success) — firewall/hsts are HEAVY_SCANS serialized behind concurrency=1 and
+  // frequently miss their turn. Gate each field on its own presence, not just wcOk,
+  // so a missing probe reads "N/A" instead of a false negative "No".
+  const wcYesNo = (checked, present) => checked ? (present ? 'Yes' : 'No') : 'N/A';
+  const wcTlsGrade = (wcOk && (webCheck.tls?.tlsInfo?.grade || webCheck.ssl?.grade)) || 'N/A';
+  const wcFirewallChecked = wcOk && !!webCheck.firewall && !webCheck.firewall.error;
+  const wcHstsChecked     = wcOk && !!webCheck.hsts && !webCheck.hsts.error;
+  const wcWaf = wcFirewallChecked
+    ? (webCheck.firewall?.hasWaf ? `Yes (${webCheck.firewall.waf})` : 'No')
+    : 'N/A';
+  const wcTech = (wcOk && webCheck['tech-stack']?.technologies?.slice(0, 5).map(t => t.name || t).join(', ')) || 'N/A';
 
   const scanHistoryRows = Array.isArray(options.scanHistoryRows) ? options.scanHistoryRows : [];
 
@@ -619,14 +642,14 @@ Status: ${scanResult.status}
 Overall Risk Level: ${overallRisk}
 
 PAGESPEED INSIGHTS:
-- Performance Score: ${performanceScore}/100
-- Accessibility Score: ${accessibilityScore}/100
-- Best Practices Score: ${bestPracticesScore}/100
-- SEO Score: ${seoScore}/100
+- Performance Score: ${performanceScore}
+- Accessibility Score: ${accessibilityScore}
+- Best Practices Score: ${bestPracticesScore}
+- SEO Score: ${seoScore}
 
 MOZILLA OBSERVATORY:
 - Security Grade: ${obs.grade || 'N/A'}
-- Score: ${obs.score || 0}/100
+- Score: ${formatMetric(obs.score)}
 - Tests Passed: ${obs.tests_passed || 0}
 - Tests Failed: ${obs.tests_failed || 0}
 
@@ -641,17 +664,17 @@ ${zap.alerts ? `- Top Vulnerabilities: ${zap.alerts.slice(0, 5).map(a => `[${a.r
 
 URLSCAN.IO ANALYSIS:
 - Verdict: ${urlscan.verdicts?.overall?.malicious ? 'MALICIOUS' : 'Clean'}
-- Threat Score: ${urlscan.verdicts?.overall?.score || 0}/100
+- Threat Score: ${formatMetric(urlscan.verdicts?.overall?.score)}
 - Domain: ${urlscan.page?.domain || 'N/A'}
 - Server IP: ${urlscan.page?.ip || 'N/A'}
 - Country: ${urlscan.page?.country || 'N/A'}
 - Server: ${urlscan.page?.server || 'N/A'}
 
 WEBCHECK ANALYSIS:
-- TLS Grade: ${webCheck.tls?.tlsInfo?.grade || webCheck.ssl?.grade || 'N/A'}
-- WAF Detected: ${webCheck.firewall?.hasWaf ? `Yes (${webCheck.firewall.waf})` : 'No'}
-- HSTS Enabled: ${webCheck.hsts?.enabled ? 'Yes' : 'No'}
-- Technologies: ${webCheck['tech-stack']?.technologies?.slice(0, 5).map(t => t.name || t).join(', ') || 'N/A'}
+- TLS Grade: ${wcTlsGrade}
+- WAF Detected: ${wcWaf}
+- HSTS Enabled: ${wcYesNo(wcHstsChecked, webCheck.hsts?.enabled)}
+- Technologies: ${wcTech}
 `;
 
   const prompt = `Convert this security scan data into a structured JSON format for a professional bilingual PDF report (English and Japanese).
@@ -692,10 +715,10 @@ Return a JSON object with this EXACT structure:
       "id": "pagespeed",
       "title": { "en": "Performance & Accessibility Analysis", "ja": "Japanese translation" },
       "items": [
-        { "label": { "en": "Performance", "ja": "Japanese" }, "value": "${performanceScore}/100", "type": "score" },
-        { "label": { "en": "Accessibility", "ja": "Japanese" }, "value": "${accessibilityScore}/100", "type": "score" },
-        { "label": { "en": "Best Practices", "ja": "Japanese" }, "value": "${bestPracticesScore}/100", "type": "score" },
-        { "label": { "en": "SEO", "ja": "Japanese" }, "value": "${seoScore}/100", "type": "score" }
+        { "label": { "en": "Performance", "ja": "Japanese" }, "value": "${performanceScore}", "type": "score" },
+        { "label": { "en": "Accessibility", "ja": "Japanese" }, "value": "${accessibilityScore}", "type": "score" },
+        { "label": { "en": "Best Practices", "ja": "Japanese" }, "value": "${bestPracticesScore}", "type": "score" },
+        { "label": { "en": "SEO", "ja": "Japanese" }, "value": "${seoScore}", "type": "score" }
       ]
     },
     {
@@ -703,7 +726,7 @@ Return a JSON object with this EXACT structure:
       "title": { "en": "Security Configuration Assessment", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Security Grade", "ja": "Japanese" }, "value": "${obs.grade || 'N/A'}", "type": "grade" },
-        { "label": { "en": "Score", "ja": "Japanese" }, "value": "${obs.score || 0}/100", "type": "score" },
+        { "label": { "en": "Score", "ja": "Japanese" }, "value": "${formatMetric(obs.score)}", "type": "score" },
         { "label": { "en": "Tests Passed", "ja": "Japanese" }, "value": "${obs.tests_passed || 0}", "type": "success" },
         { "label": { "en": "Tests Failed", "ja": "Japanese" }, "value": "${obs.tests_failed || 0}", "type": "danger" }
       ]
@@ -737,7 +760,7 @@ Return a JSON object with this EXACT structure:
       "title": { "en": "Threat & Reputation Analysis", "ja": "Japanese translation" },
       "items": [
         { "label": { "en": "Verdict", "ja": "Japanese" }, "value": { "en": "${urlscan.verdicts?.overall?.malicious ? 'MALICIOUS' : 'Clean'}", "ja": "Japanese" }, "type": "${urlscan.verdicts?.overall?.malicious ? 'danger' : 'success'}" },
-        { "label": { "en": "Threat Score", "ja": "Japanese" }, "value": "${urlscan.verdicts?.overall?.score || 0}/100", "type": "score" },
+        { "label": { "en": "Threat Score", "ja": "Japanese" }, "value": "${formatMetric(urlscan.verdicts?.overall?.score)}", "type": "score" },
         { "label": { "en": "Domain", "ja": "Japanese" }, "value": "${urlscan.page?.domain || 'N/A'}", "type": "stat" },
         { "label": { "en": "Server IP", "ja": "Japanese" }, "value": "${urlscan.page?.ip || 'N/A'}", "type": "stat" },
         { "label": { "en": "Country", "ja": "Japanese" }, "value": "${urlscan.page?.country || 'N/A'}", "type": "stat" },
@@ -748,10 +771,10 @@ Return a JSON object with this EXACT structure:
       "id": "webcheck",
       "title": { "en": "Web Security Configuration", "ja": "Japanese translation" },
       "items": [
-        { "label": { "en": "TLS Grade", "ja": "Japanese" }, "value": "${webCheck.tls?.tlsInfo?.grade || webCheck.ssl?.grade || 'N/A'}", "type": "grade" },
-        { "label": { "en": "WAF Detected", "ja": "Japanese" }, "value": { "en": "${webCheck.firewall?.hasWaf ? 'Yes' : 'No'}", "ja": "Japanese" }, "type": "${webCheck.firewall?.hasWaf ? 'success' : 'warning'}" },
-        { "label": { "en": "HSTS Enabled", "ja": "Japanese" }, "value": { "en": "${webCheck.hsts?.enabled ? 'Yes' : 'No'}", "ja": "Japanese" }, "type": "${webCheck.hsts?.enabled ? 'success' : 'warning'}" },
-        { "label": { "en": "Technologies", "ja": "Japanese" }, "value": "${webCheck['tech-stack']?.technologies?.slice(0, 5).map(t => t.name || t).join(', ') || 'N/A'}", "type": "stat" }
+        { "label": { "en": "TLS Grade", "ja": "Japanese" }, "value": "${wcTlsGrade}", "type": "grade" },
+        { "label": { "en": "WAF Detected", "ja": "Japanese" }, "value": { "en": "${wcYesNo(wcFirewallChecked, webCheck.firewall?.hasWaf)}", "ja": "Japanese" }, "type": "${!wcFirewallChecked ? 'stat' : (webCheck.firewall?.hasWaf ? 'success' : 'warning')}" },
+        { "label": { "en": "HSTS Enabled", "ja": "Japanese" }, "value": { "en": "${wcYesNo(wcHstsChecked, webCheck.hsts?.enabled)}", "ja": "Japanese" }, "type": "${!wcHstsChecked ? 'stat' : (webCheck.hsts?.enabled ? 'success' : 'warning')}" },
+        { "label": { "en": "Technologies", "ja": "Japanese" }, "value": "${wcTech}", "type": "stat" }
       ]
     }
   ]

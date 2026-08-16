@@ -1,31 +1,66 @@
 {
-  "family": "ssdt-webcheck-task",
-  "requiresCompatibilities": ["FARGATE"],
+  "_verified_against_live": "webcheck-task:21, ap-northeast-1, checked 2026-08-13. Service Connect (discovery name 'webcheck', client alias webcheck:3000) is configured on the ECS *service*, not in this task def — not represented here.",
+  "family": "webcheck-task",
+  "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
   "cpu": "1024",
   "memory": "2048",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::459181228792:role/ecsTaskRole",
   "containerDefinitions": [
     {
       "name": "webcheck",
-      "image": "459181228792.dkr.ecr.ap-south-1.amazonaws.com/ssdt-webcheck:latest",
+      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/ssdt-webcheck:v6",
       "essential": true,
       "portMappings": [
-        { "containerPort": 3002, "protocol": "tcp" }
+        { "containerPort": 3000, "protocol": "tcp" }
       ],
       "environment": [
-        { "name": "PORT",          "value": "3002" },
-        { "name": "WC_SERVER",     "value": "true" },
-        { "name": "CHROME_PATH",   "value": "/usr/bin/chromium" },
-        { "name": "NODE_ENV",      "value": "production" }
+        { "name": "WEBCHECK_URI",                          "value": "http://webcheck:3000" },
+        { "name": "WORKER_CONCURRENCY",                    "value": "1" },
+        { "name": "WEBCHECK_CONCURRENCY",                  "value": "1" },
+        { "name": "WEBCHECK_LIGHT_SCAN_CONCURRENCY",       "value": "1" },
+        { "name": "WEBCHECK_HEAVY_SCAN_CONCURRENCY",       "value": "1" },
+        { "name": "WEBCHECK_PER_SCAN_TYPE_CONCURRENCY",    "value": "1" },
+        { "name": "WEBCHECK_MAX_ACTIVE_SCANS",             "value": "1" },
+        { "name": "WEBCHECK_MAX_ACTIVE_SCANS_PER_USER",    "value": "0" },
+        { "name": "WEBCHECK_MAX_QUEUE_SIZE",               "value": "10" },
+        { "name": "WEBCHECK_QUEUE_TIMEOUT_MS",             "value": "300000" },
+        { "name": "WEBCHECK_REQUEST_TIMEOUT_MS",           "value": "120000" },
+        { "name": "WEBCHECK_PER_SCAN_TIMEOUT_MS",          "value": "120000" },
+        { "name": "WEBCHECK_RETRY_ATTEMPTS",               "value": "1" },
+        { "name": "WEBCHECK_RETRY_INITIAL_DELAY_MS",       "value": "1000" },
+        { "name": "WEBCHECK_RETRY_MAX_DELAY_MS",           "value": "15000" },
+        { "name": "WEBCHECK_RETRY_BACKOFF_FACTOR",         "value": "2" },
+        { "name": "WEBCHECK_RETRY_JITTER_FACTOR",          "value": "0.3" },
+        { "name": "WEBCHECK_CIRCUIT_BREAKER_THRESHOLD",    "value": "5" },
+        { "name": "WEBCHECK_CIRCUIT_BREAKER_RESET_MS",     "value": "60000" },
+        { "name": "WEBCHECK_HEALTH_TIMEOUT_MS",            "value": "5000" },
+        { "name": "WEBCHECK_MEMORY_PRESSURE_HEAP_RATIO",   "value": "0" },
+        { "name": "WEBCHECK_GRIDFS_THRESHOLD_MB",          "value": "10" },
+        { "name": "WEBCHECK_GRIDFS_CACHE_TTL_MS",          "value": "60000" },
+        { "name": "WEBCHECK_MAX_ARCHIVE_ENTRIES",          "value": "20" },
+        { "name": "WORKER_RATE_LIMIT_MAX",                 "value": "6" },
+        { "name": "WORKER_RATE_LIMIT_WINDOW_MS",           "value": "60000" },
+        { "name": "DNS_CACHE_TTL_SECONDS",                 "value": "30" },
+        { "name": "HTTP_KEEPALIVE",                        "value": "true" },
+        { "name": "HTTP_KEEPALIVE_MSECS",                  "value": "30000" },
+        { "name": "HTTP_MAX_SOCKETS",                      "value": "5" },
+        { "name": "HTTP_MAX_FREE_SOCKETS",                 "value": "2" },
+        { "name": "NODE_OPTIONS",                          "value": "--dns-result-order=ipv4first" }
       ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "node -e \"require('net').connect(3000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""],
+        "interval": 60,
+        "timeout": 30,
+        "retries": 5,
+        "startPeriod": 120
+      },
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/ssdt-webcheck",
-          "awslogs-region": "ap-south-1",
-          "awslogs-stream-prefix": "webcheck",
+          "awslogs-group": "/ecs/webcheck",
+          "awslogs-region": "ap-northeast-1",
+          "awslogs-stream-prefix": "ecs",
           "awslogs-create-group": "true"
         }
       }

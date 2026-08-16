@@ -14,31 +14,27 @@ services:
       - "8080:8080"
     mem_limit: 8g
     cpus: 6
+    # zap.sh only recognizes a bare "-Xmx*" argument as a JVM override (anything
+    # else is forwarded to ZAP's own app-arg parser, breaking startup) and does
+    # not read JAVA_OPTS at all. Setting both -Xms and -Xmx requires ZAP's actual
+    # supported mechanism: the first line of $HOME/.ZAP/.ZAP_JVM.properties.
+    # Verified against ghcr.io/zaproxy/zaproxy:stable: startup log shows
+    # "Using JVM args: -Xms2g -Xmx4g" and "maxMemory: 4 GB".
+    entrypoint: ["sh", "-c"]
     command:
-      - "zap.sh"
-      - "-daemon"
-      - "-host"
-      - "0.0.0.0"
-      - "-port"
-      - "8080"
-      - "-config"
-      - "api.addrs.addr.name=.*"
-      - "-config"
-      - "api.addrs.addr.regex=true"
-      - "-config"
-      - "api.disablekey=true"
-      - "-config"
-      - "database.responseBodyMaxSize=52428800"
-      - "-config"
-      - "spider.maxDepth=20"
-      - "-config"
-      - "spider.maxDuration=120"
-      - "-config"
-      - "spider.threadCount=10"
-      - "-config"
-      - "scanner.threadPerHost=10"
-      - "-config"
-      - "scanner.hostPerScan=10"
+      - >
+        mkdir -p /home/zap/.ZAP &&
+        printf -- '-Xms2g -Xmx4g\n' > /home/zap/.ZAP/.ZAP_JVM.properties &&
+        exec zap.sh -daemon -host 0.0.0.0 -port 8080
+        -config api.addrs.addr.name=.*
+        -config api.addrs.addr.regex=true
+        -config api.disablekey=true
+        -config database.responseBodyMaxSize=52428800
+        -config spider.maxDepth=20
+        -config spider.maxDuration=120
+        -config spider.threadCount=10
+        -config scanner.threadPerHost=10
+        -config scanner.hostPerScan=10
     networks:
       - app-network
     healthcheck:
@@ -58,31 +54,21 @@ services:
       - "8081:8080"
     mem_limit: 8g
     cpus: 6
+    entrypoint: ["sh", "-c"]
     command:
-      - "zap.sh"
-      - "-daemon"
-      - "-host"
-      - "0.0.0.0"
-      - "-port"
-      - "8080"
-      - "-config"
-      - "api.addrs.addr.name=.*"
-      - "-config"
-      - "api.addrs.addr.regex=true"
-      - "-config"
-      - "api.disablekey=true"
-      - "-config"
-      - "database.responseBodyMaxSize=52428800"
-      - "-config"
-      - "spider.maxDepth=20"
-      - "-config"
-      - "spider.maxDuration=120"
-      - "-config"
-      - "spider.threadCount=10"
-      - "-config"
-      - "scanner.threadPerHost=10"
-      - "-config"
-      - "scanner.hostPerScan=10"
+      - >
+        mkdir -p /home/zap/.ZAP &&
+        printf -- '-Xms2g -Xmx4g\n' > /home/zap/.ZAP/.ZAP_JVM.properties &&
+        exec zap.sh -daemon -host 0.0.0.0 -port 8080
+        -config api.addrs.addr.name=.*
+        -config api.addrs.addr.regex=true
+        -config api.disablekey=true
+        -config database.responseBodyMaxSize=52428800
+        -config spider.maxDepth=20
+        -config spider.maxDuration=120
+        -config spider.threadCount=10
+        -config scanner.threadPerHost=10
+        -config scanner.hostPerScan=10
     networks:
       - app-network
     healthcheck:

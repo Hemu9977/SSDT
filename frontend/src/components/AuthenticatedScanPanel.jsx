@@ -11,6 +11,8 @@ import '../styles/ScoreCards.scss';
 import { useNotifications } from '../contexts/NotificationContext';
 
 import { API_BASE } from '../config/api';
+import { getScanStatusLine } from '../utils/scanStatus';
+import { downloadPdfReport } from '../utils/pdfDownload';
 
 // Loading placeholder for progressive loading (same as Hero.jsx)
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -19,6 +21,16 @@ const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) =
     style={{ height, width, minHeight: height, ...style }}
   />
 );
+
+const LOGIN_ERROR_MESSAGE_KEYS = {
+  FIELD_NOT_FOUND: 'loginFieldNotFound',
+  FIELD_FILL_FAILED: 'loginFieldFillFailed',
+  LOGIN_ANALYSIS_FAILED: 'loginAnalysisFailed',
+  UNEXPECTED_ERROR: 'loginUnexpectedError'
+};
+
+const errorCodeToMessageKey = (errorCode) =>
+  LOGIN_ERROR_MESSAGE_KEYS[errorCode] || 'couldNotAuthenticateProvidedCredentials';
 
 const STEPS = [
   { id: 1, labelKey: 'configure' },
@@ -60,7 +72,9 @@ const AuthenticatedScanPanel = () => {
 
   // Step 4: Scan
   const [scanId, setScanId] = useState(null);
-  const [scanPhase, setScanPhase] = useState('');
+  // NOTE: the backend `phase` (spidering / ajax_spider / active_scan / ...) is
+  // deliberately not stored or displayed — it names the underlying scan engine's
+  // internals. Progress is reported as neutral steps via utils/scanStatus.js.
   const [scanProgress, setScanProgress] = useState(0);
   const [scanning, setScanning] = useState(false);
 
@@ -238,11 +252,14 @@ const AuthenticatedScanPanel = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Detection failed');
+        // Backend error text is English-only and can name the scan engines.
+        console.error('Login-field detection failed:', data);
+        throw new Error(t('couldNotAnalyzeLogin'));
       }
 
       if (!data.success) {
-        setDetectionError(data.error || t('couldNotAnalyzeLogin'));
+        console.error('Login-field detection unsuccessful:', data);
+        setDetectionError(t('couldNotAnalyzeLogin'));
         return;
       }
 
@@ -374,8 +391,8 @@ const AuthenticatedScanPanel = () => {
         setCredentials(clearedCreds);
         setStep(3);
       }
-    } catch (err) {
-      setTestResult({ authenticated: false, errorMessage: err.message });
+    } catch {
+      setTestResult({ authenticated: false, errorCode: 'UNEXPECTED_ERROR' });
     } finally {
       setTesting(false);
     }
@@ -418,11 +435,14 @@ const AuthenticatedScanPanel = () => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create schedule');
+      if (!res.ok) {
+        console.error('Schedule creation failed:', data);
+        throw new Error(t('failedSaveSchedule'));
+      }
 
       sessionStorage.removeItem('pendingScheduleConfig');
       setPendingSchedule(null);
-      alert('Authenticated Schedule created successfully!');
+      alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
       setError(err.message);
@@ -469,7 +489,12 @@ const AuthenticatedScanPanel = () => {
           setScanning(false);
           return;
         }
-        throw new Error(data.error || t('failedStartScan'));
+        // `data.error` is an English backend string that can name the scan
+        // engines — log it, never render it.
+        console.error('Auth scan start failed:', res.status, data);
+        if (res.status === 429) throw new Error(t('scanRateLimited'));
+        if (res.status === 403) throw new Error(t('planLimitReached'));
+        throw new Error(t('failedStartScan'));
       }
 
       setScanId(data.scanId);
@@ -506,7 +531,6 @@ const AuthenticatedScanPanel = () => {
       setHasReport(true);
       setScanning(false);
       setScanProgress(100);
-      setScanPhase('');
       localStorage.removeItem('activeAuthScan');
       wsListeningRef.current = false;
       if (wsWatchdogRef.current) {
@@ -530,20 +554,24 @@ const AuthenticatedScanPanel = () => {
     if (status === 'failed') {
       setScanning(false);
       setScanProgress(0);
-      setScanPhase('');
       wsListeningRef.current = false;
       if (wsWatchdogRef.current) {
         clearTimeout(wsWatchdogRef.current);
         wsWatchdogRef.current = null;
       }
-      setError(data.error || t('scanFailed'));
+      // data.error can be e.g. 'ZAP scan timed out' — never surface it. Resolve
+      // the message from the structured reason instead (parity with Hero).
+      setError(
+        data.failureReason === 'vulnerability_scan_failed'
+          ? t('scanFailedVulnerability')
+          : t('scanFailedGeneric')
+      );
       localStorage.removeItem('activeAuthScan');
       return;
     }
 
     if (status === 'stopped') {
       setScanning(false);
-      setScanPhase(t('scanWasStopped'));
       wsListeningRef.current = false;
       if (wsWatchdogRef.current) {
         clearTimeout(wsWatchdogRef.current);
@@ -556,7 +584,6 @@ const AuthenticatedScanPanel = () => {
     // Partial updates
     setReport(prev => ({ ...(prev || {}), ...data, isPartial: true }));
     if (data.progress != null) setScanProgress(data.progress);
-    if (data.phase != null) setScanPhase(data.phase);
   }, [t, setHasReport]);
 
   // ========== WebSocket Listener ==========
@@ -615,7 +642,6 @@ const AuthenticatedScanPanel = () => {
         // Prevent updating if stopped/cancelled while requesting
         if (stopPollingRef.current) return;
 
-        setScanPhase(data.phase || '');
         setScanProgress(data.progress || 0);
 
         // Progressive loading: update report with all scan data
@@ -635,7 +661,12 @@ const AuthenticatedScanPanel = () => {
           clearInterval(pollingIntervalRef.current);
           isPollingRef.current = false;
           localStorage.removeItem('activeAuthScan');
-          setError(data.error || t('scanFailed'));
+          // data.error can be e.g. 'ZAP scan timed out' — never surface it.
+          setError(
+            data.failureReason === 'vulnerability_scan_failed'
+              ? t('scanFailedVulnerability')
+              : t('scanFailedGeneric')
+          );
           setScanning(false);
         }
       } catch (err) {
@@ -650,6 +681,65 @@ const AuthenticatedScanPanel = () => {
 
   // Keep pollRef pointed at the latest closure
   pollRef.current = startPolling;
+
+  // ========== PDF Download ==========
+  // Mirrors Hero.handlePdfDownload — CLAUDE.md requires feature parity between
+  // the two panels, so both use the shared utils/pdfDownload helper.
+  //
+  // The scan identity is snapshotted before any awaiting: `report` is mutable
+  // state that a background update can replace mid-generation, which previously
+  // produced a file named for one scan containing another's data.
+  const handlePdfDownload = useCallback(async (lang) => {
+    setPdfDropdownOpen(false);
+    if (pdfDownloading) return;
+
+    const snapshot = {
+      analysisId: report?.analysisId || scanId,
+      target: report?.target,
+    };
+
+    setPdfDownloading(true);
+    setPdfProgress(0);
+    setPdfProgressMessage(lang === 'ja' ? t('initializingJapanesePdf') : t('initializingEnglishPdf'));
+
+    const steps = [
+      t('formattingScanData'),
+      t('formattingAiAnalysis'),
+      ...(lang === 'ja' ? [t('translatingToJapanese')] : []),
+      t('renderingPdfDocument'),
+      t('finalizing'),
+    ];
+
+    try {
+      await downloadPdfReport({
+        ...snapshot,
+        lang,
+        apiBase: API_BASE,
+        token: localStorage.getItem('token'),
+        onPoll: (pollCount) => {
+          const idx = Math.min(pollCount - 1, steps.length - 1);
+          setPdfProgress(Math.min(15 + pollCount * 12, 92));
+          setPdfProgressMessage(steps[idx]);
+        },
+      });
+      setPdfProgress(100);
+      setPdfProgressMessage(t('downloadComplete'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 2000);
+    } catch (err) {
+      // err.messageKey is an i18n key; the backend's English text is never shown.
+      console.error('PDF download failed:', err);
+      setPdfProgressMessage(t(err.messageKey || 'pdfGenerationFailed'));
+      setTimeout(() => {
+        setPdfDownloading(false);
+        setPdfProgress(0);
+        setPdfProgressMessage('');
+      }, 4000);
+    }
+  }, [pdfDownloading, report, scanId, t]);
 
   // ========== Stop Scan ==========
   const handleStopScan = async () => {
@@ -705,7 +795,6 @@ const AuthenticatedScanPanel = () => {
     setTestResult(null);
     setTempSessionId(null);
     setScanId(null);
-    setScanPhase('');
     setScanProgress(0);
     setScanning(false);
     setReport(null);
@@ -864,7 +953,7 @@ const AuthenticatedScanPanel = () => {
                 <div className="warnings">
                   {detectedFields.warnings.map((warning, idx) => (
                     <div key={idx} className="warning-item">
-                      âš ï¸ {warning}
+                      ⚠️ {warning}
                     </div>
                   ))}
                 </div>
@@ -981,8 +1070,8 @@ const AuthenticatedScanPanel = () => {
                   </>
                 ) : (
                   <>
-                    <strong>âŒ {t('loginFailed')}</strong>
-                    <p>{testResult.errorMessage || t('couldNotAuthenticateProvidedCredentials')}</p>
+                    <strong>❌ {t('loginFailed')}</strong>
+                    <p>{t(errorCodeToMessageKey(testResult.errorCode))}</p>
                   </>
                 )}
               </div>
@@ -1057,15 +1146,14 @@ const AuthenticatedScanPanel = () => {
                 <div className="progress-info">
                   <span className="progress-percent">{scanProgress}%</span>
                   <span className="progress-phase">
-                    {(() => {
-                      if (!report?.hasPsiResult || !report?.hasObservatoryResult) return t('fetchingPerformanceAndSecurityMetadata');
-                      if (report?.zapPending) return t('vulnerabilityAnalysisInProgress', { phase: scanPhase, progress: scanProgress });
-                      if (!report?.hasZapResult) return t('startingComprehensiveVulnerabilityScan');
-                      if (!report?.hasRefinedReport) return t('generatingAiPoweredSecurityInsights');
-                      return t('finalizingResults');
-                    })()}
+                    {/* Neutral step progress — never leaks the backend `phase`
+                        (spidering / ajax_spider / active_scan / ...) or engine names. */}
+                    {getScanStatusLine(report, t)}
                   </span>
                 </div>
+                <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: theme === 'light' ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>
+                  ⚠ {t('scanNotice')}
+                </p>
               </div>
             )}
 
@@ -1083,7 +1171,7 @@ const AuthenticatedScanPanel = () => {
               {report?.refinedReport ? (
                 isTranslatingReport ? (
                   <div style={{ textAlign: 'center', padding: '1rem' }}>
-                    <p style={{ color: 'var(--accent)' }}>Translating report to Japanese...</p>
+                    <p style={{ color: 'var(--accent)' }}>{t('translatingReportToJapanese')}</p>
                   </div>
                 ) : (
                   <ReactMarkdown>
@@ -1098,7 +1186,7 @@ const AuthenticatedScanPanel = () => {
                   <LoadingPlaceholder height="1rem" width="92%" style={{ marginBottom: '0.5rem' }} />
                   <LoadingPlaceholder height="1rem" width="75%" style={{ marginBottom: '0.5rem' }} />
                   <p style={{ color: 'var(--accent)', marginTop: '1rem', textAlign: 'center' }}>
-                    Generating AI analysis... (waiting for all scan data)
+                    {t('generatingAiAnalysisWaitingForAllScanData')}
                   </p>
                 </div>
               )}
@@ -1122,15 +1210,15 @@ const AuthenticatedScanPanel = () => {
               let zapRiskLabel = t('passed'); let zapRiskColor = '#00d084'; let zapPendingMessage = null;
               if (backendZapData) {
                 if (backendZapData.status === 'pending' || backendZapData.status === 'running') {
-                  zapRiskLabel = 'Scanning...'; zapRiskColor = '#ffb900';
-                  zapPendingMessage = `${backendZapData.phase || t('starting')}: ${backendZapData.progress || 0}%`;
+                  zapRiskLabel = t('scanning'); zapRiskColor = '#ffb900';
+                  zapPendingMessage = `${backendZapData.progress || 0}%`;
                 } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
-                  if (backendZapData.riskCounts.High > 0) { zapRiskLabel = 'High Risk'; zapRiskColor = '#e81123'; }
-                  else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = 'Medium Risk'; zapRiskColor = '#ff8c00'; }
-                  else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = 'Low Risk'; zapRiskColor = '#ffb900'; }
+                  if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = '#e81123'; }
+                  else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = '#ff8c00'; }
+                  else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = '#ffb900'; }
                 } else if (backendZapData.status === 'failed') {
-                  zapRiskLabel = 'Failed'; zapRiskColor = '#e81123';
-                  zapPendingMessage = backendZapData.message || t('scanFailed');
+                  zapRiskLabel = t('scanFailed'); zapRiskColor = '#e81123';
+                  zapPendingMessage = null;
                 }
               }
 
@@ -1152,12 +1240,12 @@ const AuthenticatedScanPanel = () => {
 
               return (
                 <>
-                  <h3 className="report-title">{'📊'} {t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
+                  <h3 className="report-title">{t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
 
                   <div className="score-cards-grid">
                     {/* OWASP ZAP (Authenticated) */}
                     <div className="score-card">
-                      <h4 className="score-card__title">OWASP ZAP (Auth)</h4>
+                      <h4 className="score-card__title">{t('vulnerabilityScanAuth')}</h4>
                       {backendZapData ? (
                         <>
                           <span className="score-card__value" style={{ color: zapRiskColor }}>{zapRiskLabel}</span>
@@ -1201,7 +1289,7 @@ const AuthenticatedScanPanel = () => {
                       {observatoryData?.grade ? (
                         <>
                           <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
-                          <p className="score-card__label">Mozilla Observatory</p>
+                          <p className="score-card__label">{t('securityConfig')}</p>
                         </>
                       ) : (
                         <div className="score-card__loading loading-pulse">
@@ -1213,7 +1301,7 @@ const AuthenticatedScanPanel = () => {
 
                     {/* URLScan.io */}
                     <div className="score-card">
-                      <h4 className="score-card__title">URLScan.io</h4>
+                      <h4 className="score-card__title">{t('threatIntelligence')}</h4>
                       {report?.hasUrlscanResult && report?.urlscanData ? (
                         <>
                           <span className="score-card__value" style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084' }}>
@@ -1270,7 +1358,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">{t('techStack')}</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : (() => {
                         const techData = webCheckReport?.['tech-stack'];
                         const techArray = techData?.technologies || (Array.isArray(techData) ? techData : null) || (techData && !techData.error && typeof techData === 'object' ? Object.keys(techData) : null);
@@ -1288,7 +1376,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Firewall</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.firewall && !webCheckReport.firewall.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport.firewall.hasWaf ? 'safe' : 'medium'}`}>
@@ -1305,7 +1393,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">TLS Grade</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.tls && !webCheckReport.tls.error ? (
                         <>
                           <span className="score-card__value" style={{ color: getObservatoryGradeColor(webCheckReport.tls.tlsInfo?.grade) }}>
@@ -1322,7 +1410,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Quality</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.quality && !webCheckReport.quality.error ? (
                         (() => {
                           const perfScore = Math.round((webCheckReport.quality.lighthouseResult?.categories?.performance?.score || 0) * 100);
@@ -1337,7 +1425,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Mail Config</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['mail-config'] && !webCheckReport['mail-config'].error && !webCheckReport['mail-config'].skipped ? (
                         <>
                           <span className="score-card__value score-card__value--safe">{webCheckReport['mail-config'].mxRecords?.length || 0}</span>
@@ -1354,7 +1442,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">WHOIS</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.whois && !webCheckReport.whois.error ? (
                         <>
                           <span className="score-card__value score-card__value--safe" style={{ fontSize: '0.9rem' }}>{webCheckReport.whois.registrar?.substring(0, 20) || 'Found'}</span>
@@ -1369,7 +1457,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">HSTS</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.hsts && !webCheckReport.hsts.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport.hsts.hstsEnabled ? 'safe' : 'high'}`}>
@@ -1386,7 +1474,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Security Blacklist</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['block-lists'] && !webCheckReport['block-lists'].error ? (
                         (() => {
                           const blocklists = webCheckReport['block-lists'].blocklists || [];
@@ -1402,7 +1490,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Carbon</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.carbon && !webCheckReport.carbon.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport.carbon.isGreen ? 'safe' : 'medium'}`}>{webCheckReport.carbon.isGreen ? 'Green' : 'Standard'}</span>
@@ -1417,7 +1505,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Archives</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.archives?.skipped ? (
                         <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Not Archived</div>
                       ) : webCheckReport?.archives?.totalScans ? (
@@ -1433,7 +1521,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Sitemap</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.sitemap?.skipped || webCheckReport?.sitemap?.error ? (
                         <div className="score-card__label" style={{ color: 'var(--foreground-darker)', marginTop: '10px' }}>Not Found</div>
                       ) : webCheckReport?.sitemap?.urlset ? (
@@ -1449,7 +1537,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Social Tags</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['social-tags'] && !webCheckReport['social-tags'].error ? (
                         (() => {
                           const tags = webCheckReport['social-tags'];
@@ -1466,7 +1554,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Links</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['linked-pages'] && !webCheckReport['linked-pages'].error ? (
                         <><span className="score-card__value score-card__value--safe">{webCheckReport['linked-pages'].internal?.length || webCheckReport['linked-pages'].links?.length || 0}</span><p className="score-card__label">Links Found</p></>
                       ) : (
@@ -1478,7 +1566,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Redirects</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.redirects && !webCheckReport.redirects.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${(webCheckReport.redirects.redirects?.length || 0) <= 2 ? 'safe' : 'medium'}`}>{webCheckReport.redirects.redirects?.length || 0}</span>
@@ -1493,7 +1581,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">DNS Server</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['dns-server'] && !webCheckReport['dns-server'].error ? (
                         <><span className="score-card__value score-card__value--safe" style={{ fontSize: '1.2rem' }}>{webCheckReport['dns-server'].dns?.length || 1}</span><p className="score-card__label">Servers Found</p></>
                       ) : (
@@ -1505,7 +1593,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">DNSSEC</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.dnssec && !webCheckReport.dnssec.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>{webCheckReport.dnssec.isValid || webCheckReport.dnssec.enabled ? t('valid') : t('notSet')}</span>
@@ -1520,7 +1608,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Security.txt</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['security-txt'] && !webCheckReport['security-txt'].error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport['security-txt'].isPresent || webCheckReport['security-txt'].found ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>{webCheckReport['security-txt'].isPresent || webCheckReport['security-txt'].found ? 'Found' : 'Missing'}</span>
@@ -1535,7 +1623,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Robots.txt</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['robots-txt'] && !webCheckReport['robots-txt'].error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport['robots-txt'].exists || webCheckReport['robots-txt'].isPresent ? 'safe' : 'medium'}`} style={{ fontSize: '1.2rem' }}>{webCheckReport['robots-txt'].exists || webCheckReport['robots-txt'].isPresent ? 'Found' : 'Missing'}</span>
@@ -1550,7 +1638,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Status</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.status && !webCheckReport.status.error ? (
                         <>
                           <span className={`score-card__value score-card__value--${webCheckReport.status.isUp || webCheckReport.status.statusCode === 200 ? 'safe' : 'high'}`}>{webCheckReport.status.statusCode || (webCheckReport.status.isUp ? '200' : 'Down')}</span>
@@ -1565,7 +1653,7 @@ const AuthenticatedScanPanel = () => {
                     <div className="score-card">
                       <h4 className="score-card__title">Rank</h4>
                       {webCheckLoading ? (
-                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? `Uploading ${webCheckUploadProgress}%` : 'Scanning...'}</div>
+                        <div className="score-card__loading" style={{ color: 'var(--accent)', fontSize: '1rem' }}>{webCheckUploading ? t('uploadProgress', { progress: webCheckUploadProgress }) : t('scanning')}</div>
                       ) : webCheckReport?.['legacy-rank'] && !webCheckReport['legacy-rank'].error ? (
                         <>
                           <span className="score-card__value score-card__value--safe" style={{ fontSize: '1rem' }}>#{webCheckReport['legacy-rank'].rank || webCheckReport['legacy-rank'].globalRank || 'N/A'}</span>
@@ -1583,11 +1671,11 @@ const AuthenticatedScanPanel = () => {
                       ? `data:image/png;base64,${webCheckReport.screenshot.image}` : null;
                     const urlscanScreenshot = report?.urlscanData?.screenshot || null;
                     const screenshotSrc = webCheckScreenshot || urlscanScreenshot;
-                    const screenshotSource = webCheckScreenshot ? 'WebCheck' : (urlscanScreenshot ? 'URLScan.io' : null);
                     if (!screenshotSrc) return null;
                     return (
                       <div className="screenshot-preview">
-                        <h4>{t('websiteScreenshot')} <span>({screenshotSource})</span></h4>
+                        {/* The capture source is an internal engine detail — not shown. */}
+                        <h4>{t('websiteScreenshot')}</h4>
                         <img src={screenshotSrc} alt={t('websiteScreenshot')} />
                       </div>
                     );
@@ -1606,13 +1694,13 @@ const AuthenticatedScanPanel = () => {
                   {/* ZAP Pending/Running Status */}
                   {backendZapData && (backendZapData.status === 'pending' || backendZapData.status === 'running') && (
                     <div className="zap-progress-card">
-                      <h3>OWASP ZAP Authenticated Scan in Progress</h3>
-                      <p className="zap-status">{backendZapData.phase || 'Scanning'}: {backendZapData.progress || 0}%</p>
-                      <p className="zap-details">{backendZapData.message || 'Running comprehensive security tests...'}</p>
+                      <h3>{t('scanningInProgress')}</h3>
+                      <p className="zap-status">{backendZapData.progress || 0}%</p>
+                      <p className="zap-details">{t('runningSecurityTests')}</p>
                       {backendZapData.urlsFound > 0 && (
-                        <p className="zap-stats">Found {backendZapData.urlsFound} URLs - {backendZapData.alertsFound || 0} alerts so far</p>
+                        <p className="zap-stats">{t('urlsAndAlertsFound', { urls: backendZapData.urlsFound, alerts: backendZapData.alertsFound || 0 })}</p>
                       )}
-                      <p className="zap-details" style={{ marginTop: '1rem', fontSize: '0.8rem' }}>This page will automatically update when the scan completes.</p>
+                      <p className="zap-details" style={{ marginTop: '1rem', fontSize: '0.8rem' }}>{t('pageWillUpdateAutomatically')}</p>
                     </div>
                   )}
 
@@ -1714,8 +1802,8 @@ const AuthenticatedScanPanel = () => {
                   {/* Download Reports Section */}
                   {report?.analysisId && report?.status === 'completed' && (
                     <div className="download-section">
-                      <h4>Download Scan Reports</h4>
-                      <p>Download your complete security scan results in your preferred format</p>
+                      <h4>{t('downloadScanReports')}</h4>
+                      <p>{t('downloadCompleteSecurityResults')}</p>
                       <div className="download-buttons">
                         {/* PDF Download Dropdown */}
                         <div className="pdf-dropdown-container">
@@ -1724,233 +1812,15 @@ const AuthenticatedScanPanel = () => {
                             disabled={pdfDownloading}
                             onClick={() => !pdfDownloading && setPdfDropdownOpen(!pdfDropdownOpen)}
                           >
-                            {pdfDownloading ? 'Generating...' : 'Download PDF Report'}
+                            {pdfDownloading ? t('generating') : t('downloadPdfReport')}
                           </button>
                           {pdfDropdownOpen && !pdfDownloading && (
                             <div className="pdf-dropdown-menu">
-                              <button
-                                className="pdf-dropdown-item"
-                                onClick={async () => {
-                                  setPdfDropdownOpen(false);
-                                  setPdfDownloading(true);
-                                  setPdfProgress(0);
-                                  setPdfProgressMessage('Initializing English PDF...');
-                                  try {
-                                    const token = localStorage.getItem('token');
-                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                      method: 'POST',
-                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
-                                    });
-                                    if (!startRes.ok) {
-                                      const e = await startRes.json().catch(() => ({}));
-                                      throw new Error(e.error || 'Failed to start PDF generation');
-                                    }
-                                    let { jobId } = await startRes.json();
-                                    const progressSteps = [
-                                      { progress: 15, message: 'Formatting scan data...' },
-                                      { progress: 35, message: 'Waiting for API rate limit...' },
-                                      { progress: 55, message: 'Formatting AI analysis...' },
-                                      { progress: 75, message: 'Rendering PDF document...' },
-                                      { progress: 90, message: 'Finalizing...' },
-                                    ];
-                                    let pollCount = 0;
-                                    let consecutive404 = 0;
-                                    let restarted = false;
-                                    const MAX_404_RETRIES = 3;
-
-                                    while (true) {
-                                      await new Promise(r => setTimeout(r, 5000));
-                                      pollCount++;
-                                      if (pollCount > 120) throw new Error('PDF generation timed out');
-                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                                      setPdfProgress(progressSteps[stepIdx].progress);
-                                      setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      
-                                      let pollRes;
-                                      try {
-                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                          headers: { 'x-auth-token': token }
-                                        });
-                                      } catch (networkErr) {
-                                        console.warn('PDF poll network error, retrying…', networkErr.message);
-                                        continue;
-                                      }
-
-                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
-
-                                      if (pollRes.status === 200) {
-                                        consecutive404 = 0;
-                                        setPdfProgress(100);
-                                        setPdfProgressMessage('Download complete!');
-                                        const blob = await pollRes.blob();
-                                        const url = window.URL.createObjectURL(blob);
-                                        const a = document.createElement('a');
-                                        a.href = url;
-                                        a.download = `security_report_EN_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                        document.body.appendChild(a);
-                                        a.click();
-                                        window.URL.revokeObjectURL(url);
-                                        document.body.removeChild(a);
-                                        break;
-                                      }
-
-                                      // 404 = job meta gone; 409 = a completed job's file expired.
-                                      // Both are recoverable: start ONE fresh job, then fall back
-                                      // to the bounded retry budget.
-                                      if (pollRes.status === 404 || pollRes.status === 409) {
-                                        if (!restarted) {
-                                          restarted = true;
-                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                          try {
-                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                              method: 'POST',
-                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'en' })
-                                            });
-                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                          } catch (e) { /* fall through to retry budget */ }
-                                        }
-                                        consecutive404++;
-                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                                        if (consecutive404 < MAX_404_RETRIES) continue;
-                                        throw new Error('PDF job not found after multiple retries — it may have expired');
-                                      }
-                                      
-                                      consecutive404 = 0;
-                                      const errorData = await pollRes.json().catch(() => ({}));
-                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                                        alert('Gemini key is exhausted');
-                                        throw new Error('Gemini key is exhausted');
-                                      }
-                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                                        alert('English PDF must contain English only');
-                                        throw new Error(errorData.error || 'English-only validation failed');
-                                      }
-                                      throw new Error(errorData.error || 'PDF generation failed');
-                                    }
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
-                                  } catch (err) {
-                                    console.error('PDF download failed:', err);
-                                    setPdfProgressMessage(`Error: ${err.message}`);
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
-                                  }
-                                }}
-                              >
-                                English Version
+                              <button className="pdf-dropdown-item" onClick={() => handlePdfDownload('en')}>
+                                {t('englishVersion')}
                               </button>
-                              <button
-                                className="pdf-dropdown-item"
-                                onClick={async () => {
-                                  setPdfDropdownOpen(false);
-                                  setPdfDownloading(true);
-                                  setPdfProgress(0);
-                                  setPdfProgressMessage('Initializing Japanese PDF...');
-                                  try {
-                                    const token = localStorage.getItem('token');
-                                    const startRes = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                      method: 'POST',
-                                      headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
-                                    });
-                                    if (!startRes.ok) {
-                                      const e = await startRes.json().catch(() => ({}));
-                                      throw new Error(e.error || 'Failed to start PDF generation');
-                                    }
-                                    let { jobId } = await startRes.json();
-                                    const progressSteps = [
-                                      { progress: 10, message: 'Formatting scan data...' },
-                                      { progress: 25, message: 'Waiting for API rate limit...' },
-                                      { progress: 40, message: 'Formatting AI analysis...' },
-                                      { progress: 55, message: 'Waiting for API rate limit...' },
-                                      { progress: 70, message: 'Translating to Japanese...' },
-                                      { progress: 85, message: 'Rendering PDF document...' },
-                                      { progress: 92, message: 'Finalizing...' },
-                                    ];
-                                    let pollCount = 0;
-                                    let consecutive404 = 0;
-                                    let restarted = false;
-                                    const MAX_404_RETRIES = 3;
-
-                                    while (true) {
-                                      await new Promise(r => setTimeout(r, 5000));
-                                      pollCount++;
-                                      if (pollCount > 120) throw new Error('PDF generation timed out');
-                                      const stepIdx = Math.min(pollCount - 1, progressSteps.length - 1);
-                                      setPdfProgress(progressSteps[stepIdx].progress);
-                                      setPdfProgressMessage(progressSteps[stepIdx].message);
-                                      
-                                      let pollRes;
-                                      try {
-                                        pollRes = await fetch(`${API_BASE}/api/scan/pdf-job/${jobId}`, {
-                                          headers: { 'x-auth-token': token }
-                                        });
-                                      } catch (networkErr) {
-                                        console.warn('PDF poll network error, retrying…', networkErr.message);
-                                        continue;
-                                      }
-
-                                      if (pollRes.status === 202) { consecutive404 = 0; continue; }
-                                      
-                                      if (pollRes.status === 200) {
-                                        consecutive404 = 0;
-                                        setPdfProgress(100);
-                                        setPdfProgressMessage('Download complete!');
-                                        const blob = await pollRes.blob();
-                                        const url = window.URL.createObjectURL(blob);
-                                        const a = document.createElement('a');
-                                        a.href = url;
-                                        a.download = `security_report_JA_${(report.target || '').replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.pdf`;
-                                        document.body.appendChild(a);
-                                        a.click();
-                                        window.URL.revokeObjectURL(url);
-                                        document.body.removeChild(a);
-                                        break;
-                                      }
-
-                                      // 404 = job meta gone; 409 = a completed job's file expired.
-                                      // Both are recoverable: start ONE fresh job, then fall back
-                                      // to the bounded retry budget.
-                                      if (pollRes.status === 404 || pollRes.status === 409) {
-                                        if (!restarted) {
-                                          restarted = true;
-                                          console.warn(`PDF poll ${pollRes.status} — restarting job once`);
-                                          try {
-                                            const rs = await fetch(`${API_BASE}/api/scan/pdf-job`, {
-                                              method: 'POST',
-                                              headers: { 'x-auth-token': token, 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ analysisId: report.analysisId || scanId, lang: 'ja' })
-                                            });
-                                            if (rs.ok) { ({ jobId } = await rs.json()); consecutive404 = 0; continue; }
-                                          } catch (e) { /* fall through to retry budget */ }
-                                        }
-                                        consecutive404++;
-                                        console.warn(`PDF poll returned ${pollRes.status} (attempt ${consecutive404}/${MAX_404_RETRIES})`);
-                                        if (consecutive404 < MAX_404_RETRIES) continue;
-                                        throw new Error('PDF job not found after multiple retries — it may have expired');
-                                      }
-                                      
-                                      consecutive404 = 0;
-                                      const errorData = await pollRes.json().catch(() => ({}));
-                                      if (pollRes.status === 429 && errorData.errorCode === 'GEMINI_KEY_EXHAUSTED') {
-                                        alert('Gemini key is exhausted');
-                                        throw new Error('Gemini key is exhausted');
-                                      }
-                                      if (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
-                                        alert('English PDF must contain English only');
-                                        throw new Error(errorData.error || 'English-only validation failed');
-                                      }
-                                      throw new Error(errorData.error || 'PDF generation failed');
-                                    }
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 2000);
-                                  } catch (err) {
-                                    console.error('PDF download failed:', err);
-                                    setPdfProgressMessage(`Error: ${err.message}`);
-                                    setTimeout(() => { setPdfDownloading(false); setPdfProgress(0); setPdfProgressMessage(''); }, 3000);
-                                  }
-                                }}
-                              >
-                                Japanese Version
+                              <button className="pdf-dropdown-item" onClick={() => handlePdfDownload('ja')}>
+                                {t('japaneseVersion')}
                               </button>
                             </div>
                           )}

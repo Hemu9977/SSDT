@@ -1,14 +1,44 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { defaultLanguage, locales, supportedLanguages } from '../locales';
+import { API_BASE } from '../config/api';
 
 const STORAGE_KEY = 'fortexa-language';
 
+// Mirrors the UI language choice onto the account so transactional emails (OTP, scan
+// notifications) go out in the same language. Best-effort and fire-and-forget: emails
+// aren't affected until the next send, so a dropped request just means it stays stale
+// until the next language change or login.
+const syncLanguageToAccount = (nextLanguage) => {
+  const token = window.localStorage.getItem('token');
+  if (!token) return;
+  fetch(`${API_BASE}/api/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+    body: JSON.stringify({ preferredLanguage: nextLanguage }),
+  }).catch(() => { /* best-effort */ });
+};
+
 const LanguageContext = createContext(null);
 
+// An explicit language choice ALWAYS wins; the default is only seeded when nothing is
+// stored yet (new or cleared browser). A previous version force-reset every browser to
+// the default once, which silently destroyed a saved English selection — and, because
+// the write that recorded "already migrated" could itself throw, could re-fire on every
+// load and pin the UI to Japanese permanently. Reading first removes both failure modes:
+// a stored value is always honoured, and a failed seed just means we re-seed next time.
 const readInitialLanguage = () => {
   if (typeof window === 'undefined') return defaultLanguage;
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  return supportedLanguages.includes(stored) ? stored : defaultLanguage;
+  // Runs in the useState initializer (render phase) and touches storage, so it must
+  // never throw: localStorage can be unavailable outright under private browsing or a
+  // strict cookie policy, and a throw here would break first paint for everyone.
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (supportedLanguages.includes(stored)) return stored;
+    window.localStorage.setItem(STORAGE_KEY, defaultLanguage);
+  } catch {
+    /* storage unavailable — fall through to the in-memory default */
+  }
+  return defaultLanguage;
 };
 
 const interpolate = (value, params = {}) => {
@@ -29,8 +59,15 @@ export const LanguageProvider = ({ children }) => {
   const setLanguage = useCallback((nextLanguage) => {
     if (!supportedLanguages.includes(nextLanguage)) return;
     setLanguageState(nextLanguage);
-    window.localStorage.setItem(STORAGE_KEY, nextLanguage);
     document.documentElement.lang = nextLanguage;
+    // Persisting is best-effort: if storage is blocked the switch must still apply for
+    // this session rather than throwing out of the click handler mid-way.
+    try {
+      window.localStorage.setItem(STORAGE_KEY, nextLanguage);
+    } catch {
+      /* storage unavailable — choice applies for this session only */
+    }
+    syncLanguageToAccount(nextLanguage);
   }, []);
 
   const toggleLanguage = useCallback(() => {
@@ -38,16 +75,26 @@ export const LanguageProvider = ({ children }) => {
   }, [language, setLanguage]);
 
   const t = useCallback((key, params) => {
-    const dictionary = locales[language] || locales[defaultLanguage];
-    const fallback = locales[defaultLanguage][key] || key;
-    return interpolate(dictionary[key] || fallback, params);
+    // Fall back through English, not defaultLanguage: `en` is the complete base
+    // dictionary (ja.js spreads ...en), so a key missing from the active dictionary
+    // resolves to English rather than leaking Japanese into the English UI — which is
+    // what would happen if the fallback tracked defaultLanguage now that it is 'ja'.
+    const dictionary = locales[language] || locales.en;
+    const value = dictionary[key] !== undefined ? dictionary[key] : locales.en[key];
+    return interpolate(value !== undefined ? value : key, params);
   }, [language]);
+
+  // Exposed so auth flows (login/register) can push the current UI language onto the
+  // account right after a token is issued, without waiting for the user to touch the
+  // toggle. Safe to call whenever — it no-ops without a stored token.
+  const syncLanguage = useCallback(() => syncLanguageToAccount(language), [language]);
 
   const value = useMemo(() => ({
     language,
     currentLang: language,
     setLanguage,
     toggleLanguage,
+    syncLanguage,
     t,
     hasReport,
     setHasReport,
@@ -56,7 +103,7 @@ export const LanguageProvider = ({ children }) => {
     translatePage: setLanguage,
     clearTranslationCache: () => {},
     translationCache: null,
-  }), [language, setLanguage, toggleLanguage, t, hasReport]);
+  }), [language, setLanguage, toggleLanguage, syncLanguage, t, hasReport]);
 
   return (
     <LanguageContext.Provider value={value}>

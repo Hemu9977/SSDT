@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
@@ -32,6 +32,86 @@ const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', one
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
 
+// PLANS[...].price is the TAX-EXCLUSIVE amount; the matching Stripe Price is set to
+// the same figure. Stripe adds the tax itself via the fixed Tax Rate referenced by
+// STRIPE_TAX_RATE_ID (see backend/routes/stripeRoutes.js), so the total charged
+// equals the tax-inclusive figure derived below.
+// IMPORTANT: this rate must match the percentage on that Stripe Tax Rate. Nothing
+// enforces it at runtime — if one changes, change the other.
+const TAX_RATE = 0.1;
+const parsePriceYen = (priceStr) => Number(String(priceStr).replace(/[^\d.]/g, '')) || 0;
+const formatPriceYen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
+const priceIncludingTax = (priceStr) => formatPriceYen(parsePriceYen(priceStr) * (1 + TAX_RATE));
+
+// Shared plan-card markup — used by both the full plan chooser (no active
+// plan) and the top-up section (subscribed users buying extra scans).
+const PlanCard = ({ plan, onSelect, loading, buttonLabel, t }) => (
+  <div key={plan.planType} style={{
+    border: plan.planType === 'basic' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
+    borderRadius: '1.5rem',
+    padding: '2rem 1.5rem',
+    background: plan.planType === 'basic' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem',
+    position: 'relative',
+    boxShadow: plan.planType === 'basic' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
+  }}>
+    {plan.planType === 'basic' && (
+      <div style={{
+        position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
+        background: 'var(--accent)', color: 'var(--background)',
+        fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
+        borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
+        whiteSpace: 'nowrap'
+      }}>{t('mostPopular')}</div>
+    )}
+
+    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'basic' ? '0.5rem' : 0 }}>
+      {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
+    </div>
+
+    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
+      {plan.price}
+      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
+    </div>
+    <div style={{ fontSize: '0.7rem', color: 'var(--foreground-darker)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+      {t('priceExcludingTax')}
+    </div>
+    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--foreground-darker)' }}>
+      {t('priceIncludingTaxAmount', { amount: priceIncludingTax(plan.price) })}
+    </div>
+
+    <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
+      <li>
+        ・{plan.planType === 'trial1'
+          ? t('trial1ScansAndDevice')
+          : plan.planType === 'trial2'
+          ? t('trial2ScansAndDevice')
+          : plan.billingCycle === 'onetime'
+          ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
+          : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
+      </li>
+      {plan.billingCycle === 'onetime' && (
+        <li>・{t('validityPeriod')}</li>
+      )}
+      <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
+        ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
+      </li>
+    </ul>
+
+    <button
+      onClick={() => onSelect(plan.planType, plan.billingCycle)}
+      disabled={loading}
+      className="btn-upgrade"
+      style={{ marginTop: 'auto', opacity: loading ? 0.7 : 1 }}
+    >
+      {loading ? t('startingCheckout') : buttonLabel}
+    </button>
+  </div>
+);
+
 const Profile = () => {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -46,6 +126,10 @@ const Profile = () => {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteMessage, setInviteMessage] = useState(null);
+  // True only while we are handing off to Stripe. Distinguishes that from the
+  // post-payment activation flow, which also raises paymentLoading but must NOT be
+  // cancelled when the tab regains focus. See the bfcache effect below.
+  const awaitingCheckoutRedirectRef = useRef(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { t, currentLang } = useTranslation();
@@ -98,14 +182,17 @@ const Profile = () => {
 
   const refreshActivationStatus = async () => {
     setPaymentLoading(true);
-    setPaymentMessage({ type: 'info', text: t('checkingPlanStatus') });
+    setPaymentMessage({ type: 'info', text: t('checkingPlanStatus'), awaitingActivation: true });
 
     const data = await fetchProfile();
     const activated = isPlanActive(data);
 
+    // Keep awaitingActivation set while still unactivated so the refresh button
+    // survives for another attempt; drop it once the plan is live.
     setPaymentMessage({
       type: activated ? 'success' : 'info',
-      text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+      text: activated ? t('paymentSuccess') : t('paymentPendingActivation'),
+      awaitingActivation: !activated
     });
     setPaymentLoading(false);
   };
@@ -168,7 +255,7 @@ const Profile = () => {
 
       const activatePlan = async () => {
         setPaymentLoading(true);
-        setPaymentMessage({ type: 'info', text: t('paymentProcessing') });
+        setPaymentMessage({ type: 'info', text: t('paymentProcessing'), awaitingActivation: true });
 
         const synced = await syncCheckoutSession(sessionId);
         let latestProfile = await fetchProfile();
@@ -182,13 +269,18 @@ const Profile = () => {
 
         setPaymentMessage({
           type: activated ? 'success' : 'info',
-          text: activated ? t('paymentSuccess') : t('paymentPendingActivation')
+          text: activated ? t('paymentSuccess') : t('paymentPendingActivation'),
+          awaitingActivation: !activated
         });
         setPaymentLoading(false);
       };
 
       activatePlan();
     } else if (payment === 'cancelled') {
+      // No payment was taken, so there is nothing to poll for. Deliberately no
+      // awaitingActivation flag: offering "refresh" here previously led to
+      // "Payment succeeded, but activation is still syncing" for a user who had
+      // just cancelled and been charged nothing.
       setPaymentMessage({ type: 'info', text: t('paymentCancelled') });
       window.history.replaceState({}, '', '/profile');
     }
@@ -236,13 +328,49 @@ const Profile = () => {
         body: JSON.stringify({ planType, billingCycle })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t('checkoutFailed'));
+      if (!res.ok) {
+        // Backend error strings are English-only and internal; resolve known codes
+        // through t() and fall back to a generic localized message.
+        throw new Error(data.code === 'TAX_NOT_CONFIGURED' ? t('billingUnavailable') : t('checkoutFailed'));
+      }
+      // Deliberately leave paymentLoading true — the page is navigating away. It is
+      // reset if the user comes back without paying (see the bfcache effect below).
+      awaitingCheckoutRedirectRef.current = true;
       window.location.href = data.url;
     } catch (err) {
+      awaitingCheckoutRedirectRef.current = false;
       setPaymentMessage({ type: 'error', text: err.message || t('checkoutFailed') });
       setPaymentLoading(false);
     }
   };
+
+  // Recover from a Stripe hand-off the user backed out of.
+  //
+  // startCheckout leaves paymentLoading true on purpose, because window.location.href
+  // is about to unload the page. But pressing the browser Back button restores this
+  // page from the back/forward cache with React state exactly as it was, so every
+  // purchase button stays disabled on "Redirecting to checkout..." with no way back.
+  //
+  // Both events are needed: pageshow+persisted is the real bfcache restore signal,
+  // while visibilitychange covers tab and mobile app switches where no restore fires.
+  // The ref guard keeps this from cancelling the ?payment=success activation poll,
+  // which legitimately holds paymentLoading while the webhook lands.
+  useEffect(() => {
+    const clearStaleRedirect = () => {
+      if (!awaitingCheckoutRedirectRef.current) return;
+      awaitingCheckoutRedirectRef.current = false;
+      setPaymentLoading(false);
+    };
+    const onPageShow = (event) => { if (event.persisted) clearStaleRedirect(); };
+    const onVisibility = () => { if (document.visibilityState === 'visible') clearStaleRedirect(); };
+
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   const cancelSubscription = async () => {
     setCancelDialogOpen(false);
@@ -341,13 +469,17 @@ const Profile = () => {
     );
   }
 
-  const { user, limits, recentScans } = profile;
+  const { user, recentScans } = profile;
   const org = user.organization;
   const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
   const accountTypeClass = hasPlan ? 'paid' : user.accountType;
+  // Plan display is derived from the organization's real plan, never from
+  // user.accountType. accountType feeds nothing in the quota system (getAccountLimits
+  // keys off planType_billingCycle) and a legacy 'pro' value there would otherwise be
+  // shown as if the user had bought the Pro tier.
   const accountTypeLabel = hasPlan
     ? `${PLAN_NAMES[org.planType] ? t(PLAN_NAMES[org.planType]) : org.planType} (${BILLING_LABELS[org.billingCycle] ? t(BILLING_LABELS[org.billingCycle]) : org.billingCycle})`
-    : user.accountType.toUpperCase();
+    : t('planFree');
 
   return (
     <div className="profile-page">
@@ -357,7 +489,12 @@ const Profile = () => {
         <div className="profile-container">
           <div className="profile-header">
             <h1>{t('myProfile')}</h1>
-            {user.isPro && <span className="pro-badge">{PLAN_NAMES[org?.planType] ? t(PLAN_NAMES[org?.planType]) : t('pro')}</span>}
+            {/* Only badge a real, named plan. `isPro` means "has any paid plan", so on
+                its own it would fall through to the literal word "PRO" for an account
+                that has bought nothing. */}
+            {hasPlan && PLAN_NAMES[org.planType] && (
+              <span className="pro-badge">{t(PLAN_NAMES[org.planType])}</span>
+            )}
           </div>
 
           {/* Profile save feedback */}
@@ -373,7 +510,11 @@ const Profile = () => {
               style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>{paymentMessage.text}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                {paymentMessage.type === 'info' && (
+                {/* Only offer a re-check when a payment actually completed and we are
+                    waiting on the webhook. Keying this off type === 'info' also matched
+                    the "payment cancelled" banner, where re-checking reported a payment
+                    that never happened. */}
+                {paymentMessage.awaitingActivation && (
                   <button
                     onClick={refreshActivationStatus}
                     disabled={paymentLoading}
@@ -445,21 +586,26 @@ const Profile = () => {
             <h2>{t('statistics')}</h2>
             <div className="stats-grid">
               <div className="stat-card">
-                <div className="stat-value">{user.totalScans}</div>
+                <div className="stat-value">{user.totalScansAllTime}</div>
                 <div className="stat-label">{t('totalScans')}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-value">{user.scansThisMonth}</div>
-                <div className="stat-label">{t('thisMonth')}</div>
+                <div className="stat-value">{org ? org.scansUsed : 0}</div>
+                <div className="stat-label">{t('scansUsedLabel')}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-value">{limits.scansPerDay === -1 ? '∞' : limits.scansPerDay}</div>
-                <div className="stat-label">{t('dailyLimit')}</div>
+                <div className="stat-value">{org && org.scanLimit > 0 ? org.scanLimit : t('noPlanScanLimit')}</div>
+                <div className="stat-label">{t('planScanLimitLabel')}</div>
               </div>
-              <div className="stat-card">
-                <div className="stat-value">{(limits.maxFileSize / (1024 * 1024)).toFixed(0)}MB</div>
-                <div className="stat-label">{t('maxFileSize')}</div>
-              </div>
+              {org && org.extraScansRemaining > 0 && (
+                <div className="stat-card">
+                  <div className="stat-value">{org.extraScansRemaining}</div>
+                  <div className="stat-label">{t('extraScansRemainingLabel')}</div>
+                  {org.extraScansExpiresAt && (
+                    <div className="stat-sublabel">{t('extraScansExpireOn', { date: formatDate(org.extraScansExpiresAt) })}</div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -536,13 +682,13 @@ const Profile = () => {
                 )}
 
                 {/* One-time scans remaining */}
-                {org.billingCycle === 'onetime' && (
+                {org.extraScansRemaining > 0 && (
                   <>
                     <p style={{ margin: '1rem 0 0.5rem 0', color: 'var(--foreground-darker)' }}>
-                      {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.oneTimeRemainingScans}</strong>
+                      {t('oneTimeScansRemaining')}: <strong style={{ color: 'var(--foreground)' }}>{org.extraScansRemaining}</strong>
                     </p>
                     <p style={{ margin: '0.5rem 0', color: 'var(--foreground-darker)' }}>
-                      {t('validityPeriod')}
+                      {t('extraScansExpireOn', { date: formatDate(org.extraScansExpiresAt) })}
                     </p>
                   </>
                 )}
@@ -571,6 +717,35 @@ const Profile = () => {
                   </>
                 )}
               </div>
+
+              {/* ── Top-Up: extra scans, purchasable any time while subscribed ────── */}
+              {['owner', 'admin'].includes(org.role) && (
+                <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
+                  <h2 style={{ marginBottom: '1rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                    {t('topUpSectionTitle')}
+                  </h2>
+                  <p style={{ color: 'var(--foreground-darker)', marginBottom: '1.5rem' }}>
+                    {t('topUpSectionDescription')}
+                  </p>
+                  {org.scanLimit > 0 && org.scansUsed >= org.scanLimit && (
+                    <p className="save-message info" style={{ marginBottom: '1.5rem' }}>
+                      {t('planLimitExhaustedHint')}
+                    </p>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
+                    {PLANS.onetime.map(plan => (
+                      <PlanCard
+                        key={plan.planType}
+                        plan={plan}
+                        onSelect={startCheckout}
+                        loading={paymentLoading}
+                        buttonLabel={t('buyExtraScans')}
+                        t={t}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* ── Team Management Section ─────────────────────────────────────────── */}
               {org.seatsAllowed > 1 && (
@@ -643,7 +818,7 @@ const Profile = () => {
                             </div>
                             <div className="invite-status-group">
                               <span className="invite-status">{t('pending')}</span>
-                              {['owner', 'admin'].includes(user.role) && (
+                              {['owner', 'admin'].includes(org.role) && (
                                 <button 
                                   onClick={() => handleCancelInvite(invite.token)}
                                   className="btn-revoke"
@@ -703,64 +878,14 @@ const Profile = () => {
               {/* Plan cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
                 {PLANS[selectedBilling].map(plan => (
-                  <div key={plan.planType} style={{
-                    border: plan.planType === 'basic' ? '2px solid var(--accent)' : '1px solid rgba(255,107,0,0.25)',
-                    borderRadius: '1.5rem',
-                    padding: '2rem 1.5rem',
-                    background: plan.planType === 'basic' ? 'rgba(255,107,0,0.08)' : 'rgba(255,107,0,0.03)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '0.75rem',
-                    position: 'relative',
-                    boxShadow: plan.planType === 'basic' ? '0 0 20px rgba(255,107,0,0.15)' : 'none'
-                  }}>
-                    {plan.planType === 'basic' && (
-                      <div style={{
-                        position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)',
-                        background: 'var(--accent)', color: 'var(--background)',
-                        fontSize: '0.7rem', fontWeight: 800, padding: '0.2rem 0.8rem',
-                        borderRadius: '0 0 8px 8px', textTransform: 'uppercase', letterSpacing: '1px',
-                        whiteSpace: 'nowrap'
-                      }}>{t('mostPopular')}</div>
-                    )}
-
-                    <div style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-light)', letterSpacing: '2px', marginTop: plan.planType === 'basic' ? '0.5rem' : 0 }}>
-                      {PLAN_NAMES[plan.planType] ? t(PLAN_NAMES[plan.planType]) : plan.planType}
-                    </div>
-
-                    <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent)', lineHeight: 1 }}>
-                      {plan.price}
-                      <span style={{ fontSize: '0.85rem', fontWeight: 400, color: 'var(--foreground-darker)' }}>{plan.period ? t(plan.period) : ''}</span>
-                    </div>
-
-                    <ul style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0', fontSize: '0.88rem', color: 'var(--foreground-darker)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <li>・{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>
-                      <li>
-                        ・{plan.planType === 'trial1'
-                          ? t('trial1ScansAndDevice')
-                          : plan.planType === 'trial2'
-                          ? t('trial2ScansAndDevice')
-                          : plan.billingCycle === 'onetime'
-                          ? t('planScansForTarget', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })
-                          : t('planScansPerMonth', { count: plan.totalScans, plural: plan.totalScans === 1 ? '' : 's' })}
-                      </li>
-                      {plan.billingCycle === 'onetime' && (
-                        <li>・{t('validityPeriod')}</li>
-                      )}
-                      <li style={{ color: plan.severity === 'all' ? '#00d084' : 'var(--foreground-darker)' }}>
-                        ・{plan.severity === 'all' ? t('severityAllLevels') : t('severityCriticalHighOnly')}
-                      </li>
-                    </ul>
-
-                    <button
-                      onClick={() => startCheckout(plan.planType, plan.billingCycle)}
-                      disabled={paymentLoading}
-                      className="btn-upgrade"
-                      style={{ marginTop: 'auto', opacity: paymentLoading ? 0.7 : 1 }}
-                    >
-                      {paymentLoading ? t('startingCheckout') : t('selectPlan')}
-                    </button>
-                  </div>
+                  <PlanCard
+                    key={plan.planType}
+                    plan={plan}
+                    onSelect={startCheckout}
+                    loading={paymentLoading}
+                    buttonLabel={t('selectPlan')}
+                    t={t}
+                  />
                 ))}
               </div>
             </div>

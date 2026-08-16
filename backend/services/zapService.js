@@ -18,6 +18,12 @@ const User = require('../models/User');
 const ZAP_URL = process.env.ZAP_API_URL || 'http://127.0.0.1:8080';
 const ZAP_API_KEY = process.env.ZAP_API_KEY; // Optional when ZAP runs with api.disablekey=true
 
+// AJAX spider browsers run as headless Firefox processes inside the ZAP container
+// and are charged against its memory limit without being visible to -Xmx. Kept as
+// an env var so the count can be tuned from the ECS task definition alone, without
+// rebuilding and redeploying the backend image.
+const AJAX_SPIDER_BROWSERS = Number(process.env.ZAP_AJAX_BROWSERS) || 1;
+
 // Create HTTP agent with keep-alive to prevent socket hang up errors
 const http = require('http');
 const httpAgent = new http.Agent({
@@ -965,7 +971,7 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
       const ajaxConfig = {
         maxDuration: spiderConfig.maxDuration || 5, // Use same duration as traditional spider
         maxCrawlDepth: 10, // Deep crawling
-        numberOfBrowsers: 4, // Parallel browsers for speed
+        numberOfBrowsers: AJAX_SPIDER_BROWSERS, // Capped for container memory — see AJAX_SPIDER_BROWSERS
         clickDefaultElems: true, // Click buttons, links etc
         clickElemsOnce: false, // Click elements multiple times for different states
         randomInputs: true // Try random inputs in forms
@@ -1914,6 +1920,15 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     }
 
     try {
+      // Each AJAX spider browser is a headless Firefox process inside the ZAP
+      // container — native memory, invisible to the JVM's -Xmx. The container is
+      // capped at 4096 MB and peaked at ~96% of that during the 2026-08-13 OOM
+      // incidents, so cap the browser count explicitly rather than inheriting
+      // whatever a previous scan left set on this (long-lived) ZAP instance.
+      await zapApi.get('/JSON/ajaxSpider/action/setOptionNumberOfBrowsers/', {
+        params: { Integer: AJAX_SPIDER_BROWSERS }
+      });
+
       const ajaxSpiderResponse = await zapApi.get('/JSON/ajaxSpider/action/scan/', {
         params: {
           url: targetUrl,
