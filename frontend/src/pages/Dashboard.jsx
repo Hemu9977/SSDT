@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Sidebar from "../components/sidebar";
 import Header from "../components/header";
 import ScanForm from "../components/scanform";
@@ -7,7 +6,6 @@ import ReportCard from "../components/reportcard";
 import { API_BASE } from '../config/api';
 
 const Dashboard = () => {
-  const navigate = useNavigate();
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -18,7 +16,7 @@ const Dashboard = () => {
     const fetchDashboardData = async () => {
       const token = localStorage.getItem('token');
       if (!token) {
-        navigate('/login');
+        setLoading(false);
         return;
       }
       try {
@@ -36,7 +34,7 @@ const Dashboard = () => {
       }
     };
     fetchDashboardData();
-  }, [navigate]);
+  }, []);
 
   // 🔥 ADD THIS ENTIRE BLOCK
   useEffect(() => {
