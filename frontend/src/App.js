@@ -1,9 +1,7 @@
 // File path: frontend/src/App.js
 
-import { useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-import SplashScreen from './components/SplashScreen';
 import LandingPage from './pages/LandingPage';
 import About from './pages/About';
 // Updated import paths
@@ -19,43 +17,34 @@ import ScheduledScans from './pages/ScheduledScans';
 import JoinOrganization from './pages/JoinOrganization';
 // Translation imports
 import { TranslationProvider } from './contexts/TranslationContext';
-import { UserProvider, useUser } from './contexts/UserContext';
+import { UserProvider } from './contexts/UserContext';
 // Notification imports
 import { NotificationProvider } from './contexts/NotificationContext';
+
+// No splash gate here anymore: LandingPage (MarketingHome, for signed-out
+// visitors) must be the first thing that renders at "/" — see
+// components/MarketingHome.jsx for the unified entry experience that used to
+// live behind a "Click to Enter" splash screen.
 function AppContent() {
-  const [showSplash, setShowSplash] = useState(true);
-  const { loading } = useUser();
-
-  const handleSplashComplete = () => {
-    setShowSplash(false);
-  };
-
-  // Show splash screen on first load
-  if (showSplash) {
-    return <SplashScreen onEnter={handleSplashComplete} />;
-  }
-
   return (
-    <div>
-      <TranslationProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/about" element={<About />} />
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/verify-otp" element={<OTPVerification />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/profile" element={<Profile />} />
-            <Route path="/scan/:analysisId" element={<ScanViewer />} />
-            <Route path="/schedules" element={<ScheduledScans />} />
-            <Route path="/join" element={<JoinOrganization />} />
-          </Routes>
-        </BrowserRouter>
-      </TranslationProvider>
-    </div>
+    <TranslationProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/about" element={<About />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/verify-otp" element={<OTPVerification />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/profile" element={<Profile />} />
+          <Route path="/scan/:analysisId" element={<ScanViewer />} />
+          <Route path="/schedules" element={<ScheduledScans />} />
+          <Route path="/join" element={<JoinOrganization />} />
+        </Routes>
+      </BrowserRouter>
+    </TranslationProvider>
   );
 }
 

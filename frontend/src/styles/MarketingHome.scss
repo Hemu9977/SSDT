@@ -1,4 +1,10 @@
 .marketing-home {
+  position: relative;
+  // Establishes this element as its own stacking-context root (z-index:auto
+  // would not) so the negative z-index on ::before below is contained here
+  // and can only ever sit behind this element's own content — it cannot
+  // escape to affect the Header or the particle canvas outside this page.
+  z-index: 0;
   max-width: var(--max-width);
   margin: 0 auto;
   padding: 2rem 2rem 4rem;
@@ -8,18 +14,27 @@
   @media (max-width: 768px) {
     padding: 1.5rem 1rem 3rem;
   }
+
+  /* Dampens the shared particle background specifically behind this page's
+     text so the dots read as an ambient texture instead of competing with
+     copy — same rgba-over-background technique as About.scss's
+     .about-panel, just calibrated lighter since it spans the full page
+     rather than individual cards. A *positioned* element with z-index:auto
+     actually paints AFTER non-positioned in-flow siblings (regardless of
+     DOM order), which was washing the text out — z-index:-1 is required so
+     this genuinely paints behind the content instead of over it. */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: rgba(240, 240, 240, 0.4);
+    pointer-events: none;
+  }
 }
 
-/* ── Shared panel treatment, matches About page cards ── */
-.marketing-panel {
-  background: rgba(0, 0, 0, 0.65);
-  border: 1px solid rgba(255, 107, 0, 0.25);
-  border-radius: var(--card-border-radius);
-  padding: 2.5rem;
-}
-
-body.light .marketing-panel {
-  background: rgba(255, 255, 255, 0.75);
+body.dark .marketing-home::before {
+  background: rgba(10, 10, 10, 0.45);
 }
 
 /* ── Hero ── */
@@ -52,6 +67,9 @@ body.light .marketing-panel {
   line-height: 1.25;
   margin: 0 0 1.1rem;
   color: var(--foreground);
+  /* Faint echo of the old splash screen's neon title glow, toned down for a
+     premium feel rather than a cyberpunk one. */
+  text-shadow: 0 0 30px rgba(255, 107, 0, 0.18);
 }
 
 .marketing-hero-subtitle {
@@ -108,7 +126,8 @@ body.light .marketing-panel {
   color: var(--foreground-darker);
 }
 
-/* ── Hero visual: abstract scan ring, no literal padlock/hacker imagery ── */
+/* ── Hero visual: abstract scan ring, no literal padlock/hacker imagery.
+   Carries the splash screen's atmospheric glow/motion identity forward. ── */
 .marketing-hero-visual {
   display: flex;
   align-items: center;
@@ -147,6 +166,16 @@ body.light .marketing-panel {
   text-shadow: 0 0 24px rgba(0, 208, 132, 0.4);
 }
 
+/* Percentage-based so it scales with --ring-size (including its fluid
+   min(px, vw) values) without needing separate breakpoint overrides. */
+.scan-core-logo {
+  height: 45%;
+  width: auto;
+  max-width: 65%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 14px rgba(255, 107, 0, 0.35));
+}
+
 @keyframes scan-rotate {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
@@ -156,53 +185,6 @@ body.light .marketing-panel {
   .scan-ring {
     animation: none;
   }
-}
-
-/* ── Value / stat strip ── */
-.marketing-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 1.25rem;
-  margin: 1rem 0 3.5rem;
-}
-
-.marketing-stat {
-  text-align: center;
-  border: 1px solid rgba(255, 107, 0, 0.2);
-  border-radius: var(--card-border-radius);
-  padding: 1.5rem 1rem;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-
-  &--badge {
-    justify-content: center;
-    color: #00d084;
-    font-weight: 700;
-  }
-}
-
-body.light .marketing-stat {
-  background: rgba(255, 255, 255, 0.55);
-}
-
-.marketing-stat-value {
-  font-family: var(--font-title);
-  font-size: 1.6rem;
-  font-weight: 800;
-  color: var(--accent);
-}
-
-.marketing-stat-label {
-  font-size: 0.82rem;
-  color: var(--foreground-darker);
-  letter-spacing: 0.3px;
-}
-
-.marketing-stat--badge .marketing-stat-label {
-  color: #00d084;
-  font-size: 0.9rem;
 }
 
 /* ── Sections ── */
@@ -223,103 +205,45 @@ body.light .marketing-stat {
   }
 }
 
-.marketing-section-text {
-  font-size: 1rem;
-  line-height: 1.7;
-  color: var(--foreground);
-  margin: 0 0 1.5rem;
-
-  &--center {
-    text-align: center;
-    max-width: 700px;
-    margin-left: auto;
-    margin-right: auto;
-  }
+/* ── Value proposition — 3 concise items, deliberately NOT bordered cards
+   (that's the About page's visual language). A thin accent rule per item
+   keeps this lighter and more editorial. ── */
+.marketing-values {
+  margin: 1rem 0 3.5rem;
 }
 
-/* ── Capabilities ── */
-.marketing-capability-grid {
+.marketing-value-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1.5rem;
-}
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2.5rem;
 
-.marketing-capability-card {
-  background: rgba(0, 0, 0, 0.65);
-  border: 2px solid var(--accent);
-  border-radius: var(--card-border-radius);
-  padding: 1.75rem;
-  box-shadow: 0 0 20px rgba(255, 107, 0, 0.15);
-  transition: var(--card-transition);
-
-  &:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 8px 24px rgba(255, 107, 0, 0.25);
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+    gap: 2rem;
   }
 }
 
-body.light .marketing-capability-card {
-  background: rgba(255, 255, 255, 0.75);
+.marketing-value-item {
+  text-align: center;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--accent);
 }
 
-.marketing-capability-title {
-  font-size: 1.1rem;
+.marketing-value-title {
+  font-size: 1.05rem;
   font-weight: 700;
   color: var(--foreground);
-  margin: 0 0 0.6rem;
+  margin: 0 0 0.5rem;
 }
 
-.marketing-capability-description {
+.marketing-value-description {
   font-size: 0.92rem;
   color: var(--foreground-darker);
   line-height: 1.6;
   margin: 0;
 }
 
-/* ── How it works ── */
-.marketing-how-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  max-width: 720px;
-  margin: 0 auto;
-}
-
-.marketing-how-step {
-  display: flex;
-  align-items: flex-start;
-  gap: 1.25rem;
-}
-
-.marketing-how-step-number {
-  flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-light));
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 1.1rem;
-}
-
-.marketing-how-step-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  margin: 0.1rem 0 0.4rem;
-  color: var(--foreground);
-}
-
-.marketing-how-step-description {
-  font-size: 0.95rem;
-  color: var(--foreground-darker);
-  line-height: 1.6;
-  margin: 0;
-}
-
-/* ── Product preview mockup ── */
+/* ── Product preview mockup — the single credibility/product signal ── */
 .marketing-preview-panel {
   max-width: 480px;
   margin: 0 auto;
@@ -419,8 +343,12 @@ body.light {
     border-color: rgba(204, 85, 0, 0.4);
   }
 
-  .marketing-stat-value {
-    color: var(--accent-dark);
+  .marketing-hero-title {
+    text-shadow: 0 0 24px rgba(204, 85, 0, 0.12);
+  }
+
+  .marketing-value-item {
+    border-top-color: var(--accent-dark);
   }
 }
 
@@ -453,11 +381,11 @@ body.light {
 }
 
 @media (max-width: 768px) {
-  .marketing-panel {
-    padding: 1.5rem;
+  .marketing-section {
+    margin-bottom: 2.25rem;
   }
 
-  .marketing-section {
+  .marketing-values {
     margin-bottom: 2.25rem;
   }
 
