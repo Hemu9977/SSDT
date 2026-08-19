@@ -83,6 +83,12 @@ const MarketingHome = () => {
 
         <div className="marketing-hero-visual" aria-hidden="true">
           <div className="scan-ring">
+            <div className="scan-ring-track" />
+            <div className="scan-ring-arc" />
+            <div className="scan-ring-node scan-ring-node--1" />
+            <div className="scan-ring-node scan-ring-node--2" />
+            <div className="scan-ring-node scan-ring-node--3" />
+            <div className="scan-ring-node scan-ring-node--4" />
             <div className="scan-core">
               <img src={logo} alt="" className="scan-core-logo" />
             </div>

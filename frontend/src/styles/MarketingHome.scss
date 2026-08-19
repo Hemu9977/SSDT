@@ -126,8 +126,11 @@ body.dark .marketing-home::before {
   color: var(--foreground-darker);
 }
 
-/* ── Hero visual: abstract scan ring, no literal padlock/hacker imagery.
-   Carries the splash screen's atmospheric glow/motion identity forward. ── */
+/* ── Hero visual: stationary FORTEXA shield with a thin scanning ring around
+   it, no literal padlock/hacker imagery. The shield itself never rotates —
+   only the bright arc (a sibling layer, not a parent) and the node dots
+   animate, so the logo stays perfectly still while the ring communicates
+   "continuously scanning". ── */
 .marketing-hero-visual {
   display: flex;
   align-items: center;
@@ -136,20 +139,91 @@ body.dark .marketing-home::before {
 
 .scan-ring {
   --ring-size: min(260px, 60vw);
+  position: relative;
   width: var(--ring-size);
   height: var(--ring-size);
-  border-radius: 50%;
-  padding: 10px;
-  background: conic-gradient(from 0deg, var(--accent) 0deg, rgba(255, 107, 0, 0.08) 300deg, var(--accent) 360deg);
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: scan-rotate 16s linear infinite;
 }
 
+/* Local vignette that gently recedes the shared particle background
+   immediately behind the ring, so the dot grid doesn't visually compete
+   with the scanning animation. Sized off --ring-size (not the flex
+   container) so it stays a modest halo around the ring itself, not a large
+   blob. Scoped to this element only — the particle canvas itself (shared
+   across the whole app) is untouched. */
+.scan-ring::before {
+  content: '';
+  position: absolute;
+  inset: -14%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--background) 0%, rgba(0, 0, 0, 0) 68%);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Thin, static premium ring outline. */
+.scan-ring-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 107, 0, 0.28);
+  pointer-events: none;
+}
+
+/* Small bright arc that sweeps around the ring. It's an absolutely
+   positioned sibling of .scan-core, never a parent of it, so rotating it
+   cannot rotate the shield. A radial-gradient mask keeps only a thin
+   annulus visible so the conic-gradient reads as a stroke, not a filled
+   wedge. */
+.scan-ring-arc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    transparent 300deg,
+    rgba(255, 159, 64, 0.55) 330deg,
+    var(--accent-light) 353deg,
+    var(--accent-light) 360deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  filter: drop-shadow(0 0 3px rgba(255, 107, 0, 0.45));
+  animation: scan-arc-rotate 10s linear infinite;
+}
+
+/* Extremely subtle nodes around the outer ring — position is fixed (via
+   rotate+translate on the element itself); only opacity animates, so the
+   pulse never competes with the arc's motion or the shield. */
+.scan-ring-node {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.18;
+  pointer-events: none;
+  animation: scan-node-pulse 5s ease-in-out infinite;
+}
+
+.scan-ring-node--1 { transform: rotate(35deg)  translateX(calc(var(--ring-size) / 2)); animation-delay: 0s; }
+.scan-ring-node--2 { transform: rotate(140deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 1.3s; }
+.scan-ring-node--3 { transform: rotate(225deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 2.6s; }
+.scan-ring-node--4 { transform: rotate(305deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 3.9s; }
+
 .scan-core {
-  width: 100%;
-  height: 100%;
+  position: relative;
+  z-index: 2;
+  width: calc(100% - 22px);
+  height: calc(100% - 22px);
   border-radius: 50%;
   background: var(--background);
   display: flex;
@@ -176,13 +250,19 @@ body.dark .marketing-home::before {
   filter: drop-shadow(0 0 14px rgba(255, 107, 0, 0.35));
 }
 
-@keyframes scan-rotate {
+@keyframes scan-arc-rotate {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
+@keyframes scan-node-pulse {
+  0%, 100% { opacity: 0.12; }
+  50% { opacity: 0.55; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .scan-ring {
+  .scan-ring-arc,
+  .scan-ring-node {
     animation: none;
   }
 }
