@@ -489,14 +489,26 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     // Clear state left by a previous scan on this ZAP instance — see the matching
     // reset in zapService.js. Must run before configureAuthContext below, since
     // newSession discards contexts (including the auth context it creates).
+    //
+    // zapAuthRoutes recycles the auth container before this runs, so newSession operates
+    // on a fresh empty HSQLDB. A failure is now a real signal rather than expected
+    // slow-session noise — error level plus a persisted flag. Retained as a second line
+    // of defence for when ZAP_RECYCLE_ENABLED=false.
     try {
       await zapAuthApi.get('/JSON/core/action/newSession/', {
         params: { name: `authscan-${scanId}`, overwrite: 'true' },
-        timeout: 60000
+        timeout: 30000
       });
       console.log(`[ZAP-AUTH] Session reset for scan ${scanId}`);
     } catch (sessionErr) {
-      console.warn(`[ZAP-AUTH] Session reset failed (continuing): ${sessionErr.message}`);
+      console.error(
+        `[ZAP-AUTH] SESSION_RESET_FAILED scanId=${scanId} status=${sessionErr.response?.status || 'none'} ` +
+        `code=${sessionErr.code || 'none'} — ${sessionErr.message}`
+      );
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { 'authScanResult.sessionResetFailed': true, updatedAt: new Date() } }
+      ).catch(() => {});
     }
 
     // Phase 1: Configure authentication

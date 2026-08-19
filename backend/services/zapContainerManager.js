@@ -188,12 +188,26 @@ async function waitForTaskReady(taskArn, maxWaitMs = 300000) {
   throw new Error('Timed out waiting for ZAP Fargate task to become ready (5 min limit)');
 }
 
-async function waitForZapApi(zapUrl, maxWaitMs = 90000) {
+/**
+ * Poll a ZAP instance until its API answers.
+ *
+ * Has no ECS dependency — it is plain axios — so it is usable regardless of IS_AWS
+ * and is shared with zapRecycler.js, which polls the Service Connect alias after
+ * replacing a task. The 5s per-probe timeout is deliberately below Envoy's
+ * perRequestTimeoutSeconds so probes fail fast during the replacement window
+ * instead of stalling on a proxy with zero healthy endpoints.
+ *
+ * @param {string} zapUrl
+ * @param {number} maxWaitMs
+ * @param {object} requestConfig - merged into the axios call; the auth instance uses
+ *   it to pass the forced `Host: localhost:8080` header createZapAuthClient relies on.
+ */
+async function waitForZapApi(zapUrl, maxWaitMs = 90000, requestConfig = {}) {
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
     try {
-      await axios.get(`${zapUrl}/JSON/core/view/version/`, { timeout: 5000 });
+      await axios.get(`${zapUrl}/JSON/core/view/version/`, { timeout: 5000, ...requestConfig });
       console.log(`[ContainerMgr] ZAP API healthy at ${zapUrl}`);
       return;
     } catch {
@@ -201,9 +215,9 @@ async function waitForZapApi(zapUrl, maxWaitMs = 90000) {
     }
   }
 
-  throw new Error(`ZAP API at ${zapUrl} did not respond within 90 seconds`);
+  throw new Error(`ZAP API at ${zapUrl} did not respond within ${Math.round(maxWaitMs / 1000)}s`);
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-module.exports = { requestContainer, releaseContainer, getActiveContainers };
+module.exports = { requestContainer, releaseContainer, getActiveContainers, waitForZapApi };

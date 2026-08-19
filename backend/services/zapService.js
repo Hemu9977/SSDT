@@ -771,14 +771,27 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     // Clear any state left behind by a previous scan on this ZAP instance — see the
     // matching reset in runAsyncZapScanBackground. Must precede context/exclusion
     // setup, since newSession discards contexts.
+    //
+    // The container is recycled before this runs, so newSession now operates on a fresh
+    // empty HSQLDB and completes in well under a second. A failure here is therefore a
+    // real signal, not the expected noise it was on a bloated multi-hour session — hence
+    // error level and a persisted flag. Kept as a second line of defence for when
+    // ZAP_RECYCLE_ENABLED=false.
     try {
       await zapApi.get('/JSON/core/action/newSession/', {
         params: { name: `scan-${scanId}`, overwrite: 'true' },
-        timeout: 60000
+        timeout: 30000
       });
       console.log(`[ZAP] Session reset for scan ${scanId}`);
     } catch (sessionErr) {
-      console.warn(`[ZAP] Session reset failed (continuing): ${sessionErr.message}`);
+      console.error(
+        `[ZAP] SESSION_RESET_FAILED scanId=${scanId} status=${sessionErr.response?.status || 'none'} ` +
+        `code=${sessionErr.code || 'none'} — ${sessionErr.message}`
+      );
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { 'zapResult.sessionResetFailed': true, updatedAt: new Date() } }
+      ).catch(() => {});
     }
 
     // Phase 1: Configure file exclusions BEFORE scanning
@@ -1725,14 +1738,27 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
     // completion, so this stays correct even when the previous scan crashed, timed out
     // or was force-stopped. Must run before the context/exclusion setup below —
     // newSession discards contexts. Non-fatal: a failed reset should degrade, not abort.
+    //
+    // zapWorker now recycles the container before calling this, so newSession runs on a
+    // fresh empty HSQLDB and returns in well under a second. A failure is a real signal
+    // rather than the expected slow-session noise, so it is logged at error level and
+    // flagged on the record. Retained as a second line of defence for when
+    // ZAP_RECYCLE_ENABLED=false.
     try {
       await zapApi.get('/JSON/core/action/newSession/', {
         params: { name: `scan-${scanId}`, overwrite: 'true' },
-        timeout: 60000
+        timeout: 30000
       });
       console.log(`[ZAP] Session reset for scan ${scanId}`);
     } catch (sessionErr) {
-      console.warn(`[ZAP] Session reset failed (continuing): ${sessionErr.message}`);
+      console.error(
+        `[ZAP] SESSION_RESET_FAILED scanId=${scanId} status=${sessionErr.response?.status || 'none'} ` +
+        `code=${sessionErr.code || 'none'} — ${sessionErr.message}`
+      );
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { 'zapResult.sessionResetFailed': true, updatedAt: new Date() } }
+      ).catch(() => {});
     }
 
     // Phase 1: Configure file exclusions
@@ -2493,6 +2519,33 @@ async function runAsyncZapScanBackground(targetUrl, scanId, userId) {
  * @param {string} userId - User ID requesting the stop
  * @returns {Promise<Object>} Result of stop operation
  */
+// Terminal states: a scan in any of these has already finished being torn down.
+// 'stopped' and 'cancelled' were missing from the stop guards, so every repeat click
+// re-ran the full teardown.
+const TERMINAL_SCAN_STATES = ['completed', 'failed', 'stopped', 'cancelled'];
+
+/**
+ * Atomically claim the right to run a stop sequence for `scanId`.
+ *
+ * The DB status check in the stop functions is read-then-write, so two requests landing
+ * in the same tick both observe a non-terminal scan and both run the whole teardown. On
+ * 2026-08-19 five clicks on one scan produced five concurrent teardowns. A short Redis
+ * NX key makes the claim atomic.
+ *
+ * Fails OPEN: if Redis is unreachable the stop proceeds. Cancellation must never be
+ * blocked by the dedupe layer — a duplicate teardown is harmless, an un-cancellable scan
+ * is not. The key expires on its own so a crashed stop cannot wedge future cancellation.
+ */
+async function claimStop(scanId) {
+  try {
+    const { getPublisher } = require('../config/redis');
+    return (await getPublisher().set(`scan:stop:${scanId}`, '1', 'NX', 'EX', 60)) === 'OK';
+  } catch (err) {
+    console.warn(`[Stop] dedupe unavailable for ${scanId}, proceeding: ${err.message}`);
+    return true;
+  }
+}
+
 async function stopZapScan(scanId, userId) {
   try {
     // Verify the scan exists and belongs to the user
@@ -2505,9 +2558,14 @@ async function stopZapScan(scanId, userId) {
       throw new Error('Scan not found or access denied');
     }
 
-    // Check if scan is still running
-    if (scan.status === 'completed' || scan.status === 'failed') {
-      return { message: 'Scan already completed or failed', status: scan.status };
+    // Idempotency: terminal scans need no teardown, and concurrent duplicates are
+    // collapsed by the atomic claim below.
+    if (TERMINAL_SCAN_STATES.includes(scan.status)) {
+      return { message: 'Scan already in a terminal state', status: scan.status, alreadyStopped: true };
+    }
+    if (!await claimStop(scanId)) {
+      console.log(`🛑 Stop already in progress for ${scanId} — ignoring duplicate request`);
+      return { message: 'Stop already in progress', status: scan.status, alreadyStopped: true };
     }
 
     console.log(`🛑 Stopping ZAP scan: ${scanId}`);
@@ -2596,7 +2654,7 @@ async function stopZapScan(scanId, userId) {
           status: 'stopped',
           'zapResult.status': 'stopped',
           'zapResult.phase': 'stopped',
-          'zapResult.message': 'Scan stopped by user - restarting ZAP container...',
+          'zapResult.message': 'Scan stopped by user',
           stoppedAt: new Date(),
           updatedAt: new Date()
         }
@@ -2605,11 +2663,12 @@ async function stopZapScan(scanId, userId) {
 
     console.log(`✅ ZAP scan stopped successfully: ${scanId}`);
 
-    // Restart Docker container for fresh ZAP instance
-    console.log('🔄 Restarting ZAP Docker container for fresh instance...');
-    await restartZapContainer();
-
-    return { message: 'Scan stopped and ZAP container restarted successfully', scanId, containerRestarted: true };
+    // No container recycle here. Every scan now recycles ZAP before it starts
+    // (zapRecycler, wired in zapWorker/zapRoutes), so a dirty daemon left by an aborted
+    // scan is replaced before the next one runs. Recycling on stop bought nothing and
+    // cost a 2.5-minute ZAP outage per click — and because this path took no lock,
+    // repeat clicks stopped each other's replacement tasks.
+    return { message: 'Scan stopped successfully', scanId, containerRestarted: false };
 
   } catch (error) {
     console.error('❌ Error stopping ZAP scan:', error.message);
@@ -2624,75 +2683,37 @@ async function stopZapScan(scanId, userId) {
 async function restartZapContainer() {
   const containerName = 'zap-scanner';
 
-  // ZAP runs as an ECS service, not a local Docker container — `docker restart` is not
-  // available inside the backend task and previously failed every time with
-  // "Command failed: docker restart zap-scanner", leaving a wedged ZAP unrecovered.
-  // Stop the task through the ECS API instead and let the service replace it.
-  const cluster = process.env.ECS_CLUSTER_NAME || 'fortexa-cluster';
-  const serviceName = process.env.ECS_ZAP_SERVICE || 'zap-scan-ec2';
-
+  // Thin adapter over zapRecycler, which owns the ECS mechanics. This function's own
+  // implementation used to poll for health immediately after StopTask, with no wait for
+  // the old task to reach STOPPED — so during the ~30s SIGTERM grace the dying container
+  // answered /JSON/core/view/version/ and it declared success against the container it
+  // had just killed. recycleZapInstance waits for STOPPED first.
+  //
+  // Its never-throw contract is preserved *here* only: callers of this helper treat a
+  // failed recycle as non-fatal. Scan paths call recycleZapInstance directly, in its
+  // throwing form, so they never run against a dirty instance.
+  //
+  // NOT CALLED BY ANY AUTOMATIC PATH as of the stop-path change. It was removed from
+  // stopZapScan and stopCombinedScan because recycling on cancel is both redundant (the
+  // next scan recycles anyway) and destructive (five stop clicks on 2026-08-19 launched
+  // five concurrent recycles). Retained as a manual/ops hook only. Concurrency safety now
+  // lives in recycleZapInstance, which holds a short-lived per-instance recycle lock and
+  // refuses to stop a container younger than ZAP_FRESH_MAX_AGE_MS.
   try {
-    console.log(`🔄 Restarting ZAP via ECS: cluster=${cluster} service=${serviceName}`);
-
-    const { ECSClient, ListTasksCommand, StopTaskCommand } = require('@aws-sdk/client-ecs');
-    const ecs = new ECSClient({ region: process.env.AWS_REGION || 'ap-northeast-1' });
-
-    const { taskArns } = await ecs.send(new ListTasksCommand({ cluster, serviceName }));
-
-    if (!taskArns || taskArns.length === 0) {
-      console.warn(`⚠️ No running tasks found for service ${serviceName}`);
-    }
-
-    for (const taskArn of taskArns || []) {
-      await ecs.send(new StopTaskCommand({
-        cluster,
-        task: taskArn,
-        reason: 'ZAP restart requested after scan stop'
-      }));
-      console.log(`🛑 Stopped ECS task: ${taskArn}`);
-    }
-
-    // ECS replaces the stopped task automatically. Poll until the replacement answers.
-    // Allow longer than the old Docker path: an ECS task must be scheduled, placed and
-    // pull/start before ZAP's own ~60s startup.
-    console.log('⏳ Waiting for replacement ZAP task to become ready...');
-    let healthy = false;
-    let attempts = 0;
-    const maxAttempts = 60; // 60 attempts * 5 seconds = 300 seconds max
-
-    while (!healthy && attempts < maxAttempts) {
-      await sleep(5000); // Wait 5 seconds between checks
-      attempts++;
-
-      try {
-        // Check if ZAP API is responding
-        const healthCheck = await zapApi.get('/JSON/core/view/version/', {
-          timeout: 5000 // 5 second timeout for health check
-        });
-
-        if (healthCheck.data && healthCheck.data.version) {
-          healthy = true;
-          console.log(`✅ ZAP is healthy (v${healthCheck.data.version}) after ${attempts * 5} seconds`);
-        }
-      } catch (healthError) {
-        console.log(`⏳ Waiting for ZAP... (attempt ${attempts}/${maxAttempts})`);
-      }
-    }
-
-    if (!healthy) {
-      console.warn('⚠️ ZAP container may not be fully ready yet. It should become available shortly.');
-      return { success: true, warning: 'Container restarted but health check timed out', containerName };
-    }
-
-    return { success: true, containerName, message: 'Container restarted and healthy' };
-
+    const { recycleZapInstance } = require('./zapRecycler');
+    const result = await recycleZapInstance('normal', { reason: 'user stop' });
+    return {
+      success: true,
+      containerName,
+      taskArn: result.taskArn,
+      message: 'Container restarted and healthy'
+    };
   } catch (error) {
     console.error('❌ Failed to restart ZAP container:', error.message);
-
-    // Don't throw - the scan was still stopped, just container restart failed
     return {
       success: false,
       error: error.message,
+      code: error.code,
       containerName,
       message: 'Scan stopped but container restart failed. You may need to restart manually.'
     };
@@ -2780,9 +2801,14 @@ async function stopCombinedScan(scanId, userId) {
       throw new Error('Scan not found or access denied');
     }
 
-    // Check if scan is still running
-    if (scan.status === 'completed' || scan.status === 'failed') {
-      return { message: 'Scan already completed or failed', status: scan.status };
+    // Idempotency: see stopZapScan. Five stop requests for one scan on 2026-08-19 each
+    // reached the teardown because only completed/failed were treated as terminal.
+    if (TERMINAL_SCAN_STATES.includes(scan.status)) {
+      return { message: 'Scan already in a terminal state', status: scan.status, alreadyStopped: true };
+    }
+    if (!await claimStop(scanId)) {
+      console.log(`🛑 Stop already in progress for ${scanId} — ignoring duplicate request`);
+      return { message: 'Stop already in progress', status: scan.status, alreadyStopped: true };
     }
 
     console.log(`🛑 Stopping combined scan: ${scanId}`);
@@ -2907,31 +2933,19 @@ async function stopCombinedScan(scanId, userId) {
 
     console.log(`✅ Scan stopped in database: ${scanId}`);
 
-    // Restart both Docker containers in parallel for fresh instances
-    console.log('🔄 Restarting ZAP and WebCheck Docker containers for fresh instances...');
-
-    const [zapRestartResult, webCheckRestartResult] = await Promise.allSettled([
-      restartZapContainer(),
-      restartWebCheckContainer()
-    ]);
-
-    const zapRestarted = zapRestartResult.status === 'fulfilled' && zapRestartResult.value.success;
-    const webCheckRestarted = webCheckRestartResult.status === 'fulfilled' && webCheckRestartResult.value.success;
-
-    console.log(`✅ Container restart results:`);
-    console.log(`   ZAP: ${zapRestarted ? 'Success' : 'Failed'}`);
-    console.log(`   WebCheck: ${webCheckRestarted ? 'Success' : 'Failed'}`);
-
-    return {
-      message: 'Scan stopped and containers restarted successfully',
-      scanId,
-      containersRestarted: {
-        zap: zapRestarted,
-        webCheck: webCheckRestarted
-      },
-      zapRestartResult: zapRestartResult.status === 'fulfilled' ? zapRestartResult.value : { error: zapRestartResult.reason?.message },
-      webCheckRestartResult: webCheckRestartResult.status === 'fulfilled' ? webCheckRestartResult.value : { error: webCheckRestartResult.reason?.message }
-    };
+    // No container recycles here.
+    //
+    // ZAP: every scan recycles the container before it starts, so an aborted scan cannot
+    // leave a dirty daemon for the next one. Recycling on stop instead made cancellation
+    // destructive — this path held no lock, so five stop clicks on 2026-08-19 launched
+    // five concurrent ECS recycles that killed each other's replacement tasks and
+    // starved the real pre-scan recycle into PLACEMENT_FAILED.
+    //
+    // WebCheck: restartWebCheckContainer() shells out to `docker restart ssdt-webcheck`.
+    // The backend task mounts no Docker socket and WebCheck is a separate ECS task, so
+    // that call has never once succeeded in this deployment. WebCheck is stateless per
+    // request; there is nothing to reset.
+    return { message: 'Scan stopped successfully', scanId, containersRestarted: { zap: false, webCheck: false } };
 
   } catch (error) {
     console.error('❌ Error stopping combined scan:', error.message);
