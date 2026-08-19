@@ -415,6 +415,14 @@ async function startServer() {
           inProcessWorker    = createScanWorker(publisher);
           inProcessZapWorker = createZapWorker(publisher);
           console.log('✅ In-process BullMQ scan + ZAP workers started');
+
+          // Confirm the task role can actually reach ECS. Without this check a missing
+          // IAM policy stays invisible until the first scan of the day fails on recycle.
+          // Deliberately not awaited — this must never block or fail startup.
+          const { preflightEcsAccess } = require('./services/zapRecycler');
+          preflightEcsAccess().catch(err =>
+            console.error('[ZapRecycle] preflight threw unexpectedly:', err.message)
+          );
         } else {
           console.log('ℹ️  DISABLE_WORKER=true — expecting external worker process');
         }

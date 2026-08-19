@@ -1,18 +1,20 @@
 {
   "family": "zap-auth-task",
-  "requiresCompatibilities": ["EC2"],
+  "requiresCompatibilities": [
+    "EC2"
+  ],
   "networkMode": "awsvpc",
-  "cpu": "1024",
-  "memory": "4096",
+  "cpu": "3072",
+  "memory": "14336",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "zap-auth-scanner",
       "image": "ghcr.io/zaproxy/zaproxy:stable",
       "essential": true,
-      "cpu": 1024,
-      "memory": 4096,
-      "memoryReservation": 4096,
+      "cpu": 2048,
+      "memory": 14080,
+      "memoryReservation": 14080,
       "portMappings": [
         {
           "containerPort": 8080,
@@ -22,21 +24,20 @@
           "appProtocol": "http"
         }
       ],
+      "entryPoint": [
+        "sh",
+        "-c"
+      ],
       "command": [
-        "zap.sh", "-daemon",
-        "-host", "0.0.0.0",
-        "-port", "8080",
-        "-config", "api.disablekey=true",
-        "-config", "api.addrs.addr.name=.*",
-        "-config", "api.addrs.addr.regex=true",
-        "-Xmx2g"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
-      "environment": [
-        { "name": "ZAP_WORKER_CONCURRENCY", "value": "1" },
-        { "name": "JAVA_TOOL_OPTIONS",      "value": "-Xms2g" }
-      ],
+      "environment": [],
+      "stopTimeout": 30,
       "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"],
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"
+        ],
         "interval": 30,
         "timeout": 5,
         "retries": 5,
@@ -52,5 +53,6 @@
         }
       }
     }
-  ]
+  ],
+  "taskRoleArn": "arn:aws:iam::459181228792:role/fortexa-zap-task-role"
 }

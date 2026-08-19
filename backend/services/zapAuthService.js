@@ -70,12 +70,18 @@ async function zapAuthApiWithRetry(apiCall, maxRetries = 3, baseDelay = 1000, op
       return await apiCall();
     } catch (error) {
       lastError = error;
+      // Mirrors zapApiWithRetry in zapService.js: a 504 from the Service Connect proxy
+      // is an HTTP response, not a socket error, so it matched nothing here and gave up
+      // after one attempt.
+      const status = error.response?.status;
       const isRetryable = error.code === 'ECONNRESET' ||
                           error.code === 'ETIMEDOUT' ||
                           error.code === 'ENOTFOUND' ||
                           error.message?.includes('socket hang up') ||
                           error.message?.includes('ECONNREFUSED') ||
-                          error.message?.includes('timeout');
+                          error.message?.includes('timeout') ||
+                          status === 429 ||
+                          (status >= 500 && status <= 599);
 
       if (!isRetryable || attempt === maxRetries) {
         console.error(`[ZAP-AUTH] ${operationName} failed after ${attempt} attempt(s): ${error.message}`);
@@ -480,6 +486,31 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
   };
 
   try {
+    // Clear state left by a previous scan on this ZAP instance — see the matching
+    // reset in zapService.js. Must run before configureAuthContext below, since
+    // newSession discards contexts (including the auth context it creates).
+    //
+    // zapAuthRoutes recycles the auth container before this runs, so newSession operates
+    // on a fresh empty HSQLDB. A failure is now a real signal rather than expected
+    // slow-session noise — error level plus a persisted flag. Retained as a second line
+    // of defence for when ZAP_RECYCLE_ENABLED=false.
+    try {
+      await zapAuthApi.get('/JSON/core/action/newSession/', {
+        params: { name: `authscan-${scanId}`, overwrite: 'true' },
+        timeout: 30000
+      });
+      console.log(`[ZAP-AUTH] Session reset for scan ${scanId}`);
+    } catch (sessionErr) {
+      console.error(
+        `[ZAP-AUTH] SESSION_RESET_FAILED scanId=${scanId} status=${sessionErr.response?.status || 'none'} ` +
+        `code=${sessionErr.code || 'none'} — ${sessionErr.message}`
+      );
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { 'authScanResult.sessionResetFailed': true, updatedAt: new Date() } }
+      ).catch(() => {});
+    }
+
     // Phase 1: Configure authentication
     await updateProgress('configuring', 5, { status: 'running', message: 'Configuring authentication...' });
 
@@ -789,15 +820,21 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     await updateProgress('processing', 92, { message: 'Collecting vulnerability data...' });
     console.log(`[ZAP-AUTH] Retrieving alerts`);
 
-    const alertsResponse = await zapAuthApi.get('/JSON/core/view/alerts/', {
-      params: {
-        baseurl: targetUrl,
-        start: 0,
-        count: 10000
-      }
-    });
-
-    const rawAlerts = alertsResponse.data.alerts || [];
+    // Paged so a large result set can't exceed the client timeout and come back as a
+    // 504 — same failure and fix as zapService.js/fetchAlertsPaged.
+    const ALERT_PAGE_SIZE = 500;
+    const rawAlerts = [];
+    for (let start = 0; start < 10000; start += ALERT_PAGE_SIZE) {
+      const alertsResponse = await zapAuthApiWithRetry(
+        () => zapAuthApi.get('/JSON/core/view/alerts/', {
+          params: { baseurl: targetUrl, start, count: ALERT_PAGE_SIZE }
+        }),
+        5, 3000, `Alerts retrieval (offset ${start})`
+      );
+      const page = alertsResponse.data.alerts || [];
+      rawAlerts.push(...page);
+      if (page.length < ALERT_PAGE_SIZE) break;
+    }
     console.log(`[ZAP-AUTH] Retrieved ${rawAlerts.length} raw alerts`);
 
     // Generate HTML report

@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListZAPTasks",
+      "Effect": "Allow",
+      "Action": "ecs:ListTasks",
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:ap-northeast-1:459181228792:cluster/fortexa-cluster"
+        }
+      }
+    },
+    {
+      "Sid": "DescribeZAPTasks",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeTasks",
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:ap-northeast-1:459181228792:cluster/fortexa-cluster"
+        }
+      }
+    },
+    {
+      "Sid": "StopZAPTasks",
+      "Effect": "Allow",
+      "Action": "ecs:StopTask",
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "ecs:cluster": "arn:aws:ecs:ap-northeast-1:459181228792:cluster/fortexa-cluster"
+        }
+      }
+    }
+  ]
+}

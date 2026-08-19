@@ -15,14 +15,22 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["sts:GetCallerIdentity"],
+            "Action": [
+              "sts:GetCallerIdentity"
+            ],
             "Resource": "*"
           }
         ]
+      },
+      "FortexaZapRecycleAccess": {
+        "_status": "ATTACHED (verified 2026-08-19 via iam:GetRolePolicy). Grants ecs:ListTasks, ecs:DescribeTasks, ecs:StopTask, each conditioned on ecs:cluster = fortexa-cluster. Re-apply with: aws iam put-role-policy --role-name fortexa-backend-task-role --policy-name FortexaZapRecycleAccess --policy-document file://infrastructure/fortexa-zap-recycle-policy.json",
+        "_known_gap": "ecs:DescribeServices is NOT granted. Recycling works without it, but zapRecycler cannot read the scheduler's reason on a PLACEMENT_FAILED, so capacity failures log without the underlying ECS event text. Least-privilege addition would be ecs:DescribeServices on the zap-scan-ec2 and zap-auth-task-ec2 service ARNs only.",
+        "_purpose": "Lets the backend stop the ZAP ECS task before each scan so the container starts fresh (backend/services/zapRecycler.js). ZAP JVM never returns heap to the OS, so a long-lived task sits at ~10.6GB of 14GB indefinitely.",
+        "_scoping_note": "ecs:StopTask cannot be scoped to one service, only to a cluster. The code-side control is that zapRecycler only ever stops ARNs returned by its own ListTasks({serviceName}) call — never an ARN from a caller, request body, or DB field.",
+        "_document": "see infrastructure/fortexa-zap-recycle-policy.json"
       }
     }
   },
-
   "fortexaBackendTaskRole-scopedIntent": {
     "_comment": "Least-privilege version of what fortexa-backend-task-role needs, updated to ap-northeast-1 and the current consolidated secret. NOT currently applied — see _known_issue above.",
     "Version": "2012-10-17",
@@ -61,7 +69,6 @@
       }
     ]
   },
-
   "ecsTaskExecutionRole": {
     "_comment": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole — verified live 2026-08-13: has AmazonECSTaskExecutionRolePolicy plus CloudWatchLogsFullAccess, SecretsManagerReadWrite, and AWSKeyManagementServicePowerUser attached (also broader than the scoped document below).",
     "Version": "2012-10-17",
