@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "namespace": "arn:aws:servicediscovery:ap-northeast-1:459181228792:namespace/ns-r73hk557s2i5dbm2",
+  "services": [
+    {
+      "portName": "zap-auth-8080-tcp",
+      "discoveryName": "zap-auth-scanner",
+      "clientAliases": [
+        {
+          "port": 8080,
+          "dnsName": "zap-auth-scanner"
+        }
+      ],
+      "timeout": {
+        "idleTimeoutSeconds": 3600,
+        "perRequestTimeoutSeconds": 180
+      }
+    }
+  ],
+  "logConfiguration": {
+    "logDriver": "awslogs",
+    "options": {
+      "awslogs-group": "/ecs/zap-auth-task-ec2",
+      "awslogs-create-group": "true",
+      "awslogs-region": "ap-northeast-1",
+      "awslogs-stream-prefix": "ecs"
+    },
+    "secretOptions": []
+  }
+}

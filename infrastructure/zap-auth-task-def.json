@@ -4,8 +4,8 @@
     "EC2"
   ],
   "networkMode": "awsvpc",
-  "cpu": "2048",
-  "memory": "8192",
+  "cpu": "3072",
+  "memory": "14336",
   "executionRoleArn": "arn:aws:iam::459181228792:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
@@ -13,8 +13,8 @@
       "image": "ghcr.io/zaproxy/zaproxy:stable",
       "essential": true,
       "cpu": 2048,
-      "memory": 8192,
-      "memoryReservation": 8192,
+      "memory": 14080,
+      "memoryReservation": 14080,
       "portMappings": [
         {
           "containerPort": 8080,
@@ -29,14 +29,10 @@
         "-c"
       ],
       "command": [
-        "mkdir -p /home/zap/.ZAP && printf -- '-Xms1g -Xmx6g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
-      "environment": [
-        {
-          "name": "ZAP_WORKER_CONCURRENCY",
-          "value": "1"
-        }
-      ],
+      "environment": [],
+      "stopTimeout": 30,
       "healthCheck": {
         "command": [
           "CMD-SHELL",
@@ -57,5 +53,6 @@
         }
       }
     }
-  ]
+  ],
+  "taskRoleArn": "arn:aws:iam::459181228792:role/fortexa-zap-task-role"
 }
