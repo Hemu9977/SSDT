@@ -2,9 +2,15 @@
  * BullMQ ZAP scan queue.
  *
  * Separating ZAP from the fast-scanner queue lets us:
- *   - Set a long job timeout (13 h) without affecting PSI/Observatory jobs
+ *   - Give ZAP its own concurrency and retry policy, independent of PSI/Observatory
  *   - Scale ZAP workers independently from the API server
  *   - Use BullMQ retry/backoff for ZAP container startup failures
+ *
+ * NOTE: BullMQ has no per-job `timeout` option (it was removed in v4; this project is on
+ * v5). Passing one is silently ignored, so the 13 h "job timeout" this file used to set
+ * never existed. The bound that actually applies is the 12 h in-process globalDeadline in
+ * zapService.runAsyncZapScanBackground. ZAP_JOB_TIMEOUT_MS is retained solely because
+ * zapWorker derives its lockDuration from it.
  */
 const { Queue } = require('bullmq');
 const { getBullMQConnection } = require('../config/redis');
@@ -33,7 +39,6 @@ function getZapQueue() {
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 30000 }, // 30 s, 60 s, 120 s
-        timeout: ZAP_JOB_TIMEOUT_MS,
         removeOnComplete: { count: 200, age: 3600 },
         removeOnFail: { count: 200, age: 86400 }
       }
@@ -56,8 +61,7 @@ async function addZapJob(scanId, targetUrl, userId) {
     {
       jobId: `zap-${scanId}`,
       attempts: 3,
-      backoff: { type: 'exponential', delay: 30000 },
-      timeout: ZAP_JOB_TIMEOUT_MS
+      backoff: { type: 'exponential', delay: 30000 }
     }
   );
   console.log(`[ZapQueue] Enqueued ZAP job ${job.id} for scanId=${scanId}`);

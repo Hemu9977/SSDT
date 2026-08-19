@@ -290,15 +290,48 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         return;
       }
 
-      await startAsyncAuthScan(
-        targetUrl,
-        resolvedLoginUrl,
-        cookies,
-        scanId,
-        req.user.id,
-        zapUrl,
-        (id) => releaseContainer(id)
-      );
+      try {
+        const { withZapInstance } = require('../services/zapRecycler');
+        // startAsyncAuthScan is internally fire-and-forget, so releasing the lock when it
+        // returns would release it seconds after acquiring. Bridge through the onComplete
+        // callback instead — it fires from the background scan's .finally(), i.e. on true
+        // completion. The 'already_running' early return never fires onComplete, so it is
+        // resolved explicitly; without that the lock would sit until its TTL expires.
+        await withZapInstance('auth', scanId, () => new Promise((resolve) => {
+          startAsyncAuthScan(
+            targetUrl,
+            resolvedLoginUrl,
+            cookies,
+            scanId,
+            req.user.id,
+            zapUrl,
+            (id) => { releaseContainer(id); resolve(); }
+          )
+            .then((r) => { if (r?.status === 'already_running') resolve(); })
+            .catch((err) => {
+              console.error(`[ZAP-AUTH] startAsyncAuthScan failed for ${scanId}:`, err.message);
+              resolve();
+            });
+        }));
+      } catch (err) {
+        console.error(`[ZAP-AUTH] Pre-scan recycle failed for ${scanId}:`, err.message);
+        await ScanResult.updateOne(
+          { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
+          {
+            $set: {
+              status: 'failed',
+              'authScanResult.status': 'failed',
+              'authScanResult.phase': 'failed',
+              'authScanResult.error': err.message,
+              'authScanResult.errorCode': err.name === 'ZapRecycleError' ? 'zap_recycle_failed' : 'zap_scan_failed',
+              'authScanResult.failedAt': new Date(),
+              failureReason: 'vulnerability_scan_failed',
+              updatedAt: new Date()
+            }
+          }
+        ).catch(e => console.error('[ZAP-AUTH] Failed to record scan failure:', e.message));
+        await releaseContainer(scanId);
+      }
     })();
   } catch (error) {
     console.error('[ZAP-AUTH] Scan start error:', error.message);

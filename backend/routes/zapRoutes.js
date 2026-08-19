@@ -152,11 +152,32 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
       }
 
       try {
-        const result = await runZapScanWithDB(url, userId, { quickMode, scanId, zapUrl });
+        // Shares the ZAP daemon with the queued path, so it takes the same 'normal' lock
+        // and gets the same pre-scan container recycle.
+        const { withZapInstance } = require('../services/zapRecycler');
+        const result = await withZapInstance('normal', scanId,
+          () => runZapScanWithDB(url, userId, { quickMode, scanId, zapUrl }));
         console.log(`✅ Scan completed for user ${userId}: ${result.scanId}`);
         handleScanComplete(result.scanId || scanId, userId, 'Public Scan', url);
       } catch (error) {
         console.error(`❌ Scan failed for user ${userId}:`, error.message);
+        // No retry machinery on this path, so record terminal failure here. errorCode is
+        // machine-readable; error.message is English and for logs only.
+        await ScanResult.updateOne(
+          { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
+          {
+            $set: {
+              status: 'failed',
+              'zapResult.status': 'failed',
+              'zapResult.phase': 'failed',
+              'zapResult.error': error.message,
+              'zapResult.errorCode': error.name === 'ZapRecycleError' ? 'zap_recycle_failed' : 'zap_scan_failed',
+              'zapResult.failedAt': new Date(),
+              failureReason: 'vulnerability_scan_failed',
+              updatedAt: new Date()
+            }
+          }
+        ).catch(e => console.error('Failed to record scan failure:', e.message));
       } finally {
         await releaseContainer(scanId);
       }

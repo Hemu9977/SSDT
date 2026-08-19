@@ -9,7 +9,12 @@
 
 const axios = require('axios');
 
-const IS_AWS = !!(process.env.ECS_CLUSTER_NAME);
+// Gated on an explicit opt-in rather than on ECS_CLUSTER_NAME. That variable is also
+// read by restartZapContainer() in zapService.js, and keying off it there would silently
+// activate the per-scan container path below — which still targets Fargate, the container
+// name 'zap' and the family 'ssdt-zap-task', none of which match the live EC2 setup.
+// Leave this false until that drift is fixed and per-scan routing is wired up.
+const IS_AWS = process.env.ZAP_EPHEMERAL_CONTAINERS === 'true';
 
 // Eagerly load SDK only when running in AWS — avoids ~10MB parse cost in local dev
 // and eliminates repeated require() calls inside hot-path functions.
@@ -183,12 +188,26 @@ async function waitForTaskReady(taskArn, maxWaitMs = 300000) {
   throw new Error('Timed out waiting for ZAP Fargate task to become ready (5 min limit)');
 }
 
-async function waitForZapApi(zapUrl, maxWaitMs = 90000) {
+/**
+ * Poll a ZAP instance until its API answers.
+ *
+ * Has no ECS dependency — it is plain axios — so it is usable regardless of IS_AWS
+ * and is shared with zapRecycler.js, which polls the Service Connect alias after
+ * replacing a task. The 5s per-probe timeout is deliberately below Envoy's
+ * perRequestTimeoutSeconds so probes fail fast during the replacement window
+ * instead of stalling on a proxy with zero healthy endpoints.
+ *
+ * @param {string} zapUrl
+ * @param {number} maxWaitMs
+ * @param {object} requestConfig - merged into the axios call; the auth instance uses
+ *   it to pass the forced `Host: localhost:8080` header createZapAuthClient relies on.
+ */
+async function waitForZapApi(zapUrl, maxWaitMs = 90000, requestConfig = {}) {
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWaitMs) {
     try {
-      await axios.get(`${zapUrl}/JSON/core/view/version/`, { timeout: 5000 });
+      await axios.get(`${zapUrl}/JSON/core/view/version/`, { timeout: 5000, ...requestConfig });
       console.log(`[ContainerMgr] ZAP API healthy at ${zapUrl}`);
       return;
     } catch {
@@ -196,9 +215,9 @@ async function waitForZapApi(zapUrl, maxWaitMs = 90000) {
     }
   }
 
-  throw new Error(`ZAP API at ${zapUrl} did not respond within 90 seconds`);
+  throw new Error(`ZAP API at ${zapUrl} did not respond within ${Math.round(maxWaitMs / 1000)}s`);
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-module.exports = { requestContainer, releaseContainer, getActiveContainers };
+module.exports = { requestContainer, releaseContainer, getActiveContainers, waitForZapApi };
