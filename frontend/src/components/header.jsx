@@ -62,13 +62,6 @@ const Header = () => {
       <div className={`header-controls${menuOpen ? ' open' : ''}`}>
         <ThemeToggle />
         <LanguageToggle />
-        <Link
-          to="/about"
-          className="about-button"
-          onClick={() => setMenuOpen(false)}
-        >
-          {t('about')}
-        </Link>
 
         {token ? (
           <>

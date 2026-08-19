@@ -243,6 +243,102 @@ body.dark .marketing-home::before {
   margin: 0;
 }
 
+/* Spacing between the "Why FORTEXA" intro paragraphs and the reused
+   .about-feature-grid capability cards below them. */
+.marketing-capability-grid {
+  margin-top: 2rem;
+}
+
+/* ── AI-Powered Security Analysis — a dedicated, visually heavier panel so
+   AI reads as a core part of the product rather than one feature card among
+   several. Border + glow treatment echoes .about-feature-card, scaled up. ── */
+.marketing-ai-section {
+  margin-bottom: 3.5rem;
+}
+
+.marketing-ai-panel {
+  border: 2px solid var(--accent);
+  border-radius: var(--card-border-radius);
+  background: rgba(0, 0, 0, 0.65);
+  padding: 3rem 2.5rem;
+  box-shadow: 0 0 32px rgba(255, 107, 0, 0.18);
+}
+
+body.light .marketing-ai-panel {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.marketing-ai-title {
+  font-family: var(--font-title);
+  font-size: clamp(1.6rem, 3.4vw, 2.2rem);
+  font-weight: 800;
+  color: var(--accent-light);
+  margin: 0 0 1rem;
+  letter-spacing: 0.5px;
+}
+
+.marketing-ai-lead {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--foreground);
+  line-height: 1.6;
+  margin: 0 0 0.9rem;
+  max-width: 760px;
+}
+
+.marketing-ai-body {
+  font-size: 1rem;
+  line-height: 1.75;
+  color: var(--foreground-darker);
+  margin: 0 0 2rem;
+  max-width: 760px;
+}
+
+.marketing-ai-privacy {
+  border-top: 1px solid rgba(255, 107, 0, 0.25);
+  padding-top: 1.75rem;
+}
+
+.marketing-ai-privacy-title {
+  font-family: var(--font-title);
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--foreground);
+  margin: 0 0 0.6rem;
+}
+
+.marketing-ai-privacy-intro {
+  font-size: 0.95rem;
+  color: var(--foreground-darker);
+  line-height: 1.65;
+  margin: 0 0 1.1rem;
+  max-width: 760px;
+}
+
+.marketing-ai-privacy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.9rem;
+
+  li {
+    position: relative;
+    padding-left: 1.5rem;
+    font-size: 0.92rem;
+    line-height: 1.65;
+    color: var(--foreground-darker);
+
+    &::before {
+      content: '✓';
+      position: absolute;
+      left: 0;
+      color: #00d084;
+      font-weight: 800;
+    }
+  }
+}
+
 /* ── Product preview mockup — the single credibility/product signal ── */
 .marketing-preview-panel {
   max-width: 480px;
@@ -350,6 +446,14 @@ body.light {
   .marketing-value-item {
     border-top-color: var(--accent-dark);
   }
+
+  .marketing-ai-panel {
+    border-color: var(--accent-dark);
+  }
+
+  .marketing-ai-title {
+    color: var(--accent-dark);
+  }
 }
 
 /* ── Responsive ── */
@@ -391,5 +495,9 @@ body.light {
 
   .scan-core-grade {
     font-size: 3rem;
+  }
+
+  .marketing-ai-panel {
+    padding: 2rem 1.5rem;
   }
 }
