@@ -845,6 +845,7 @@ export const ja = {
   adminErrSelfDisable: '自分自身のアカウントは無効化できません。',
   adminErrSelfDelete: '自分自身のアカウントは削除できません。',
   adminErrLastAdmin: '最後の管理者のため、削除・変更できません。',
+  adminErrLastAdminOrg: 'この組織を無効化すると、最後の管理者がログインできなくなります。',
   adminErrNoOrg: 'このユーザーは組織に所属していません。',
   adminErrOwnerProtected: '組織のオーナーを削除する代わりに、組織自体を削除してください。',
   adminErrNoSubscription: 'この組織には有効なサブスクリプションがありません。',

@@ -59,23 +59,42 @@ function initializeSocket(httpServer) {
     }
   });
 
-  // Authenticate Socket.IO connections using JWT from handshake
-  io.use((socket, next) => {
+  // Authenticate Socket.IO connections using JWT from handshake.
+  // A valid signature is not sufficient: tokens live for 7 days, so a token
+  // issued before an admin disabled the account would otherwise keep streaming
+  // live scan progress and completed results over this channel long after REST
+  // access was revoked. Reuse the middleware's check so both paths share one rule.
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) {
       return next(new Error('Authentication required'));
     }
 
+    let userId;
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.userId = decoded.user?.id || decoded.id;
-      if (!socket.userId) {
+      userId = decoded.user?.id || decoded.id;
+      if (!userId) {
         return next(new Error('Invalid token payload'));
       }
-      next();
     } catch (err) {
       return next(new Error('Invalid token'));
     }
+
+    try {
+      const { isPrincipalBlocked } = require('../middleware/auth');
+      if (await isPrincipalBlocked(userId)) {
+        console.log(`🚫 Socket: rejected disabled account ${userId}`);
+        return next(new Error('Account disabled'));
+      }
+    } catch (err) {
+      // Mirror the REST middleware: a transient DB failure must not sever
+      // realtime updates for every connected user at once.
+      console.error('⚠️ Socket: disabled-state check failed, allowing connect:', err.message);
+    }
+
+    socket.userId = userId;
+    next();
   });
 
   io.on('connection', (socket) => {
@@ -401,6 +420,33 @@ function emitScanStarted(userId, payload) {
 /**
  * Get the Socket.IO instance (for external use if needed).
  */
+/**
+ * Force-disconnect every open socket belonging to a user.
+ *
+ * The handshake gate only runs at connect time, so a user disabled mid-session
+ * would keep an already-established socket until it happened to drop. Admin
+ * mutations call this so revocation is immediate on this channel too.
+ * Safe to call before initializeSocket() — it is a no-op when there is no server.
+ */
+function disconnectUser(userId) {
+  if (!io || !userId) return 0;
+  const room = `user_${String(userId)}`;
+  let closed = 0;
+  try {
+    for (const socket of io.sockets.sockets.values()) {
+      if (String(socket.userId) === String(userId)) {
+        socket.disconnect(true);
+        closed++;
+      }
+    }
+    io.in(room).disconnectSockets(true);
+  } catch (err) {
+    console.error('⚠️ disconnectUser failed:', err.message);
+  }
+  if (closed) console.log(`🔌 Disconnected ${closed} socket(s) for disabled user ${userId}`);
+  return closed;
+}
+
 function getIO() {
   return io;
 }
@@ -444,5 +490,6 @@ module.exports = {
   handleScheduledScanTriggered,
   handleScanFailed,
   handleScheduleCreated,
-  getIO
+  getIO,
+  disconnectUser
 };

@@ -104,6 +104,7 @@ const ERROR_KEYS = {
   ADMIN_SELF_DISABLE:        'adminErrSelfDisable',
   ADMIN_SELF_DELETE:         'adminErrSelfDelete',
   ADMIN_LAST_ADMIN:          'adminErrLastAdmin',
+  ADMIN_LAST_ADMIN_ORG:      'adminErrLastAdminOrg',
   ADMIN_NO_ORG:              'adminErrNoOrg',
   ADMIN_OWNER_PROTECTED:     'adminErrOwnerProtected',
   ADMIN_NO_SUBSCRIPTION:     'adminErrNoSubscription',

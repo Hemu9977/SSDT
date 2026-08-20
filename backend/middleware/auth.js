@@ -49,6 +49,19 @@ function invalidateAllPrincipals() {
   principalCache.clear();
 }
 
+// An expired entry is otherwise only replaced when that same user comes back,
+// so on a busy platform the Map would grow for the whole life of the task and
+// never shrink. Sweep it periodically; unref() so the timer never by itself
+// keeps the process alive (matters for the worker entrypoints and for tests).
+const CACHE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const sweepTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of principalCache) {
+    if (entry.expires <= now) principalCache.delete(key);
+  }
+}, CACHE_SWEEP_INTERVAL_MS);
+if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
+
 /**
  * Read the bearer token from either header form.
  * Supports Authorization: Bearer <token> (standard) and x-auth-token (legacy).
@@ -139,5 +152,8 @@ function identifyUser(req, _res, next) {
 
 module.exports = auth;
 module.exports.identifyUser = identifyUser;
+// Exported so non-Express entry points that verify their own JWTs (the
+// Socket.IO handshake) enforce exactly the same rule instead of reimplementing it.
+module.exports.isPrincipalBlocked = isPrincipalBlocked;
 module.exports.invalidatePrincipal = invalidatePrincipal;
 module.exports.invalidateAllPrincipals = invalidateAllPrincipals;

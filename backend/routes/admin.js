@@ -35,6 +35,43 @@ const isActiveAdmin = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole) && !u.is
 // Rule: only a superadmin may grant/revoke administrator roles, or act on an
 // account that already holds one. Admins manage ordinary users only.
 const holdsAdminRole = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole);
+
+// Revoking access must also cut the realtime channel: the Socket.IO handshake
+// is only checked at connect time, so an already-open socket would otherwise
+// keep streaming scan progress and results to a just-disabled user.
+// Lazily required (like the health-check probes below) to keep this route file
+// free of a load-time dependency on the socket layer.
+const cutRealtime = (userId) => {
+  try {
+    require('../services/notificationService').disconnectUser(userId);
+  } catch (err) {
+    console.error('⚠️ [admin] realtime disconnect failed:', err.message);
+  }
+};
+
+// Disabling an organization blocks every one of its members at the auth layer,
+// exactly as if each had been disabled individually. Without this guard,
+// disabling the org that happens to contain the last administrator locks
+// everyone out of the admin panel — recoverable only via scripts/makeAdmin.js
+// or a direct DB edit. The user-level paths already refuse to remove the last
+// administrator; this applies the same rule to the org-level switch.
+const adminsRemainAfterOrgDisable = async (orgId) => {
+  const alreadyDisabled = await Organization.find(
+    { isDisabled: true, _id: { $ne: orgId } }, { _id: 1 }
+  ).lean();
+  const blockedOrgIds = [orgId, ...alreadyDisabled.map((o) => o._id)];
+
+  const reachable = await User.countDocuments({
+    systemRole: { $in: ADMIN_CAPABLE_ROLES },
+    isDisabled: { $ne: true },
+    $or: [
+      { organizationId: null },
+      { organizationId: { $exists: false } },
+      { organizationId: { $nin: blockedOrgIds } },
+    ],
+  });
+  return reachable > 0;
+};
 const superadminRequired = (res) =>
   res.status(403).json({
     success: false,
@@ -611,6 +648,7 @@ router.patch('/users/:id', async (req, res) => {
     // Make the change effective on the target's very next request rather than
     // waiting out the auth-middleware cache TTL.
     invalidatePrincipal(target._id);
+    if (target.isDisabled) cutRealtime(target._id);
 
     res.json({
       success: true,
@@ -700,6 +738,7 @@ router.delete('/users/:id', async (req, res) => {
     const orgId = target.organizationId;
     await User.deleteOne({ _id: target._id });
     invalidatePrincipal(target._id);
+    cutRealtime(target._id);
 
     if (orgId) {
       const actualSeats = await User.countDocuments({ organizationId: orgId });
@@ -731,6 +770,13 @@ router.patch('/organizations/:id', async (req, res) => {
       if (typeof isDisabled !== 'boolean') {
         return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
       }
+      if (isDisabled && !(await adminsRemainAfterOrgDisable(org._id))) {
+        return res.status(409).json({
+          success: false,
+          code: 'ADMIN_LAST_ADMIN_ORG',
+          error: 'Disabling this organization would leave no reachable administrator',
+        });
+      }
       org.isDisabled = isDisabled;
     }
 
@@ -738,6 +784,10 @@ router.patch('/organizations/:id', async (req, res) => {
     // An org-level lock changes access for every member, and the auth cache is
     // keyed by user — clear all of it rather than trying to enumerate members.
     invalidateAllPrincipals();
+    if (org.isDisabled) {
+      const members = await User.find({ organizationId: org._id }, { _id: 1 }).lean();
+      members.forEach((m) => cutRealtime(m._id));
+    }
     res.json({ success: true, organization: { _id: org._id, name: org.name, isDisabled: org.isDisabled } });
   } catch (err) {
     console.error('❌ [admin/organizations PATCH]', err.message);

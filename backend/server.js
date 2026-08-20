@@ -189,8 +189,10 @@ app.use('/api/schedules', identifyUser, apiLimiter, require('./routes/scheduleRo
 // Notifications are polled by the browser as a WebSocket fallback.
 app.use('/api/notifications', identifyUser, pollLimiter, require('./routes/notificationRoutes'));
 
-// 👇 REGISTER GLOBAL ADMIN ROUTES
-app.use('/api/admin', apiLimiter, require('./routes/admin'));
+// Global admin routes. `identifyUser` must come before the limiter — without
+// it apiLimiter's keyGenerator falls back to req.ip, so every admin behind one
+// office IP or CDN edge shares a single quota. Every other mount does this.
+app.use('/api/admin', identifyUser, apiLimiter, require('./routes/admin'));
 
 
 // ── /health — lightweight liveness probe (ECS health check target) ───────────

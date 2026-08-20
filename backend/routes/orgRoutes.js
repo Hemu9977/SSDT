@@ -17,6 +17,7 @@ const { getFrontendBaseUrl } = require('../utils/frontendUrl');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const auth = require('../middleware/auth');
+const { invalidatePrincipal, isPrincipalBlocked } = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const Organization = require('../models/Organization');
 const Invite = require('../models/Invite');
@@ -196,6 +197,15 @@ router.post('/accept-invite', async (req, res) => {
     if (rawJwt) {
       try {
         const decoded = jwt.verify(rawJwt, process.env.JWT_SECRET);
+        // This route verifies its own token, so `auth` — and with it the
+        // account-disabled check — never runs. Apply the same rule here, or a
+        // locked-out user could consume an invite and be handed a fresh token.
+        if (await isPrincipalBlocked(decoded.user.id)) {
+          return res.status(403).json({
+            error: 'This account has been disabled. Please contact your administrator.',
+            code: 'ACCOUNT_DISABLED'
+          });
+        }
         user = await User.findById(decoded.user.id);
       } catch (_) {
         // Token invalid — fall through to new-user registration path
@@ -322,6 +332,19 @@ router.post('/accept-invite', async (req, res) => {
     const actualSeats = await User.countDocuments({ organizationId: org._id });
     await Organization.updateOne({ _id: org._id }, { $set: { seatsUsed: actualSeats } });
 
+    // Joining an organization changes organizationId, which is precisely what
+    // the auth middleware caches — drop the stale entry before the next request.
+    invalidatePrincipal(user._id);
+
+    // The organization just joined may itself be disabled; don't hand out a
+    // token that the very next request would reject.
+    if (await isPrincipalBlocked(user.id)) {
+      return res.status(403).json({
+        error: 'This account has been disabled. Please contact your administrator.',
+        code: 'ACCOUNT_DISABLED'
+      });
+    }
+
     // ── Issue JWT so frontend can log user in immediately ─────────────────
     const jwtToken = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -334,6 +357,7 @@ router.post('/accept-invite', async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        systemRole: user.systemRole || 'user',
         organizationId: org._id
       }
     });

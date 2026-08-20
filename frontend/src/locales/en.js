@@ -854,6 +854,7 @@ export const en = {
   adminErrSelfDisable: 'You cannot disable your own account.',
   adminErrSelfDelete: 'You cannot delete your own account.',
   adminErrLastAdmin: 'This is the last remaining administrator and cannot be removed.',
+  adminErrLastAdminOrg: 'Disabling this organization would lock out the last remaining administrator.',
   adminErrNoOrg: 'That user does not belong to an organization.',
   adminErrOwnerProtected: 'Delete the organization instead of removing its owner.',
   adminErrNoSubscription: 'That organization has no active subscription.',
