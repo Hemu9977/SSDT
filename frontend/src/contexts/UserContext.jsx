@@ -45,11 +45,31 @@ export const UserProvider = ({ children }) => {
 
       if (!res.ok) {
         console.error('❌ UserContext: Failed to fetch profile, status:', res.status);
-        if (res.status === 401) {
-          console.error('❌ UserContext: 401 Unauthorized — token may be invalid or expired');
+
+        // 403 ACCOUNT_DISABLED means an admin locked this account: the session
+        // can never succeed again, so treat it exactly like an invalid token.
+        // Without this it fell through to the generic catch below, which
+        // deliberately preserves localStorage — leaving the app rendering the
+        // old identity (and its systemRole) from a stale user_data.
+        let errorCode = null;
+        try {
+          errorCode = (await res.json())?.code || null;
+        } catch (_) {
+          // Non-JSON body (proxy error page); status alone still decides below.
+        }
+
+        const sessionIsDead =
+          res.status === 401 || (res.status === 403 && errorCode === 'ACCOUNT_DISABLED');
+
+        if (sessionIsDead) {
+          console.error('❌ UserContext: session rejected —', res.status, errorCode || '');
           localStorage.removeItem('token');
           localStorage.removeItem('is_pro_user');
           localStorage.removeItem('user_data');
+          setUser(null);
+          setOrganization(null);
+          setLimits(null);
+          setIsPro(false);
         }
         throw new Error('Failed to fetch profile');
       }

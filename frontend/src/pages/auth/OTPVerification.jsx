@@ -3,10 +3,13 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import { useTranslation } from '../../contexts/TranslationContext';
+import { useUser } from '../../contexts/UserContext';
+import { postLoginTarget } from '../../utils/authRedirect';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
 
 const OTPVerification = () => {
+  const { refreshUser } = useUser();
   const [otp, setOtp] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
@@ -42,7 +45,9 @@ const OTPVerification = () => {
       if (response.ok) {
         localStorage.setItem('token', data.token);
         setMessage(t('otpVerificationSuccess'));
-        const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+        // See LoginPage: refresh the shared user context before navigating.
+        await refreshUser();
+        const target = postLoginTarget(data.user);
         setTimeout(() => {
           navigate(target);
         }, 2000);

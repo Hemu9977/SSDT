@@ -3,6 +3,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import ThemeToggle from './ThemeToggle';
 import LanguageToggle from './LanguageToggle';
 import { useUser } from '../contexts/UserContext';
+import { isSystemAdmin } from '../utils/authRedirect';
 import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/Header.scss';
 import logo from '../assets/logo.png';
@@ -11,7 +12,7 @@ const Header = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const token = localStorage.getItem('token');
-  const { isPro } = useUser();
+  const { isPro, user } = useUser();
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -72,6 +73,15 @@ const Header = () => {
 
         {token ? (
           <>
+            {isSystemAdmin(user) && (
+              <Link
+                to="/admin"
+                className="admin-button"
+                onClick={() => setMenuOpen(false)}
+              >
+                {t('adminPanel')}
+              </Link>
+            )}
             <Link
               to="/profile"
               className="profile-button"

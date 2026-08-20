@@ -8,10 +8,13 @@ import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
 import { useTranslation } from '../../contexts/TranslationContext';
+import { useUser } from '../../contexts/UserContext';
+import { postLoginTarget } from '../../utils/authRedirect';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
 
 const LoginPage = () => {
+  const { refreshUser } = useUser();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -39,7 +42,11 @@ const LoginPage = () => {
           localStorage.setItem('token', data.token);
           syncLanguage();
           setMessage(t('googleLoginSuccessful'));
-          const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+          // UserProvider fetches the profile only on mount and sits above
+          // BrowserRouter, so a client-side navigate() would land on the route
+          // guard with user still null. Refresh the context before moving.
+          await refreshUser();
+          const target = postLoginTarget(data.user);
           setTimeout(() => navigate(target), 2000);
         } else {
           setError(data.message || t('googleLoginFailed'));
@@ -72,7 +79,11 @@ const LoginPage = () => {
           localStorage.setItem('token', data.token);
           syncLanguage();
           setMessage(data.message);
-          const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+          // UserProvider fetches the profile only on mount and sits above
+          // BrowserRouter, so a client-side navigate() would land on the route
+          // guard with user still null. Refresh the context before moving.
+          await refreshUser();
+          const target = postLoginTarget(data.user);
           setTimeout(() => navigate(target), 2000);
         } else {
           setMessage(data.message);

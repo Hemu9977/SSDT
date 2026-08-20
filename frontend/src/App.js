@@ -18,6 +18,7 @@ import ScanViewer from './pages/ScanViewer';
 import ScheduledScans from './pages/ScheduledScans';
 import JoinOrganization from './pages/JoinOrganization';
 import AdminPanel from './pages/Admin/AdminPanel';
+import RequireAdmin from './components/RequireAdmin';
 
 // Translation imports
 import { TranslationProvider } from './contexts/TranslationContext';
@@ -53,7 +54,10 @@ function AppContent() {
             <Route path="/scan/:analysisId" element={<ScanViewer />} />
             <Route path="/schedules" element={<ScheduledScans />} />
             <Route path="/join" element={<JoinOrganization />} />
-            <Route path="/admin" element={<AdminPanel />} />
+            <Route
+              path="/admin"
+              element={<RequireAdmin><AdminPanel /></RequireAdmin>}
+            />
           </Routes>
         </BrowserRouter>
       </TranslationProvider>
