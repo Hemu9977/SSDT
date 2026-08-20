@@ -6,7 +6,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { FaUsers, FaBuilding, FaShieldAlt, FaCheckCircle, FaClock, FaChartBar } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel } from './adminLabels';
+import { getPlanLabel, getAdminErrorLabel } from './adminLabels';
 import { formatAdminDate, formatAdminNumber } from './adminFormat';
 import { DistributionBars, PLAN_COLOR } from './adminCharts';
 
@@ -23,7 +23,7 @@ const AdminOverview = () => {
       const result = await adminService.getKpis();
       setData(result);
     } catch (err) {
-      setError(err.message || t('adminFetchError'));
+      setError(getAdminErrorLabel(t, err));
     } finally {
       setLoading(false);
     }

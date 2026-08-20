@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { FaShieldAlt } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getScanStatusLabel } from './adminLabels';
+import { getPlanLabel, getScanStatusLabel, getAdminErrorLabel } from './adminLabels';
 import { formatAdminDateTime, formatAdminNumber } from './adminFormat';
 
 const formatDuration = (t, secs) => {
@@ -48,7 +48,7 @@ const AdminScans = () => {
       setScans(res.scans || []);
       setPagination(res.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
-      setError(err.message || t('adminFetchError'));
+      setError(getAdminErrorLabel(t, err));
     } finally {
       setLoading(false);
     }

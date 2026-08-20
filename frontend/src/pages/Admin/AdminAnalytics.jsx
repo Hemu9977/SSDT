@@ -11,7 +11,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { FaChartLine, FaBuilding, FaCoins, FaShieldAlt } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getSubscriptionStatusLabel } from './adminLabels';
+import { getPlanLabel, getSubscriptionStatusLabel, getAdminErrorLabel } from './adminLabels';
 import { formatAdminNumber, formatAdminYen } from './adminFormat';
 import { TrendLine, DistributionBars, PLAN_COLOR, SUBSCRIPTION_STATUS_COLOR } from './adminCharts';
 
@@ -30,7 +30,7 @@ const AdminAnalytics = () => {
       const result = await adminService.getAnalytics();
       setData(result);
     } catch (err) {
-      setError(err.message || t('adminFetchError'));
+      setError(getAdminErrorLabel(t, err));
     } finally {
       setLoading(false);
     }

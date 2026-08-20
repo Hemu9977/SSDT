@@ -9,7 +9,7 @@ import { FaSearch, FaUser } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { useUser } from '../../contexts/UserContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getSystemRoleLabel, getOrgRoleLabel } from './adminLabels';
+import { getPlanLabel, getSystemRoleLabel, getOrgRoleLabel, getAdminErrorLabel } from './adminLabels';
 import { formatAdminDate, formatAdminNumber } from './adminFormat';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
@@ -90,7 +90,7 @@ const AdminUsers = () => {
       setUsers(res.users || []);
       setPagination(res.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
-      setError(err.message || t('adminFetchError'));
+      setError(getAdminErrorLabel(t, err));
     } finally {
       setLoading(false);
     }
@@ -146,7 +146,7 @@ const AdminUsers = () => {
       }
       fetchUsers(page, search);
     } catch (err) {
-      showMessage('error', err.message || t('adminActionFailed'));
+      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
     } finally {
       setActionLoadingId(null);
       setPendingAction(null);
@@ -163,7 +163,7 @@ const AdminUsers = () => {
       showMessage('success', t('adminUserUpdated'));
       fetchUsers(page, search);
     } catch (err) {
-      showMessage('error', err.message || t('adminActionFailed'));
+      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
     } finally {
       setActionLoadingId(null);
     }

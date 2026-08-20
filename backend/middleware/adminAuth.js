@@ -17,13 +17,23 @@ module.exports = async function adminAuth(req, res, next) {
     }
 
     // Fetch the user with systemRole from DB; never trust JWT payload alone for role
-    const user = await User.findById(req.user.id).select('systemRole email name');
+    const user = await User.findById(req.user.id).select('systemRole email name isDisabled');
     if (!user) {
       console.log('⚠️ [adminAuth] User not found:', req.user.id);
       return res.status(401).json({
         success: false,
         error: 'UNAUTHORIZED',
         message: 'User account not found'
+      });
+    }
+
+    if (user.isDisabled) {
+      console.log(`🚫 [adminAuth] Disabled admin account blocked: ${user.email}`);
+      return res.status(403).json({
+        success: false,
+        error: 'ACCOUNT_DISABLED',
+        code: 'ACCOUNT_DISABLED',
+        message: 'This account has been disabled'
       });
     }
 
@@ -37,9 +47,11 @@ module.exports = async function adminAuth(req, res, next) {
       });
     }
 
-    // Attach the full admin user info for downstream handlers
+    // Attach the full admin user info for downstream handlers.
+    // Deliberately no success log — this runs on every admin request and would
+    // write the admin's email address into the logs continuously. Denials below
+    // are still logged, which is the part worth auditing.
     req.adminUser = user;
-    console.log(`✅ [adminAuth] Admin access granted to ${user.email} (systemRole: ${user.systemRole})`);
     next();
   } catch (err) {
     console.error('❌ [adminAuth] Error:', err.message);

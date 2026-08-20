@@ -13,10 +13,15 @@ const getAuthHeaders = () => {
 };
 
 const handleResponse = async (res) => {
-  const data = await res.json();
+  // A non-JSON body (proxy error page, dropped connection) must not throw a
+  // SyntaxError that masks the real HTTP failure.
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.message || data.error || 'Request failed');
+    // The Error message stays English on purpose — it is for the console only.
+    // Callers must render `err.code` through getAdminErrorLabel(), never this.
+    const err = new Error(data.error || data.message || `Request failed (${res.status})`);
     err.status = res.status;
+    err.code = data.code || null;
     err.data = data;
     throw err;
   }

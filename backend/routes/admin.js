@@ -3,12 +3,12 @@
 // All routes are protected by auth + adminAuth middleware.
 // Read endpoints for statistics, users, organizations, scans, and system health,
 // plus mutation endpoints for user/organization lifecycle management.
-console.log("✅ admin.js loaded");
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const auth = require('../middleware/auth');
+const { invalidatePrincipal, invalidateAllPrincipals } = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
@@ -19,9 +19,28 @@ const devMsg = (err) =>
 
 const ADMIN_CAPABLE_ROLES = ['admin', 'superadmin'];
 
+// Search boxes feed straight into $regex. Without escaping, a stray '(' is a
+// 500 and a crafted pattern is a ReDoS against the event loop — admin-only,
+// but neither is an acceptable failure mode.
+const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // True if this user currently counts as an active platform administrator
 // (used to make sure an action never leaves zero admins on the platform).
 const isActiveAdmin = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole) && !u.isDisabled;
+
+// Privilege hierarchy. `adminAuth` lets both 'admin' and 'superadmin' through,
+// so without this a plain admin could promote anyone to superadmin, or demote,
+// disable and delete existing superadmins — i.e. the three-role enum would
+// describe a hierarchy that nothing actually enforced.
+// Rule: only a superadmin may grant/revoke administrator roles, or act on an
+// account that already holds one. Admins manage ordinary users only.
+const holdsAdminRole = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole);
+const superadminRequired = (res) =>
+  res.status(403).json({
+    success: false,
+    code: 'ADMIN_SUPERADMIN_REQUIRED',
+    error: 'Only a superadmin can manage administrator accounts',
+  });
 
 // Apply auth + adminAuth to ALL routes in this router
 router.use(auth, adminAuth);
@@ -72,7 +91,7 @@ router.get('/kpis', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/kpis]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch KPIs', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch KPIs', details: devMsg(err) });
   }
 });
 
@@ -87,8 +106,8 @@ router.get('/users', async (req, res) => {
     const query = {};
     if (search) {
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
+        { name: { $regex: escapeRegex(search), $options: 'i' } },
+        { email: { $regex: escapeRegex(search), $options: 'i' } },
       ];
     }
     if (role) query.role = role;
@@ -124,7 +143,7 @@ router.get('/users', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/users]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch users', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch users', details: devMsg(err) });
   }
 });
 
@@ -138,7 +157,7 @@ router.get('/organizations', async (req, res) => {
 
     const query = {};
     if (search) {
-      query.name = { $regex: search, $options: 'i' };
+      query.name = { $regex: escapeRegex(search), $options: 'i' };
     }
     if (plan) query.planType = plan;
     if (status) query.subscriptionStatus = status;
@@ -180,7 +199,7 @@ router.get('/organizations', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/organizations]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch organizations', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch organizations', details: devMsg(err) });
   }
 });
 
@@ -236,14 +255,13 @@ router.get('/scans', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/scans]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch scans', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch scans', details: devMsg(err) });
   }
 });
 
 // ── GET /api/admin/system-health ──────────────────────────────────────────────
 // Reports the health status of all integrated services.
 router.get('/system-health', async (req, res) => {
-  console.log("SYSTEM HEALTH HIT");
   try {
     const mem = process.memoryUsage();
     const checks = {
@@ -321,11 +339,13 @@ router.get('/system-health', async (req, res) => {
       checks.zap = { status: 'offline', error: e.message };
     }
 
-    // ZAP Auth scanner (port 8081)
+    // ZAP Auth scanner — same env var the auth scan service itself uses
+    // (services/zapAuthService.js); loopback is only the local-compose default.
     try {
       const axios = require('axios');
+      const zapAuthUrl = process.env.ZAP_AUTH_API_URL || 'http://127.0.0.1:8081';
       const start = Date.now();
-      const resp = await axios.get('http://127.0.0.1:8081/JSON/core/view/version/', { timeout: 3000 });
+      const resp = await axios.get(`${zapAuthUrl}/JSON/core/view/version/`, { timeout: 3000 });
       checks.zapAuth = {
         status: resp.data?.version ? 'online' : 'offline',
         version: resp.data?.version,
@@ -368,7 +388,7 @@ router.get('/system-health', async (req, res) => {
     res.json({ success: true, checks, timestamp: new Date().toISOString() });
   } catch (err) {
     console.error('❌ [admin/system-health]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch system health', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch system health', details: devMsg(err) });
   }
 });
 
@@ -519,7 +539,7 @@ router.get('/analytics', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/analytics]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch analytics', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch analytics', details: devMsg(err) });
   }
 });
 
@@ -534,11 +554,11 @@ router.patch('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid user id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid user id' });
     }
 
     const target = await User.findById(id);
-    if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+    if (!target) return res.status(404).json({ success: false, code: 'ADMIN_USER_NOT_FOUND', error: 'User not found' });
 
     const { systemRole, isDisabled } = req.body;
     const isSelf = String(target._id) === String(req.adminUser._id);
@@ -554,32 +574,43 @@ router.patch('/users/:id', async (req, res) => {
 
     if (systemRole !== undefined) {
       if (!['user', 'admin', 'superadmin'].includes(systemRole)) {
-        return res.status(400).json({ success: false, error: 'Invalid systemRole' });
+        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ROLE', error: 'Invalid systemRole' });
       }
       if (isSelf) {
-        return res.status(403).json({ success: false, error: 'You cannot change your own system role' });
+        return res.status(403).json({ success: false, code: 'ADMIN_SELF_ROLE', error: 'You cannot change your own system role' });
+      }
+      // Granting OR revoking an admin role is a superadmin-only action.
+      if (req.adminUser.systemRole !== 'superadmin' &&
+          (holdsAdminRole(target) || ADMIN_CAPABLE_ROLES.includes(systemRole))) {
+        return superadminRequired(res);
       }
       const willLoseAdmin = isActiveAdmin(target) && !ADMIN_CAPABLE_ROLES.includes(systemRole);
       if (willLoseAdmin && !(await assertNotLastAdmin())) {
-        return res.status(409).json({ success: false, error: 'Cannot remove the last remaining administrator' });
+        return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot remove the last remaining administrator' });
       }
       target.systemRole = systemRole;
     }
 
     if (isDisabled !== undefined) {
       if (typeof isDisabled !== 'boolean') {
-        return res.status(400).json({ success: false, error: 'isDisabled must be a boolean' });
+        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
       }
       if (isSelf && isDisabled) {
-        return res.status(403).json({ success: false, error: 'You cannot disable your own account' });
+        return res.status(403).json({ success: false, code: 'ADMIN_SELF_DISABLE', error: 'You cannot disable your own account' });
+      }
+      if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+        return superadminRequired(res);
       }
       if (isDisabled && isActiveAdmin(target) && !(await assertNotLastAdmin())) {
-        return res.status(409).json({ success: false, error: 'Cannot disable the last remaining administrator' });
+        return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot disable the last remaining administrator' });
       }
       target.isDisabled = isDisabled;
     }
 
     await target.save();
+    // Make the change effective on the target's very next request rather than
+    // waiting out the auth-middleware cache TTL.
+    invalidatePrincipal(target._id);
 
     res.json({
       success: true,
@@ -593,7 +624,7 @@ router.patch('/users/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/users PATCH]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to update user', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to update user', details: devMsg(err) });
   }
 });
 
@@ -603,16 +634,19 @@ router.delete('/users/:id/organization', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid user id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid user id' });
     }
 
     const target = await User.findById(id);
-    if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+    if (!target) return res.status(404).json({ success: false, code: 'ADMIN_USER_NOT_FOUND', error: 'User not found' });
     if (!target.organizationId) {
-      return res.status(400).json({ success: false, error: 'User does not belong to an organization' });
+      return res.status(400).json({ success: false, code: 'ADMIN_NO_ORG', error: 'User does not belong to an organization' });
+    }
+    if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+      return superadminRequired(res);
     }
     if (target.role === 'owner') {
-      return res.status(409).json({ success: false, error: 'Cannot remove an organization owner this way — delete the organization instead' });
+      return res.status(409).json({ success: false, code: 'ADMIN_OWNER_PROTECTED', error: 'Cannot remove an organization owner this way — delete the organization instead' });
     }
 
     const orgId = target.organizationId;
@@ -622,11 +656,12 @@ router.delete('/users/:id/organization', async (req, res) => {
     // Recount seats from DB for accuracy (same pattern as orgRoutes.js accept-invite).
     const actualSeats = await User.countDocuments({ organizationId: orgId });
     await Organization.updateOne({ _id: orgId }, { $set: { seatsUsed: actualSeats } });
+    invalidatePrincipal(target._id);
 
     res.json({ success: true });
   } catch (err) {
     console.error('❌ [admin/users/:id/organization DELETE]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to remove user from organization', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to remove user from organization', details: devMsg(err) });
   }
 });
 
@@ -636,17 +671,20 @@ router.delete('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid user id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid user id' });
     }
 
     const target = await User.findById(id);
-    if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+    if (!target) return res.status(404).json({ success: false, code: 'ADMIN_USER_NOT_FOUND', error: 'User not found' });
 
     if (String(target._id) === String(req.adminUser._id)) {
-      return res.status(403).json({ success: false, error: 'You cannot delete your own account' });
+      return res.status(403).json({ success: false, code: 'ADMIN_SELF_DELETE', error: 'You cannot delete your own account' });
+    }
+    if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+      return superadminRequired(res);
     }
     if (target.role === 'owner' && target.organizationId) {
-      return res.status(409).json({ success: false, error: 'Cannot delete an organization owner — delete the organization instead' });
+      return res.status(409).json({ success: false, code: 'ADMIN_OWNER_PROTECTED', error: 'Cannot delete an organization owner — delete the organization instead' });
     }
     if (isActiveAdmin(target)) {
       const otherAdmins = await User.countDocuments({
@@ -655,12 +693,13 @@ router.delete('/users/:id', async (req, res) => {
         isDisabled: { $ne: true },
       });
       if (otherAdmins === 0) {
-        return res.status(409).json({ success: false, error: 'Cannot delete the last remaining administrator' });
+        return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot delete the last remaining administrator' });
       }
     }
 
     const orgId = target.organizationId;
     await User.deleteOne({ _id: target._id });
+    invalidatePrincipal(target._id);
 
     if (orgId) {
       const actualSeats = await User.countDocuments({ organizationId: orgId });
@@ -670,7 +709,7 @@ router.delete('/users/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('❌ [admin/users DELETE]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to delete user', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to delete user', details: devMsg(err) });
   }
 });
 
@@ -681,25 +720,28 @@ router.patch('/organizations/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid organization id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid organization id' });
     }
 
     const org = await Organization.findById(id);
-    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+    if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
 
     const { isDisabled } = req.body;
     if (isDisabled !== undefined) {
       if (typeof isDisabled !== 'boolean') {
-        return res.status(400).json({ success: false, error: 'isDisabled must be a boolean' });
+        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
       }
       org.isDisabled = isDisabled;
     }
 
     await org.save();
+    // An org-level lock changes access for every member, and the auth cache is
+    // keyed by user — clear all of it rather than trying to enumerate members.
+    invalidateAllPrincipals();
     res.json({ success: true, organization: { _id: org._id, name: org.name, isDisabled: org.isDisabled } });
   } catch (err) {
     console.error('❌ [admin/organizations PATCH]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to update organization', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to update organization', details: devMsg(err) });
   }
 });
 
@@ -713,13 +755,13 @@ router.post('/organizations/:id/cancel-subscription', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid organization id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid organization id' });
     }
 
     const org = await Organization.findById(id);
-    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+    if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
     if (!org.stripeSubscriptionId) {
-      return res.status(400).json({ success: false, error: 'This organization has no active subscription' });
+      return res.status(400).json({ success: false, code: 'ADMIN_NO_SUBSCRIPTION', error: 'This organization has no active subscription' });
     }
 
     const subscription = await stripe.subscriptions.update(org.stripeSubscriptionId, {
@@ -734,7 +776,7 @@ router.post('/organizations/:id/cancel-subscription', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ [admin/organizations/:id/cancel-subscription]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to cancel subscription', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to cancel subscription', details: devMsg(err) });
   }
 });
 
@@ -747,11 +789,11 @@ router.delete('/organizations/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, error: 'Invalid organization id' });
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid organization id' });
     }
 
     const org = await Organization.findById(id);
-    if (!org) return res.status(404).json({ success: false, error: 'Organization not found' });
+    if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
 
     if (org.stripeSubscriptionId) {
       try {
@@ -766,13 +808,14 @@ router.delete('/organizations/:id', async (req, res) => {
       { $set: { organizationId: null } }
     );
     await Organization.deleteOne({ _id: org._id });
+    invalidateAllPrincipals();
 
     console.log(`🗑️ [admin] Organization ${org._id} deleted by ${req.adminUser.email}, ${modifiedCount} member(s) detached`);
 
     res.json({ success: true, membersDetached: modifiedCount });
   } catch (err) {
     console.error('❌ [admin/organizations DELETE]', err.message);
-    res.status(500).json({ success: false, error: 'Failed to delete organization', details: devMsg(err) });
+    res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to delete organization', details: devMsg(err) });
   }
 });
 

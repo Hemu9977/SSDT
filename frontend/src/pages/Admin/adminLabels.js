@@ -83,3 +83,40 @@ const CONNECTION_STATE_KEYS = {
 export const getConnectionStateLabel = (t, state) => (
   CONNECTION_STATE_KEYS[state] ? t(CONNECTION_STATE_KEYS[state]) : state
 );
+
+// ── Backend error codes → translation keys ───────────────────────────────────
+// Same rule as the enums above, applied to failures: the API's `error`/`message`
+// strings are English-only server-log text (and name internal concepts), so they
+// must never reach the UI. Every admin endpoint returns a stable `code`; this is
+// the only place that maps one to a user-facing string.
+const ERROR_KEYS = {
+  ACCOUNT_DISABLED:          'adminErrAccountDisabled',
+  UNAUTHORIZED:              'adminErrUnauthorized',
+  FORBIDDEN:                 'adminErrForbidden',
+  SERVER_ERROR:              'adminErrServer',
+  ADMIN_SUPERADMIN_REQUIRED: 'adminErrSuperadminRequired',
+  ADMIN_INVALID_ID:          'adminErrInvalidId',
+  ADMIN_USER_NOT_FOUND:      'adminErrUserNotFound',
+  ADMIN_ORG_NOT_FOUND:       'adminErrOrgNotFound',
+  ADMIN_INVALID_ROLE:        'adminErrInvalidRole',
+  ADMIN_INVALID_PAYLOAD:     'adminErrInvalidPayload',
+  ADMIN_SELF_ROLE:           'adminErrSelfRole',
+  ADMIN_SELF_DISABLE:        'adminErrSelfDisable',
+  ADMIN_SELF_DELETE:         'adminErrSelfDelete',
+  ADMIN_LAST_ADMIN:          'adminErrLastAdmin',
+  ADMIN_NO_ORG:              'adminErrNoOrg',
+  ADMIN_OWNER_PROTECTED:     'adminErrOwnerProtected',
+  ADMIN_NO_SUBSCRIPTION:     'adminErrNoSubscription',
+  ADMIN_FETCH_FAILED:        'adminFetchError',
+  ADMIN_ACTION_FAILED:       'adminActionFailed',
+};
+
+/**
+ * Resolve a thrown adminService error to a translated string.
+ * `fallbackKey` covers network failures and any code not yet mapped — the raw
+ * server text is never used, only logged by the caller if needed.
+ */
+export const getAdminErrorLabel = (t, err, fallbackKey = 'adminFetchError') => {
+  const key = err && err.code && ERROR_KEYS[err.code];
+  return t(key || fallbackKey);
+};

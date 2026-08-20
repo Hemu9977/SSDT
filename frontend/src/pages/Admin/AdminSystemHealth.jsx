@@ -15,7 +15,7 @@ import {
 } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
-import { getHealthStatusLabel, getConnectionStateLabel } from './adminLabels';
+import { getHealthStatusLabel, getConnectionStateLabel, getAdminErrorLabel } from './adminLabels';
 import { formatAdminTime, formatAdminNumber } from './adminFormat';
 
 const formatUptime = (t, secs) => {
@@ -125,7 +125,7 @@ const AdminSystemHealth = () => {
       const result = await adminService.getSystemHealth();
       setData(result);
     } catch (err) {
-      setError(err.message || t('adminFetchError'));
+      setError(getAdminErrorLabel(t, err));
     } finally {
       setLoading(false);
       setRefreshing(false);

@@ -28,6 +28,8 @@ import AdminScans from './AdminScans';
 import AdminSystemHealth from './AdminSystemHealth';
 import '../../styles/Admin.scss';
 
+const ADMIN_ROLES = ['admin', 'superadmin'];
+
 const ADMIN_NAV = [
   { key: 'overview', labelKey: 'adminOverview', icon: <FaTachometerAlt />, component: AdminOverview },
   { key: 'analytics', labelKey: 'adminAnalytics', icon: <FaChartLine />, component: AdminAnalytics },
@@ -58,8 +60,7 @@ const AdminPanel = () => {
       navigate('/login');
       return;
     }
-    const allowed = ['admin', 'superadmin'];
-    if (!allowed.includes(user.systemRole)) {
+    if (!ADMIN_ROLES.includes(user.systemRole)) {
       navigate('/profile');
     }
   }, [user, loading, navigate]);
@@ -69,7 +70,12 @@ const AdminPanel = () => {
     navigate(`/admin#${key}`, { replace: true });
   }, [navigate]);
 
-  if (loading || !user) {
+  // The redirect above runs after render, so without this a non-admin would get
+  // one frame of the admin shell — long enough for the active tab to mount and
+  // fire admin API calls that can only come back 403.
+  const isAdmin = Boolean(user && ADMIN_ROLES.includes(user.systemRole));
+
+  if (loading || !user || !isAdmin) {
     return (
       <div className="profile-page">
         <ParticleBackground />
