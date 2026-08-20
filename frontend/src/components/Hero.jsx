@@ -780,9 +780,8 @@ const Hero = ({ historicalScan }) => {
         })
       });
 
-      const data = await res.json();
-      // data.error is English server text; carry a key instead so the catch
-      // below resolves it through t() (same pattern as err.messageKey later).
+      // The response body is deliberately not read: it only carried an English
+      // error string, and the catch below resolves the message through t().
       if (!res.ok) throw Object.assign(new Error('save schedule failed'), { messageKey: 'failedSaveSchedule' });
 
       sessionStorage.removeItem('pendingScheduleConfig');

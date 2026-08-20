@@ -10,7 +10,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
 import ScheduleScanModal from '../components/ScheduleScanModal';
-import { useUser } from '../contexts/UserContext';
 import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/LandingPage.scss';
 import '../styles/ScheduledScans.scss';
@@ -33,7 +32,6 @@ const ScheduledScans = () => {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const navigate = useNavigate();
   const location = useLocation();
-  const { isPro } = useUser();
   const { t, currentLang } = useTranslation();
   
   const searchParams = new URLSearchParams(location.search);
@@ -66,7 +64,7 @@ const ScheduledScans = () => {
     } finally {
       setLoading(false);
     }
-  }, [navigate]);
+  }, [navigate, t]);
 
   useEffect(() => {
     fetchSchedules();
@@ -99,8 +97,7 @@ const ScheduledScans = () => {
         headers: { 'x-auth-token': token }
       });
 
-      const data = await res.json();
-      // data.error is English server text — carry a key, not the prose.
+      // Body deliberately unread — it only carried an English error string.
       if (!res.ok) throw Object.assign(new Error('trigger scan failed'), { messageKey: 'failedTriggerScan' });
 
       fetchSchedules();
@@ -136,8 +133,6 @@ const ScheduledScans = () => {
     const days = recurring.days.join(', ');
     return t('dayAtTime', { plural: recurring.days.length > 1 ? 's' : '', days, time: recurring.time });
   };
-
-  const isAuthTheme = isPro && (urlScanType === 'authenticated' || urlScanType === 'auth');
 
   return (
     <div className="landing-page">

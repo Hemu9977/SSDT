@@ -23,7 +23,7 @@ const ResetPasswordPage = () => {
     if (!token) {
       setError(t('invalidResetLink'));
     }
-  }, [token]);
+  }, [token, t]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
