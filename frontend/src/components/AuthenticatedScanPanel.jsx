@@ -306,7 +306,7 @@ const AuthenticatedScanPanel = () => {
         setDetectionError(t('noLoginFormsDetected'));
       }
     } catch (err) {
-      setDetectionError(err.message);
+      setDetectionError(t(err.messageKey || 'errUnexpected'));
     } finally {
       setDetecting(false);
     }
@@ -376,7 +376,8 @@ const AuthenticatedScanPanel = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || t('loginTestFailed'));
+        // data.error is English server text — carry a key, not the prose.
+        throw Object.assign(new Error('login test failed'), { messageKey: 'loginTestFailed' });
       }
 
       setTestResult(data);
@@ -445,7 +446,7 @@ const AuthenticatedScanPanel = () => {
       alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedSaveSchedule'));
       setScanning(false);
     }
   };
@@ -492,9 +493,9 @@ const AuthenticatedScanPanel = () => {
         // `data.error` is an English backend string that can name the scan
         // engines — log it, never render it.
         console.error('Auth scan start failed:', res.status, data);
-        if (res.status === 429) throw new Error(t('scanRateLimited'));
-        if (res.status === 403) throw new Error(t('planLimitReached'));
-        throw new Error(t('failedStartScan'));
+        if (res.status === 429) throw Object.assign(new Error('rate limited'), { messageKey: 'scanRateLimited' });
+        if (res.status === 403) throw Object.assign(new Error('plan limit'), { messageKey: 'planLimitReached' });
+        throw Object.assign(new Error('start scan failed'), { messageKey: 'failedStartScan' });
       }
 
       setScanId(data.scanId);
@@ -512,7 +513,7 @@ const AuthenticatedScanPanel = () => {
       stopPollingRef.current = false;
       startWebSocketListener(data.scanId);
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedStartScan'));
       setScanning(false);
     }
   };

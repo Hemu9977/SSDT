@@ -41,7 +41,7 @@ router.post('/google', async (req, res) => {
     let name, email, googleId, picture;
 
     if (!googleAccessToken && !token) {
-      return res.status(400).json({ message: 'No token provided' });
+      return res.status(400).json({ code: 'AUTH_NO_TOKEN', message: 'No token provided' });
     }
 
     ({ name, email, googleId, picture } = await verifyGoogleCredential({ token, googleAccessToken }));
@@ -74,7 +74,7 @@ router.post('/google', async (req, res) => {
     }
 
     if (await isAccountBlocked(user)) {
-      return res.status(403).json({ message: DISABLED_MESSAGE });
+      return res.status(403).json({ code: 'ACCOUNT_DISABLED', message: DISABLED_MESSAGE });
     }
 
     if (!user.isVerified) user.isVerified = true;
@@ -89,7 +89,7 @@ router.post('/google', async (req, res) => {
       (err, jwtToken) => {
         if (err) throw err;
         res.json({
-          message: 'Google login successful',
+          code: 'AUTH_GOOGLE_SUCCESS', message: 'Google login successful',
           token: jwtToken,
           user: { id: user.id, email: user.email, isVerified: user.isVerified, systemRole: user.systemRole || 'user' }
         });
@@ -97,7 +97,7 @@ router.post('/google', async (req, res) => {
     );
   } catch (err) {
     console.error('Google Auth Error:', err.message);
-    res.status(500).json({ message: 'Google authentication failed' });
+    res.status(500).json({ code: 'AUTH_GOOGLE_FAILED', message: 'Google authentication failed' });
   }
 });
 
@@ -105,17 +105,17 @@ router.post('/google', async (req, res) => {
 router.post('/register', async (req, res) => {
   const { name, email, password, language } = req.body;
   if (!name || typeof name !== 'string' || name.trim().length < 1) {
-    return res.status(400).json({ message: 'Name is required' });
+    return res.status(400).json({ code: 'AUTH_NAME_REQUIRED', message: 'Name is required' });
   }
   if (!email || !EMAIL_RE.test(email)) {
-    return res.status(400).json({ message: 'Valid email is required' });
+    return res.status(400).json({ code: 'AUTH_EMAIL_INVALID', message: 'Valid email is required' });
   }
   if (!password || password.length < 8) {
-    return res.status(400).json({ message: 'Password must be at least 8 characters' });
+    return res.status(400).json({ code: 'AUTH_PASSWORD_TOO_SHORT', message: 'Password must be at least 8 characters' });
   }
   try {
     let user = await User.findOne({ email: email.toLowerCase() });
-    if (user) return res.status(400).json({ message: 'User already exists' });
+    if (user) return res.status(400).json({ code: 'AUTH_USER_EXISTS', message: 'User already exists' });
 
     user = new User({ name, email: email.toLowerCase(), password });
     // Seed the email language from the UI language the visitor registered under
@@ -133,9 +133,9 @@ router.post('/register', async (req, res) => {
     // Attempt email, but don't fail registration if email fails
     try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch(e) { console.error("Email failed", e); }
     
-    res.status(201).json({ message: 'User registered', user: { id: user.id, email: user.email }});
+    res.status(201).json({ code: 'AUTH_REGISTERED', message: 'User registered', user: { id: user.id, email: user.email }});
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
   }
 });
 
@@ -143,26 +143,26 @@ router.post('/register', async (req, res) => {
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !EMAIL_RE.test(email)) {
-    return res.status(400).json({ message: 'Valid email is required' });
+    return res.status(400).json({ code: 'AUTH_EMAIL_INVALID', message: 'Valid email is required' });
   }
   if (!password) {
-    return res.status(400).json({ message: 'Password is required' });
+    return res.status(400).json({ code: 'AUTH_PASSWORD_REQUIRED', message: 'Password is required' });
   }
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!user) return res.status(400).json({ code: 'AUTH_INVALID_CREDENTIALS', message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!isMatch) return res.status(400).json({ code: 'AUTH_INVALID_CREDENTIALS', message: 'Invalid credentials' });
 
     if (await isAccountBlocked(user)) {
-      return res.status(403).json({ message: DISABLED_MESSAGE });
+      return res.status(403).json({ code: 'ACCOUNT_DISABLED', message: DISABLED_MESSAGE });
     }
 
     const recentlyReset = user.passwordResetAt && (new Date() - user.passwordResetAt) < (86400000);
     if (recentlyReset) {
        const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-       return res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' } });
+       return res.json({ code: 'AUTH_LOGIN_SUCCESS', message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' } });
     }
 
     const otp = generateOTP();
@@ -170,9 +170,9 @@ router.post('/login', async (req, res) => {
     user.otpExpires = new Date(Date.now() + 600000);
     await user.save();
     try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch(e) { console.error(e); }
-    res.json({ message: 'Check email for OTP', user: { id: user.id, email: user.email }});
+    res.json({ code: 'AUTH_OTP_SENT', message: 'Check email for OTP', user: { id: user.id, email: user.email }});
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
   }
 });
 
@@ -180,18 +180,18 @@ router.post('/login', async (req, res) => {
 router.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !EMAIL_RE.test(email)) {
-    return res.status(400).json({ message: 'Valid email is required' });
+    return res.status(400).json({ code: 'AUTH_EMAIL_INVALID', message: 'Valid email is required' });
   }
   if (!otp || !/^\d{6}$/.test(otp)) {
-    return res.status(400).json({ message: 'OTP must be a 6-digit number' });
+    return res.status(400).json({ code: 'AUTH_OTP_FORMAT', message: 'OTP must be a 6-digit number' });
   }
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user || user.otp !== otp || user.otpExpires < new Date()) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({ code: 'AUTH_OTP_INVALID', message: 'Invalid or expired OTP' });
     }
     if (await isAccountBlocked(user)) {
-      return res.status(403).json({ message: DISABLED_MESSAGE });
+      return res.status(403).json({ code: 'ACCOUNT_DISABLED', message: DISABLED_MESSAGE });
     }
 
     user.otp = undefined;
@@ -201,21 +201,21 @@ router.post('/verify-otp', async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' }});
+    res.json({ code: 'AUTH_LOGIN_SUCCESS', message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' }});
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
   }
 });
 
 router.post('/resend-otp', async (req, res) => {
     /* ... Keep existing resend logic if needed, or minimal stub ... */
-    res.json({message: "OTP sent"});
+    res.json({ code: 'AUTH_OTP_SENT', message: 'OTP sent' });
 });
-router.post('/forgot-password', async (req, res) => { res.json({message: "Reset email sent"}); });
-router.post('/reset-password', async (req, res) => { res.json({message: "Password reset"}); });
+router.post('/forgot-password', async (req, res) => { res.json({ code: 'AUTH_RESET_EMAIL_SENT', message: 'Reset email sent' }); });
+router.post('/reset-password', async (req, res) => { res.json({ code: 'AUTH_PASSWORD_RESET', message: 'Password reset' }); });
 router.get('/me', auth, async (req, res) => {
     try { const user = await User.findById(req.user.id).select('-password'); res.json(user); } 
-    catch(err) { res.status(500).json({message: "Server error"}); }
+    catch(err) { res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' }); }
 });
 
 module.exports = router;

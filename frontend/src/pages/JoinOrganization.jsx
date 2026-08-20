@@ -6,6 +6,7 @@ import { FcGoogle } from 'react-icons/fc';
 
 import ParticleBackground from '../components/ParticleBackground';
 import { useTranslation } from '../contexts/TranslationContext';
+import { getApiErrorLabel } from '../utils/apiErrors';
 import '../styles/JoinOrganization.scss';
 import { API_BASE } from '../config/api';
 
@@ -71,12 +72,12 @@ const JoinOrganization = () => {
   }, [token]);
 
   // ── Shared: persist JWT and redirect ──────────────────────────────────────
-  const finalizeLogin = async (jwt, message) => {
+  const finalizeLogin = async (jwt) => {
     localStorage.setItem('token', jwt);
 
     await refreshUser(); // ✅ now valid
 
-    setSuccess(message || `Welcome to ${inviteInfo?.orgName}! Redirecting...`);
+    setSuccess(t('joinWelcome', { orgName: inviteInfo?.orgName || '' }));
     setTimeout(() => navigate('/profile'), 2000);
   };
 
@@ -107,13 +108,15 @@ const JoinOrganization = () => {
         const data = await res.json();
 
         if (!res.ok) {
-          setError(res.status === 403 && data.invitedEmail ? t('inviteEmailMismatch') : (data.error || t('googleLoginFailed')));
+          setError(res.status === 403 && data.invitedEmail
+            ? t('inviteEmailMismatch')
+            : getApiErrorLabel(t, data, 'googleLoginFailed'));
           return;
         }
 
-        finalizeLogin(data.token, data.message);
+        finalizeLogin(data.token);
       } catch (_) {
-        setError('Network error. Please try again.');
+        setError(t('errNetwork'));
       } finally {
         setLoading(false);
       }
@@ -139,11 +142,11 @@ const JoinOrganization = () => {
     e.preventDefault();
     setError('');
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
+      setError(t('errPasswordsMismatch'));
       return;
     }
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters');
+    if (password.length < 8) {
+      setError(t('errAuthPasswordTooShort'));
       return;
     }
     setLoading(true);
@@ -158,18 +161,18 @@ const JoinOrganization = () => {
 
       if (!res.ok) {
         if (data.requiresLogin) {
-          setError(data.error);
+          setError(getApiErrorLabel(t, data));
           setLoginEmail(inviteInfo.email);
           setMode('login');
         } else {
-          setError(data.error || 'Registration failed');
+          setError(getApiErrorLabel(t, data));
         }
         return;
       }
 
-      finalizeLogin(data.token, data.message);
+      finalizeLogin(data.token);
     } catch (_) {
-      setError('Network error. Please try again.');
+      setError(t('errNetwork'));
     } finally {
       setLoading(false);
     }
@@ -190,7 +193,7 @@ const JoinOrganization = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.message || 'Invalid credentials');
+        setError(getApiErrorLabel(t, data));
         return;
       }
 
@@ -202,7 +205,7 @@ const JoinOrganization = () => {
         await handleAcceptAfterLogin(data.token);
       }
     } catch (_) {
-      setError('Network error. Please try again.');
+      setError(t('errNetwork'));
     } finally {
       setLoading(false);
     }
@@ -222,13 +225,13 @@ const JoinOrganization = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.message || 'Invalid OTP');
+        setError(getApiErrorLabel(t, data));
         return;
       }
 
       await handleAcceptAfterLogin(data.token);
     } catch (_) {
-      setError('Network error. Please try again.');
+      setError(t('errNetwork'));
     } finally {
       setLoading(false);
     }
@@ -237,11 +240,11 @@ const JoinOrganization = () => {
   const handleAcceptAfterLogin = async (jwt) => {
     const data = await acceptInvite(jwt);
     if (data.success) {
-      finalizeLogin(data.token || jwt, data.message);
+      finalizeLogin(data.token || jwt);
     } else {
       // Already a member or other non-fatal issue
-      setError(data.error || 'Could not accept invite');
-      if (data.error?.toLowerCase().includes('already a member')) {
+      setError(getApiErrorLabel(t, data));
+      if (data.code === 'ORG_ALREADY_MEMBER') {
         localStorage.setItem('token', jwt);
         setTimeout(() => navigate('/profile'), 2000);
       }
@@ -273,9 +276,9 @@ const JoinOrganization = () => {
           <div className="join-logo">FORTEXA</div>
           <div className="join-error-box">
             <div className="join-error-icon">✕</div>
-            <h2>Invite Invalid</h2>
+            <h2>{t('joinInviteInvalidTitle')}</h2>
             <p>{validationError}</p>
-            <button className="join-btn" onClick={() => navigate('/')}>Go to Homepage</button>
+            <button className="join-btn" onClick={() => navigate('/')}>{t('joinGoHome')}</button>
           </div>
         </div>
       </div>

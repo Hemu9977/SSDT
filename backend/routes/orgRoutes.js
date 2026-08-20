@@ -31,30 +31,30 @@ router.post('/invite', auth, async (req, res) => {
   try {
     const { email, role = 'member' } = req.body;
 
-    if (!email) return res.status(400).json({ error: 'Email is required' });
+    if (!email) return res.status(400).json({ code: 'ORG_EMAIL_REQUIRED', error: 'Email is required' });
 
     const allowedRoles = ['admin', 'member'];
     if (!allowedRoles.includes(role)) {
-      return res.status(400).json({ error: 'Role must be "admin" or "member"' });
+      return res.status(400).json({ code: 'ORG_ROLE_INVALID', error: 'Role must be "admin" or "member"' });
     }
 
     const inviter = await User.findById(req.user.id);
     if (!inviter || !inviter.organizationId) {
-      return res.status(400).json({ error: 'User does not belong to an organization' });
+      return res.status(400).json({ code: 'ORG_NO_MEMBERSHIP', error: 'User does not belong to an organization' });
     }
 
     // Only owners and admins can invite
     if (!['owner', 'admin'].includes(inviter.role)) {
-      return res.status(403).json({ error: 'Only owners or admins can invite members' });
+      return res.status(403).json({ code: 'ORG_INVITE_FORBIDDEN', error: 'Only owners or admins can invite members' });
     }
 
     // Only owners can invite admins
     if (role === 'admin' && inviter.role !== 'owner') {
-      return res.status(403).json({ error: 'Only owners can invite admins' });
+      return res.status(403).json({ code: 'ORG_INVITE_ADMIN_FORBIDDEN', error: 'Only owners can invite admins' });
     }
 
     const org = await Organization.findById(inviter.organizationId);
-    if (!org) return res.status(404).json({ error: 'Organization not found' });
+    if (!org) return res.status(404).json({ code: 'ORG_NOT_FOUND', error: 'Organization not found' });
 
     // Check seat availability including pending invites
     const pendingInvitesCount = await Invite.countDocuments({ 
@@ -62,13 +62,13 @@ router.post('/invite', auth, async (req, res) => {
       status: 'pending' 
     });
     if (org.seatsUsed + pendingInvitesCount >= org.seatsAllowed) {
-      return res.status(403).json({ error: 'Seat limit reached for this organization. Upgrade your plan to add more members.' });
+      return res.status(403).json({ code: 'ORG_SEAT_LIMIT', error: 'Seat limit reached for this organization. Upgrade your plan to add more members.' });
     }
 
     // Block if email already belongs to an org member
     const existingMember = await User.findOne({ email: email.toLowerCase(), organizationId: org._id });
     if (existingMember) {
-      return res.status(400).json({ error: 'This user is already a member of your organization' });
+      return res.status(400).json({ code: 'ORG_ALREADY_MEMBER', error: 'This user is already a member of your organization' });
     }
 
     // Cancel any pre-existing pending invite for this email + org (re-invite replaces old)
@@ -114,7 +114,7 @@ router.post('/invite', auth, async (req, res) => {
     });
   } catch (err) {
     console.error('Invite error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', error: 'Server error' });
   }
 });
 
@@ -126,11 +126,11 @@ router.get('/invite/:token', async (req, res) => {
     const invite = await Invite.findOne({ token });
 
     if (!invite) {
-      return res.status(404).json({ error: 'Invalid invite link. It may have already been used or does not exist.' });
+      return res.status(404).json({ code: 'ORG_INVITE_INVALID', error: 'Invalid invite link. It may have already been used or does not exist.' });
     }
 
     if (invite.status === 'accepted') {
-      return res.status(400).json({ error: 'This invite has already been accepted.' });
+      return res.status(400).json({ code: 'ORG_INVITE_USED', error: 'This invite has already been accepted.' });
     }
 
     if (new Date() > invite.expiresAt) {
@@ -139,12 +139,12 @@ router.get('/invite/:token', async (req, res) => {
         invite.status = 'expired';
         await invite.save();
       }
-      return res.status(400).json({ error: 'This invite has expired. Ask your team admin for a new invite.' });
+      return res.status(400).json({ code: 'ORG_INVITE_EXPIRED', error: 'This invite has expired. Ask your team admin for a new invite.' });
     }
 
     const org = await Organization.findById(invite.organizationId).select('name planType seatsAllowed seatsUsed');
     if (!org) {
-      return res.status(404).json({ error: 'Organization not found' });
+      return res.status(404).json({ code: 'ORG_NOT_FOUND', error: 'Organization not found' });
     }
 
     res.json({
@@ -159,7 +159,7 @@ router.get('/invite/:token', async (req, res) => {
     });
   } catch (err) {
     console.error('Invite validate error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', error: 'Server error' });
   }
 });
 
@@ -171,7 +171,7 @@ router.get('/invite/:token', async (req, res) => {
 router.post('/accept-invite', async (req, res) => {
   try {
     const { token, name, password, googleAccessToken, googleToken } = req.body;
-    if (!token) return res.status(400).json({ error: 'Invite token is required' });
+    if (!token) return res.status(400).json({ code: 'ORG_INVITE_TOKEN_REQUIRED', error: 'Invite token is required' });
 
     // ── Validate and atomically accept invite ──────────────────────────────
     const invite = await Invite.findOneAndUpdate(
@@ -180,11 +180,11 @@ router.post('/accept-invite', async (req, res) => {
       { new: true }
     );
     if (!invite) {
-      return res.status(400).json({ error: 'Invalid, expired, or already accepted invite token' });
+      return res.status(400).json({ code: 'ORG_INVITE_INVALID', error: 'Invalid, expired, or already accepted invite token' });
     }
 
     const org = await Organization.findById(invite.organizationId);
-    if (!org) return res.status(404).json({ error: 'Organization not found' });
+    if (!org) return res.status(404).json({ code: 'ORG_NOT_FOUND', error: 'Organization not found' });
 
     // ── Resolve user (logged-in or new registration) ──────────────────────
     let user = null;
@@ -220,7 +220,7 @@ router.post('/accept-invite', async (req, res) => {
       } catch (googleErr) {
         console.error('Accept invite Google auth error:', googleErr.message);
         await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
-        return res.status(400).json({ error: 'Google authentication failed. Please try again.' });
+        return res.status(400).json({ code: 'AUTH_GOOGLE_FAILED', error: 'Google authentication failed. Please try again.' });
       }
 
       // Critical: verified Google email must match the invited email, BEFORE
@@ -228,7 +228,7 @@ router.post('/accept-invite', async (req, res) => {
       if ((googleData.email || '').toLowerCase() !== invite.email.toLowerCase()) {
         await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
         return res.status(403).json({
-          error: 'This invitation was sent to another email address. Please sign in using the invited Google account or the invited email.',
+          code: 'ORG_INVITE_EMAIL_MISMATCH', error: 'This invitation was sent to another email address. Please sign in using the invited Google account or the invited email.',
           invitedEmail: invite.email
         });
       }
@@ -261,7 +261,7 @@ router.post('/accept-invite', async (req, res) => {
       // ── New user registration path ─────────────────────────────────────
       if (!name || !password) {
         return res.status(400).json({
-          error: 'Please provide your name and password to create an account',
+          code: 'ORG_SIGNUP_FIELDS_REQUIRED', error: 'Please provide your name and password to create an account',
           requiresRegistration: true
         });
       }
@@ -271,7 +271,7 @@ router.post('/accept-invite', async (req, res) => {
       if (existingByEmail) {
         // User exists but didn't use auth token — tell frontend to log in first
         return res.status(409).json({
-          error: 'An account with this email already exists. Please log in to accept the invite.',
+          code: 'ORG_ACCOUNT_EXISTS', error: 'An account with this email already exists. Please log in to accept the invite.',
           requiresLogin: true,
           email: invite.email
         });
@@ -302,22 +302,22 @@ router.post('/accept-invite', async (req, res) => {
       // invitee can still use it.
       await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
       return res.status(403).json({
-        error: 'This invite was sent to a different email address. Log in with the invited email to accept it.',
+        code: 'ORG_INVITE_EMAIL_MISMATCH', error: 'This invite was sent to a different email address. Log in with the invited email to accept it.',
         invitedEmail: invite.email
       });
     }
 
     // ── Guard: user already in an org ─────────────────────────────────────
     if (user.organizationId && user.organizationId.toString() === org._id.toString()) {
-      return res.status(400).json({ error: 'You are already a member of this organization' });
+      return res.status(400).json({ code: 'ORG_ALREADY_MEMBER', error: 'You are already a member of this organization' });
     }
     if (user.organizationId && user.organizationId.toString() !== org._id.toString()) {
-      return res.status(400).json({ error: 'You already belong to a different organization. Contact support to transfer.' });
+      return res.status(400).json({ code: 'ORG_OTHER_ORG_MEMBER', error: 'You already belong to a different organization. Contact support to transfer.' });
     }
 
     // ── Seat check ────────────────────────────────────────────────────────
     if (org.seatsUsed >= org.seatsAllowed) {
-      return res.status(403).json({ error: 'This organization has no available seats' });
+      return res.status(403).json({ code: 'ORG_SEAT_LIMIT', error: 'This organization has no available seats' });
     }
 
     // ── Assign user to org ────────────────────────────────────────────────
@@ -363,7 +363,7 @@ router.post('/accept-invite', async (req, res) => {
     });
   } catch (err) {
     console.error('Accept invite error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', error: 'Server error' });
   }
 });
 
@@ -375,18 +375,18 @@ router.delete('/invite/:token', auth, async (req, res) => {
 
     const inviter = await User.findById(req.user.id);
     if (!inviter || !['owner', 'admin'].includes(inviter.role)) {
-      return res.status(403).json({ error: 'Only owners or admins can cancel invites' });
+      return res.status(403).json({ code: 'ORG_INVITE_CANCEL_FORBIDDEN', error: 'Only owners or admins can cancel invites' });
     }
 
     const invite = await Invite.findOne({ token, organizationId: inviter.organizationId });
-    if (!invite) return res.status(404).json({ error: 'Invite not found' });
-    if (invite.status !== 'pending') return res.status(400).json({ error: 'This invite is no longer active' });
+    if (!invite) return res.status(404).json({ code: 'ORG_INVITE_NOT_FOUND', error: 'Invite not found' });
+    if (invite.status !== 'pending') return res.status(400).json({ code: 'ORG_INVITE_INACTIVE', error: 'This invite is no longer active' });
 
     await Invite.deleteOne({ _id: invite._id });
-    res.json({ success: true, message: 'Invite cancelled' });
+    res.json({ success: true, code: 'ORG_INVITE_CANCELLED', message: 'Invite cancelled' });
   } catch (err) {
     console.error('Cancel invite error:', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ code: 'SERVER_ERROR', error: 'Server error' });
   }
 });
 

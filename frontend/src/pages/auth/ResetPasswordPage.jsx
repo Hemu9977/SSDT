@@ -5,6 +5,7 @@ import ParticleBackground from '../../components/ParticleBackground';
 import EyeIcon from '../../components/EyeIcon';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { API_BASE } from '../../config/api';
+import { getApiErrorLabel } from '../../utils/apiErrors';
 
 const ResetPasswordPage = () => {
   const { token } = useParams();
@@ -51,12 +52,12 @@ const ResetPasswordPage = () => {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage(data.message);
+        setMessage(getApiErrorLabel(t, data));
         setTimeout(() => {
           navigate('/login');
         }, 3000);
       } else {
-        setError(data.message);
+        setError(getApiErrorLabel(t, data));
       }
     } catch (error) {
       console.error('Reset password failed:', error);

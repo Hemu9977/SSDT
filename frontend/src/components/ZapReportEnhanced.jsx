@@ -206,7 +206,7 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
             document.body.removeChild(a);
         } catch (error) {
             console.error('PDF download error:', error);
-            alert(t('failedDownloadPdfReport', { message: error.message }));
+            alert(t('failedDownloadPdfReport', { message: t(error.messageKey || 'errUnexpected') }));
         } finally {
             setDownloadingPdf(false);
             setPdfLang(null);

@@ -12,6 +12,7 @@ import { useUser } from '../../contexts/UserContext';
 import { postLoginTarget } from '../../utils/authRedirect';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
+import { getApiErrorLabel } from '../../utils/apiErrors';
 
 const LoginPage = () => {
   const { refreshUser } = useUser();
@@ -49,7 +50,7 @@ const LoginPage = () => {
           const target = postLoginTarget(data.user);
           setTimeout(() => navigate(target), 2000);
         } else {
-          setError(data.message || t('googleLoginFailed'));
+          setError(getApiErrorLabel(t, data, 'googleLoginFailed'));
         }
       } catch (err) {
         console.error('Google Login Error:', err);
@@ -78,7 +79,7 @@ const LoginPage = () => {
         if (data.token) {
           localStorage.setItem('token', data.token);
           syncLanguage();
-          setMessage(data.message);
+          setMessage(getApiErrorLabel(t, data));
           // UserProvider fetches the profile only on mount and sits above
           // BrowserRouter, so a client-side navigate() would land on the route
           // guard with user still null. Refresh the context before moving.
@@ -86,11 +87,11 @@ const LoginPage = () => {
           const target = postLoginTarget(data.user);
           setTimeout(() => navigate(target), 2000);
         } else {
-          setMessage(data.message);
+          setMessage(getApiErrorLabel(t, data));
           setTimeout(() => navigate('/verify-otp', { state: { email } }), 2000);
         }
       } else {
-        setError(data.message);
+        setError(getApiErrorLabel(t, data));
       }
     } catch (error) {
       console.error('Login failed:', error);

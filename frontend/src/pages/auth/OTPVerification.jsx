@@ -7,6 +7,7 @@ import { useUser } from '../../contexts/UserContext';
 import { postLoginTarget } from '../../utils/authRedirect';
 import '../../styles/Auth.scss';
 import { API_BASE } from '../../config/api';
+import { getApiErrorLabel } from '../../utils/apiErrors';
 
 const OTPVerification = () => {
   const { refreshUser } = useUser();
@@ -52,7 +53,7 @@ const OTPVerification = () => {
           navigate(target);
         }, 2000);
       } else {
-        setError(data.message);
+        setError(getApiErrorLabel(t, data));
       }
     } catch (error) {
       console.error('OTP verification failed:', error);
@@ -78,7 +79,7 @@ const OTPVerification = () => {
       if (response.ok) {
         setMessage(t('otpSentSuccess'));
       } else {
-        setError(data.message);
+        setError(getApiErrorLabel(t, data));
       }
     } catch (error) {
       console.error('Resend OTP failed:', error);

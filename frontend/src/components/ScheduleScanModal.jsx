@@ -391,7 +391,8 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || t('failedSaveSchedule'));
+        // data.error is English server text — carry a key, not the prose.
+        throw Object.assign(new Error('save schedule failed'), { messageKey: 'failedSaveSchedule' });
       }
 
       setSuccess(editSchedule ? t('scheduleUpdated') : t('scanScheduledSuccess'));
@@ -403,7 +404,7 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
       }, 1200);
 
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedSaveSchedule'));
     } finally {
       setLoading(false);
     }

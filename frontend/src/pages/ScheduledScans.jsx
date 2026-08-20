@@ -56,13 +56,13 @@ const ScheduledScans = () => {
         headers: { 'x-auth-token': token }
       });
 
-      if (!res.ok) throw new Error(t('failedFetchSchedules'));
+      if (!res.ok) throw Object.assign(new Error('fetch schedules failed'), { messageKey: 'failedFetchSchedules' });
 
       const data = await res.json();
       setSchedules(data.schedules || []);
       setLimits(data.limits || {});
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedFetchSchedules'));
     } finally {
       setLoading(false);
     }
@@ -82,12 +82,12 @@ const ScheduledScans = () => {
         headers: { 'x-auth-token': token }
       });
 
-      if (!res.ok) throw new Error(t('failedDeleteSchedule'));
+      if (!res.ok) throw Object.assign(new Error('delete schedule failed'), { messageKey: 'failedDeleteSchedule' });
 
       setSchedules(prev => prev.filter(s => s.id !== id));
       setDeleteConfirm(null);
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedDeleteSchedule'));
     }
   };
 
@@ -100,11 +100,12 @@ const ScheduledScans = () => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t('failedTriggerScan'));
+      // data.error is English server text — carry a key, not the prose.
+      if (!res.ok) throw Object.assign(new Error('trigger scan failed'), { messageKey: 'failedTriggerScan' });
 
       fetchSchedules();
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedTriggerScan'));
     }
   };
 

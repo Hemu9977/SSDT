@@ -4,6 +4,7 @@ import Header from '../../components/header';
 import ParticleBackground from '../../components/ParticleBackground';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { API_BASE } from '../../config/api';
+import { getApiErrorLabel } from '../../utils/apiErrors';
 
 const ForgotPasswordPage = () => {
   const [email, setEmail] = useState('');
@@ -27,9 +28,9 @@ const ForgotPasswordPage = () => {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage(data.message);
+        setMessage(getApiErrorLabel(t, data));
       } else {
-        setError(data.message);
+        setError(getApiErrorLabel(t, data));
       }
     } catch (error) {
       console.error('Forgot password failed:', error);

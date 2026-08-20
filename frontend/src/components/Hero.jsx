@@ -494,7 +494,7 @@ const Hero = ({ historicalScan }) => {
 
     } catch (err) {
       console.error('Stop error:', err);
-      setError(t('failedToStopScanWithReason', { reason: err.message }));
+      setError(t('failedToStopScanWithReason', { reason: t(err.messageKey || 'errUnexpected') }));
       setLoading(false);
     }
   };
@@ -781,14 +781,16 @@ const Hero = ({ historicalScan }) => {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || t('failedSaveSchedule'));
+      // data.error is English server text; carry a key instead so the catch
+      // below resolves it through t() (same pattern as err.messageKey later).
+      if (!res.ok) throw Object.assign(new Error('save schedule failed'), { messageKey: 'failedSaveSchedule' });
 
       sessionStorage.removeItem('pendingScheduleConfig');
       setPendingSchedule(null);
       alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
-      setError(err.message);
+      setError(t(err.messageKey || 'failedSaveSchedule'));
       setLoading(false);
     }
   };
