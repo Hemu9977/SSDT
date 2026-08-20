@@ -249,7 +249,7 @@ const AdminOrganizations = () => {
                 <tbody>
                   {orgs.map((org) => {
                     const isBusy = actionLoadingId === org._id;
-                    const canCancelSubscription = !!org.stripeSubscriptionId && org.subscriptionStatus === 'active';
+                    const canCancelSubscription = org.hasSubscription && org.subscriptionStatus === 'active';
                     return (
                       <tr key={org._id}>
                         <td className="admin-td-name">

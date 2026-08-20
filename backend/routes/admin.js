@@ -205,6 +205,14 @@ router.get('/organizations', async (req, res) => {
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * limitNum)
         .limit(limitNum)
+        // Explicit projection, matching every other list query in this file.
+        // Without it the whole document went to the browser, including
+        // stripeCustomerId / stripeSubscriptionId / stripeCheckoutSessionId,
+        // none of which the organizations table renders.
+        .select('name planType billingCycle subscriptionStatus isDisabled ' +
+                'seatsAllowed seatsUsed scanLimit scansUsed targetsUsed ' +
+                'oneTimeRemainingScans expiresAt lastScanReset createdAt ' +
+                'stripeSubscriptionId')
         .lean(),
     ]);
 
@@ -218,10 +226,14 @@ router.get('/organizations', async (req, res) => {
       ownerMap[String(u.organizationId)] = { name: u.name, email: u.email };
     });
 
-    const enriched = orgs.map((o) => ({
+    // stripeSubscriptionId is destructured OUT rather than spread: the table
+    // only needs to know whether a cancellable subscription exists, so send a
+    // boolean instead of the Stripe identifier.
+    const enriched = orgs.map(({ stripeSubscriptionId, ...o }) => ({
       ...o,
       isDisabled: o.isDisabled || false,
       owner: ownerMap[String(o._id)] || null,
+      hasSubscription: Boolean(stripeSubscriptionId),
     }));
 
     res.json({
@@ -257,7 +269,12 @@ router.get('/scans', async (req, res) => {
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * limitNum)
         .limit(limitNum)
-        .select('analysisId target status userId createdAt updatedAt zapResult webCheckResult')
+        // zapResult and webCheckResult are deliberately NOT selected. They are
+        // untyped Object columns holding entire scan payloads (ZAP alert arrays,
+        // WebCheck results); this handler never reads them and AdminScans.jsx
+        // never renders them, so selecting them shipped every customer's full
+        // vulnerability detail to the browser — up to 100 rows per request.
+        .select('analysisId target status userId createdAt updatedAt')
         .lean(),
     ]);
 
