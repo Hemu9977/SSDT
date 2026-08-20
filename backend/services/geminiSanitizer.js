@@ -5,7 +5,15 @@
  * Centralized sanitization layer for all Gemini API inputs.
  *
  * MUST be called before any data is passed to geminiService functions.
- * Enforced at the geminiService boundary so every future call is protected.
+ *
+ * NOT enforced at the geminiService boundary — this is a caller contract, not a
+ * guarantee. `refineReport()` and `formatScanDataForPdf()` read `target`,
+ * `analysisId` and urlscan fields straight off their argument and will happily
+ * send an unsanitized object. Both live callers do sanitize first
+ * (geminiCompletionService.js and pdfService.js each call sanitizeScanForLLM),
+ * but nothing stops a future caller from skipping it. The only automatic net is
+ * assertNoLeakage() in _generate(), which by default warns rather than blocks.
+ * Treat that as detection, not prevention.
  *
  * Redaction contract:
  *   - All redacted fields are replaced with the string "REDACTED"
@@ -47,8 +55,43 @@ const REDACTED = 'REDACTED';
 
 // ── IPv4 / IPv6 patterns used by the text-level sanitizers ───────────────────
 const IPV4_PATTERN = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
-const IPV6_PATTERN = /\b([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b/g;
+
+// IPv6, including zero-compression. The previous pattern was
+// /\b([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b/ which required a FULLY
+// EXPANDED address, so every compressed form — `::1`, `fe80::1`,
+// `2001:db8::1`, `::ffff:192.0.2.1`, i.e. how IPv6 is actually written —
+// passed through unredacted, and partially compressed addresses matched only a
+// substring and came out mangled as `REDACTED::REDACTED`.
+// It also matched any `h:h:h` sequence, so it redacted clock times and HTTP
+// `Date` header values (`12:30:45`, `Mon, 01 Jan 2024 10:20:30 GMT`).
+// Built by alternation: 8 full groups, or a form containing `::`. Every
+// quantifier is bounded, so there is no catastrophic backtracking.
+const _H6 = '[0-9a-fA-F]{1,4}';
+const _V4_IN_V6 =
+  '(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}';
+const IPV6_PATTERN = new RegExp(
+  '(?<![0-9a-fA-F:.])(?:' +
+    `(?:${_H6}:){7}${_H6}` + '|' +
+    `(?:${_H6}:){1,7}:` + '|' +
+    `(?:${_H6}:){1,6}:${_H6}` + '|' +
+    `(?:${_H6}:){1,5}(?::${_H6}){1,2}` + '|' +
+    `(?:${_H6}:){1,4}(?::${_H6}){1,3}` + '|' +
+    `(?:${_H6}:){1,3}(?::${_H6}){1,4}` + '|' +
+    `(?:${_H6}:){1,2}(?::${_H6}){1,5}` + '|' +
+    `${_H6}:(?::${_H6}){1,6}` + '|' +
+    `:(?:(?::${_H6}){1,7}|:)` + '|' +
+    `::(?:ffff(?::0{1,4})?:)?${_V4_IN_V6}` + '|' +
+    `(?:${_H6}:){1,4}:${_V4_IN_V6}` +
+  ')(?:%[0-9a-zA-Z._-]+)?(?![0-9a-fA-F:.])',
+  'gi'
+);
+
 const URL_PATTERN  = /https?:\/\/[^\s"'<>)\]]+/gi;
+
+// Email addresses. BARE_DOMAIN_PATTERN alone only removed the domain half,
+// leaving `admin@REDACTED` — and the local part is usually a real username.
+// Matched before BARE_DOMAIN so the whole address goes at once.
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}\b/g;
 
 // Bare hostname with no scheme (e.g. a CSP `default-src` token like
 // "cdn.example.com"). The final label is required to be alphabetic so this
@@ -60,18 +103,47 @@ const BARE_DOMAIN_PATTERN = /\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\
 // whether it happens to match a URL/hostname pattern — e.g. a Set-Cookie
 // value can carry a session token plus "Domain=" without ever containing
 // "http://". The whole value is redacted rather than pattern-scrubbed.
+// The host-ish names below carry a bare infrastructure hostname with no dot
+// and no scheme — `backend-prod-01`, `zap-auth`, an ECS Service Connect name.
+// BARE_DOMAIN_PATTERN cannot catch those because it requires a dot, and a
+// blanket "redact any single word" rule is not an option: it would also strip
+// `nginx`, `apache`, `cloudflare` from Server/Via, destroying exactly the
+// technology information this module deliberately PRESERVES. Redacting the
+// whole value of the headers that structurally hold a host is the targeted fix.
 const FULL_REDACT_HEADER_NAMES = new Set([
   'set-cookie', 'set-cookie2', 'location', 'content-location', 'refresh',
+  'host', 'x-forwarded-host', 'x-forwarded-for', 'x-real-ip',
+  'x-served-by', 'x-backend-server', 'x-host', 'origin', 'referer',
 ]);
 
-/** Strip URLs, IPs, and bare hostnames from a single string value. */
-function _scrubIdentityTokens(value) {
+/**
+ * Ordered token scrub, shared by every text-level sanitizer in this module so
+ * the passes cannot drift apart.
+ *
+ * Order is load-bearing:
+ *   1. URL first — a URL contains a host and may contain an IP.
+ *   2. Email before BARE_DOMAIN, which would otherwise consume only the domain
+ *      half and leave `admin@REDACTED`, i.e. the username still in the clear.
+ *   3. IPv6 BEFORE IPv4 — on an IPv4-mapped address such as `::ffff:192.0.2.1`
+ *      the IPv4 pass would otherwise eat the tail first and leave a dangling
+ *      `::ffff:` prefix.
+ *
+ * @param {*} value                   value to scrub (non-strings pass through)
+ * @param {boolean} includeBareDomain whether to also strip dotted hostnames
+ */
+function _scrubTokens(value, includeBareDomain) {
   if (typeof value !== 'string') return value;
-  return value
+  const out = value
     .replace(URL_PATTERN, REDACTED)
-    .replace(IPV4_PATTERN, REDACTED)
+    .replace(EMAIL_PATTERN, REDACTED)
     .replace(IPV6_PATTERN, REDACTED)
-    .replace(BARE_DOMAIN_PATTERN, REDACTED);
+    .replace(IPV4_PATTERN, REDACTED);
+  return includeBareDomain ? out.replace(BARE_DOMAIN_PATTERN, REDACTED) : out;
+}
+
+/** Strip URLs, emails, IPs, and bare hostnames from a single string value. */
+function _scrubIdentityTokens(value) {
+  return _scrubTokens(value, true);
 }
 
 /**
@@ -241,13 +313,10 @@ function sanitizeHistoryRowsForLLM(rows) {
  */
 function sanitizeTextsForLLM(texts) {
   if (!Array.isArray(texts)) return texts;
-  return texts.map(t => {
-    if (typeof t !== 'string') return t;
-    return t
-      .replace(URL_PATTERN, REDACTED)
-      .replace(IPV4_PATTERN, REDACTED)
-      .replace(IPV6_PATTERN, REDACTED);
-  });
+  // Bare dotted hostnames are deliberately NOT stripped here: this path
+  // translates arbitrary UI copy, and redacting every domain-shaped token
+  // would mangle legitimate prose. URLs, emails and IPs are unambiguous.
+  return texts.map(t => _scrubTokens(t, false));
 }
 
 /**
@@ -260,11 +329,9 @@ function sanitizeTextsForLLM(texts) {
  * @returns {string}           Sanitized markdown
  */
 function sanitizeRefinedReportForLLM(reportText) {
-  if (typeof reportText !== 'string') return reportText;
-  return reportText
-    .replace(URL_PATTERN, REDACTED)
-    .replace(IPV4_PATTERN, REDACTED)
-    .replace(IPV6_PATTERN, REDACTED);
+  // Same reasoning as sanitizeTextsForLLM: this is generated prose, so dotted
+  // hostnames are left alone to avoid mangling the report body.
+  return _scrubTokens(reportText, false);
 }
 
 /**
@@ -291,10 +358,27 @@ function sanitizeRefinedReportForLLM(reportText) {
  *
  * @returns {'throw'|'warn'|'off'}
  */
+let _warnedAboutFlag = false;
+
 function _guardrailMode() {
   const flag = process.env.GEMINI_STRICT_GUARDRAIL;
-  if (flag === 'true')  return 'throw';
-  if (flag === 'false') return 'off';
+  if (flag === undefined || flag === '') return 'warn';
+
+  const normalized = String(flag).trim().toLowerCase();
+  if (normalized === 'true')  return 'throw';
+  if (normalized === 'false') return 'off';
+
+  // Anything else used to fall silently through to 'warn'. An operator who set
+  // GEMINI_STRICT_GUARDRAIL=TRUE or =1 intending to harden the guardrail got
+  // the non-blocking default instead, with nothing anywhere saying so. Warn
+  // once, then use the safe default.
+  if (!_warnedAboutFlag) {
+    _warnedAboutFlag = true;
+    console.error(
+      `[GEMINI GUARDRAIL] Unrecognised GEMINI_STRICT_GUARDRAIL value ${JSON.stringify(flag)} — ` +
+      `expected 'true' or 'false'. Falling back to 'warn' (check runs, never blocks).`
+    );
+  }
   return 'warn';
 }
 
@@ -324,11 +408,23 @@ function assertNoLeakage(prompt, context = '') {
   // Match IPv4 that are NOT preceded by "REDACTED"
   const ipMatch  = prompt.match(/(?<!REDACTED\s*)\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
 
-  if (!urlMatch && !ipMatch) return;
+  // This backstop used to check only URLs and IPv4, which left it blind to
+  // exactly the shapes the sanitizer was also missing — a leaked `fe80::1`
+  // sailed through even with GEMINI_STRICT_GUARDRAIL=true. A guardrail that
+  // cannot see what its sanitizer misses is not a second line of defence.
+  // A bare `::` is not a leak, so require the match to carry a hex quartet.
+  let ipv6Match = prompt.match(new RegExp(IPV6_PATTERN.source, 'i'));
+  if (ipv6Match && !/[0-9a-f]/i.test(ipv6Match[0])) ipv6Match = null;
+
+  const emailMatch = prompt.match(new RegExp(EMAIL_PATTERN.source));
+
+  if (!urlMatch && !ipMatch && !ipv6Match && !emailMatch) return;
 
   const hits = [];
-  if (urlMatch) hits.push(`URL-like token (length ${urlMatch[0].length}) at offset ${urlMatch.index}`);
-  if (ipMatch)  hits.push(`IPv4-like token at offset ${ipMatch.index}`);
+  if (urlMatch)   hits.push(`URL-like token (length ${urlMatch[0].length}) at offset ${urlMatch.index}`);
+  if (ipMatch)    hits.push(`IPv4-like token at offset ${ipMatch.index}`);
+  if (ipv6Match)  hits.push(`IPv6-like token (length ${ipv6Match[0].length}) at offset ${ipv6Match.index}`);
+  if (emailMatch) hits.push(`email-like token (length ${emailMatch[0].length}) at offset ${emailMatch.index}`);
 
   const msg =
     `[GEMINI GUARDRAIL] Potential identity leakage detected in Gemini prompt ` +
