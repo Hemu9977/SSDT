@@ -1,0 +1,262 @@
+/**
+ * Static invariants for routing, the admin guard, and i18n.
+ *
+ * These began as throwaway scripts in a scratch directory during the
+ * admin-dashboard review; that directory was wiped mid-task and took every
+ * assertion with it. They live here now so they actually guard the codebase,
+ * and so `npm test` has something to run — until this file existed, CRA's
+ * runner found zero test files, which some CI configurations treat as failure.
+ *
+ * Deliberately static: they read source files rather than mounting components,
+ * so they need no DOM setup, no mocking, and no running backend.
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+const SRC = path.join(__dirname, '..');
+const read = (p) => fs.readFileSync(path.join(SRC, p), 'utf8');
+const exists = (p) => fs.existsSync(path.join(SRC, p));
+
+const app = read('App.js');
+const header = read('components/header.jsx');
+
+// Load a locale module without a bundler. `ja.js` spreads `...en`, so a key
+// absent from ja legitimately falls back to en — resolve against the spread.
+const loadLocale = (file, name, base) => {
+  let src = read(file)
+    .replace(/^\s*import[^;]*;\s*$/gm, '')
+    .replace(/export\s+const\s+(\w+)\s*=/, 'const $1 =');
+  if (base) src = src.replace(/\.\.\.en,?/, '');
+  // eslint-disable-next-line no-new-func
+  const own = new Function(`${src}\nreturn ${name};`)();
+  return base ? Object.assign({}, base, own) : own;
+};
+const en = loadLocale('locales/en.js', 'en', null);
+const ja = loadLocale('locales/ja.js', 'ja', en);
+
+const walk = (dir, out = []) => {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(p, out);
+    else if (/\.(jsx?|js)$/.test(entry.name) && !p.includes('__tests__')) out.push(p);
+  }
+  return out;
+};
+const sourceFiles = walk(SRC);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin route guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('RequireAdmin', () => {
+  const guardSrc = read('components/RequireAdmin.jsx');
+  const stripComments = (s) =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  // eslint-disable-next-line no-new-func
+  const { isSystemAdmin, postLoginTarget } = new Function(
+    `${read('utils/authRedirect.js').replace(/export const/g, 'const')}
+     return { isSystemAdmin, postLoginTarget };`
+  )();
+
+  const decide = ({ loading, user }) => {
+    if (loading) return 'render:loading';
+    if (!user) return 'redirect:/login';
+    if (!isSystemAdmin(user)) return 'redirect:/profile';
+    return 'render:admin';
+  };
+
+  it('decides during render, not in an effect', () => {
+    // Redirecting from an effect let one frame of the admin shell mount and
+    // fire admin API calls that could only come back 403.
+    expect(stripComments(guardSrc)).not.toMatch(/useEffect/);
+    expect(guardSrc).toMatch(/<Navigate to="\/login" replace \/>/);
+    expect(guardSrc).toMatch(/<Navigate to="\/profile" replace \/>/);
+  });
+
+  it.each([
+    [{ loading: true, user: null }, 'render:loading'],
+    [{ loading: false, user: null }, 'redirect:/login'],
+    [{ loading: false, user: { systemRole: 'user' } }, 'redirect:/profile'],
+    [{ loading: false, user: {} }, 'redirect:/profile'],
+    [{ loading: false, user: { systemRole: 'admin' } }, 'render:admin'],
+    [{ loading: false, user: { systemRole: 'superadmin' } }, 'render:admin'],
+  ])('%j -> %s', (state, expected) => {
+    expect(decide(state)).toBe(expected);
+  });
+
+  it('sends admins to /admin and everyone else to /', () => {
+    expect(postLoginTarget({ systemRole: 'admin' })).toBe('/admin');
+    expect(postLoginTarget({ systemRole: 'superadmin' })).toBe('/admin');
+    expect(postLoginTarget({ systemRole: 'user' })).toBe('/');
+    expect(postLoginTarget(undefined)).toBe('/');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Post-login context refresh
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('post-login refresh', () => {
+  // UserProvider fetches the profile once on mount and sits above
+  // BrowserRouter, so navigate() never remounts it. Without an explicit
+  // refresh a freshly-logged-in admin reached /admin with user still null and
+  // was bounced straight back to /login.
+  it.each([
+    'pages/auth/LoginPage.jsx',
+    'pages/auth/RegisterPage.jsx',
+    'pages/auth/OTPVerification.jsx',
+  ])('%s refreshes the user context before navigating', (file) => {
+    const src = read(file);
+    expect(src).toMatch(/const \{ refreshUser \} = useUser\(\);/);
+    const firstRefresh = src.indexOf('await refreshUser()');
+    expect(firstRefresh).toBeGreaterThan(-1);
+    const firstNav = src.indexOf('setTimeout(() => navigate(target)');
+    if (firstNav !== -1) expect(firstRefresh).toBeLessThan(firstNav);
+    // Role checks must go through the shared helper, not an inlined list.
+    expect(src).not.toMatch(/\['admin', 'superadmin'\]\.includes\(data\.user/);
+  });
+
+  it('UserContext treats a disabled account as a dead session', () => {
+    const ctx = read('contexts/UserContext.jsx');
+    expect(ctx).toMatch(/res\.status === 403 && errorCode === 'ACCOUNT_DISABLED'/);
+    const after = ctx.slice(ctx.indexOf('sessionIsDead'));
+    expect(after).toMatch(/setUser\(null\)/);
+    expect(after).toMatch(/removeItem\('user_data'\)/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routing
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('routing', () => {
+  it('wraps /admin in the guard', () => {
+    const flat = app.replace(/\s+/g, ' ').replace(/> </g, '><');
+    expect(flat).toMatch(/<RequireAdmin><AdminPanel \/><\/RequireAdmin>/);
+  });
+
+  it('keeps removed URLs resolving instead of rendering blank', () => {
+    expect(app).toMatch(/<Route path="\/about" element=\{<Navigate to="\/" replace \/>\} \/>/);
+    expect(app).toMatch(/<Route path="\*" element=\{<Navigate to="\/" replace \/>\} \/>/);
+  });
+
+  it('has no route or import for a deleted component', () => {
+    expect(app).not.toMatch(/path="\/dashboard"/);
+    expect(app).not.toMatch(/import (Dashboard|SplashScreen|About) /);
+    expect(exists('components/sidebar.jsx')).toBe(false);
+    expect(exists('components/SplashScreen.jsx')).toBe(false);
+    expect(exists('pages/About.jsx')).toBe(false);
+    // MarketingHome absorbed the About content and imports its stylesheet.
+    expect(exists('styles/About.scss')).toBe(true);
+  });
+
+  it('every header link resolves to a declared route', () => {
+    const routes = [...app.matchAll(/<Route\s+path="([^"]+)"/g)].map((m) => m[1]);
+    const links = [...header.matchAll(/to="(\/[^"]*)"/g)].map((m) => m[1]);
+    const dead = links.filter((l) => !routes.includes(l) && !routes.includes('*'));
+    expect(dead).toEqual([]);
+  });
+
+  it('every relative import resolves to a real file', () => {
+    const unresolved = [];
+    for (const file of sourceFiles) {
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/from\s+['"](\.[^'"]+)['"]|import\s+['"](\.[^'"]+)['"]/g)) {
+        const spec = m[1] || m[2];
+        const base = path.resolve(path.dirname(file), spec);
+        const candidates = [
+          base, `${base}.js`, `${base}.jsx`, `${base}.json`, `${base}.scss`, `${base}.css`,
+          path.join(base, 'index.js'), path.join(base, 'index.jsx'),
+        ];
+        if (!candidates.some((c) => fs.existsSync(c) && fs.statSync(c).isFile())) {
+          unresolved.push(`${path.relative(SRC, file)} -> ${spec}`);
+        }
+      }
+    }
+    expect(unresolved).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// i18n
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('translations', () => {
+  it('every t() key used anywhere resolves in both locales', () => {
+    const missing = {};
+    for (const file of sourceFiles) {
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/\bt\(\s*'([A-Za-z0-9_]+)'/g)) {
+        const key = m[1];
+        if (!(key in en) || !(key in ja)) {
+          (missing[key] = missing[key] || []).push(path.relative(SRC, file));
+        }
+      }
+    }
+    expect(missing).toEqual({});
+  });
+
+  it('has no duplicate keys in either locale file', () => {
+    for (const [name, file] of [['en', 'locales/en.js'], ['ja', 'locales/ja.js']]) {
+      const keys = [...read(file).matchAll(/^\s{2}([A-Za-z0-9_]+):/gm)].map((m) => m[1]);
+      const dupes = keys.filter((k, i) => keys.indexOf(k) !== i);
+      expect({ [name]: [...new Set(dupes)] }).toEqual({ [name]: [] });
+    }
+  });
+
+  it('the admin health panel resolves its service names through t()', () => {
+    const health = read('pages/Admin/AdminSystemHealth.jsx');
+    expect(health.match(/title: '[^']+'/g)).toBeNull();
+    expect(health).toMatch(/title=\{t\(svc\.labelKey\)\}/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLAUDE.md: backend strings must never reach the UI
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('admin pages never render a backend-supplied string', () => {
+  const adminDir = path.join(SRC, 'pages/Admin');
+  const adminFiles = fs.readdirSync(adminDir).filter((f) => /\.(jsx|js)$/.test(f));
+
+  it('renders no thrown Error message', () => {
+    const leaks = [];
+    for (const f of adminFiles) {
+      fs.readFileSync(path.join(adminDir, f), 'utf8').split('\n').forEach((l, i) => {
+        if (/\b(err|error)\.(message|data\.error|data\.message)\b/.test(l)) {
+          leaks.push(`${f}:${i + 1}`);
+        }
+      });
+    }
+    expect(leaks).toEqual([]);
+  });
+
+  it('renders no backend string arriving as a payload field', () => {
+    // This shape is how {check.error} reached the UI unnoticed: the earlier
+    // check only matched err.message-style expressions.
+    const leaks = [];
+    for (const f of adminFiles) {
+      const lines = fs.readFileSync(path.join(adminDir, f), 'utf8').split('\n');
+      lines.forEach((l, i) => {
+        if (/console\.\w+\(/.test(l)) return; // operator diagnostics, not UI
+        const m = l.match(/(^|[^$])\{\s*([A-Za-z_$][\w$]*)\.(error|message)\s*\}/);
+        if (!m) return;
+        const ident = m[2];
+        if (/^(err|error)$/.test(ident)) return;
+        // An object built locally from t() is already translated.
+        const decl = lines.find(
+          (x) => x.includes(`const ${ident} =`) || x.includes(`let ${ident} =`)
+        ) || '';
+        if (/\(\s*t\s*[,)]/.test(decl) || /\bt\(/.test(decl)) return;
+        leaks.push(`${f}:${i + 1}  ${l.trim()}`);
+      });
+    }
+    expect(leaks).toEqual([]);
+  });
+
+  it('adminService propagates a structured code for the UI to translate', () => {
+    expect(read('services/adminService.js')).toMatch(/err\.code\s*=/);
+  });
+});
