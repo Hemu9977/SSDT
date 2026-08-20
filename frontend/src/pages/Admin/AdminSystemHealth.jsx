@@ -36,6 +36,10 @@ const StatusBadge = ({ status, t }) => {
 const HealthCard = ({ icon, title, check, t, currentLang }) => {
   if (!check) return null;
   const isOnline = check.status === 'online' || check.status === 'configured';
+  if (check.error) {
+    // Diagnostics belong in the console, not on the page — see the render below.
+    console.warn(`[health] ${title}: ${check.error}`);
+  }
   return (
     <div className={`admin-health-card ${isOnline ? 'admin-health-card--ok' : 'admin-health-card--err'}`}>
       <div className="admin-health-card-header">
@@ -90,24 +94,36 @@ const HealthCard = ({ icon, title, check, t, currentLang }) => {
           <span className="admin-health-detail">{t('adminJobsFailed')} {formatAdminNumber(currentLang, check.failed)}</span>
         )}
         {check.error && (
-          <span className="admin-health-detail admin-health-error">{check.error}</span>
+          // The backend's `error` is a raw driver/axios string ("connect
+          // ECONNREFUSED 127.0.0.1:8081") — English-only and full of internal
+          // detail, so it must not reach the UI. Operators still need it, so it
+          // goes to the console; the card shows a translated reason instead.
+          <span className="admin-health-detail admin-health-error">
+            {t('adminHealthUnreachable')}
+          </span>
         )}
       </div>
     </div>
   );
 };
 
+// Titles resolve through t() like every other string in the panel — hardcoding
+// them left these nine cards in English on the Japanese UI. Vendor names are
+// deliberately kept: this panel is internal operator tooling, and an on-call
+// engineer needs to know *which* service is down. Port numbers are dropped —
+// they were fixed to the old docker-compose layout and are wrong under ECS
+// Service Connect.
 const SERVICE_DEFS = [
-  { key: 'server',    title: 'Node.js Server',         icon: <FaServer /> },
-  { key: 'mongodb',   title: 'MongoDB',                 icon: <FaDatabase /> },
-  { key: 'redis',     title: 'Redis',                   icon: <FaBolt /> },
-  { key: 'bullmq',    title: 'BullMQ Queue',            icon: <FaMemory /> },
-  { key: 'webcheck',  title: 'WebCheck (Port 3002)',     icon: <FaShieldAlt /> },
-  { key: 'zap',       title: 'OWASP ZAP (Port 8080)',   icon: <FaShieldAlt /> },
-  { key: 'zapAuth',   title: 'ZAP Auth (Port 8081)',     icon: <FaShieldAlt /> },
-  { key: 'gemini',    title: 'Gemini AI',               icon: <FaRobot /> },
-  { key: 'pagespeed', title: 'Google PageSpeed',         icon: <FaRobot /> },
-  { key: 'urlscan',   title: 'urlscan.io',               icon: <FaRobot /> },
+  { key: 'server',    labelKey: 'adminHealthServer',    icon: <FaServer /> },
+  { key: 'mongodb',   labelKey: 'adminHealthMongodb',   icon: <FaDatabase /> },
+  { key: 'redis',     labelKey: 'adminHealthRedis',     icon: <FaBolt /> },
+  { key: 'bullmq',    labelKey: 'adminHealthQueue',     icon: <FaMemory /> },
+  { key: 'webcheck',  labelKey: 'adminHealthWebcheck',  icon: <FaShieldAlt /> },
+  { key: 'zap',       labelKey: 'adminHealthZap',       icon: <FaShieldAlt /> },
+  { key: 'zapAuth',   labelKey: 'adminHealthZapAuth',   icon: <FaShieldAlt /> },
+  { key: 'gemini',    labelKey: 'adminHealthGemini',    icon: <FaRobot /> },
+  { key: 'pagespeed', labelKey: 'adminHealthPagespeed', icon: <FaRobot /> },
+  { key: 'urlscan',   labelKey: 'adminHealthUrlscan',   icon: <FaRobot /> },
 ];
 
 const AdminSystemHealth = () => {
@@ -197,7 +213,7 @@ const AdminSystemHealth = () => {
             <HealthCard
               key={svc.key}
               icon={svc.icon}
-              title={svc.title}
+              title={t(svc.labelKey)}
               check={checks[svc.key]}
               t={t}
               currentLang={currentLang}

@@ -855,6 +855,20 @@ export const en = {
   adminErrSelfDelete: 'You cannot delete your own account.',
   adminErrLastAdmin: 'This is the last remaining administrator and cannot be removed.',
   adminErrLastAdminOrg: 'Disabling this organization would lock out the last remaining administrator.',
+  // ── System-health service labels ──────────────────────────────────────────
+  // Vendor names are intentional: this panel is internal operator tooling and
+  // on-call staff need to know which service is down.
+  adminHealthServer: 'Node.js Server',
+  adminHealthMongodb: 'MongoDB',
+  adminHealthRedis: 'Redis',
+  adminHealthQueue: 'BullMQ Queue',
+  adminHealthWebcheck: 'WebCheck',
+  adminHealthZap: 'OWASP ZAP',
+  adminHealthZapAuth: 'OWASP ZAP (Authenticated)',
+  adminHealthGemini: 'Gemini AI',
+  adminHealthPagespeed: 'Google PageSpeed',
+  adminHealthUrlscan: 'urlscan.io',
+  adminHealthUnreachable: 'Service unreachable — see the browser console for details.',
   adminErrNoOrg: 'That user does not belong to an organization.',
   adminErrOwnerProtected: 'Delete the organization instead of removing its owner.',
   adminErrNoSubscription: 'That organization has no active subscription.',

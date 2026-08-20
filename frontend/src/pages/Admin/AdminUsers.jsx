@@ -79,7 +79,6 @@ const AdminUsers = () => {
   const [pendingAction, setPendingAction] = useState(null); // { action, targetUser }
   const [actionLoadingId, setActionLoadingId] = useState(null);
   const [actionMessage, setActionMessage] = useState(null); // { type, text }
-  const searchTimer               = useRef(null);
   const messageTimer              = useRef(null);
 
   const fetchUsers = useCallback(async (currentPage, currentSearch) => {
@@ -96,9 +95,14 @@ const AdminUsers = () => {
     }
   }, [t]);
 
+  // Single owner of search/page fetching. Debouncing lives here rather than in
+  // the change handler: with the handler owning it, typing while on page >= 2
+  // also reset `page`, which fired this effect immediately in addition to the
+  // debounced timer — two identical requests for one keystroke.
   useEffect(() => {
-    fetchUsers(page, search);
-  }, [page, fetchUsers]); // search changes are debounced below
+    const id = setTimeout(() => fetchUsers(page, search), search ? 400 : 0);
+    return () => clearTimeout(id);
+  }, [page, search, fetchUsers]);
 
   useEffect(() => () => clearTimeout(messageTimer.current), []);
 
@@ -109,11 +113,8 @@ const AdminUsers = () => {
   };
 
   const handleSearchChange = (e) => {
-    const val = e.target.value;
-    setSearch(val);
+    setSearch(e.target.value);
     setPage(1);
-    clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => fetchUsers(1, val), 400);
   };
 
   const requestAction = (action, targetUser) => setPendingAction({ action, targetUser });

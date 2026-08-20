@@ -71,7 +71,6 @@ const AdminOrganizations = () => {
   const [pendingAction, setPendingAction] = useState(null); // { action, org }
   const [actionLoadingId, setActionLoadingId] = useState(null);
   const [actionMessage, setActionMessage] = useState(null);
-  const searchTimer               = useRef(null);
   const messageTimer              = useRef(null);
 
   const fetchOrgs = useCallback(async (currentPage, currentSearch, currentPlan) => {
@@ -93,9 +92,12 @@ const AdminOrganizations = () => {
     }
   }, [t]);
 
+  // See AdminUsers: this effect owns the debounce so a keystroke cannot trigger
+  // both an immediate fetch (via the page reset) and a debounced one.
   useEffect(() => {
-    fetchOrgs(page, search, planFilter);
-  }, [page, planFilter, fetchOrgs]);
+    const id = setTimeout(() => fetchOrgs(page, search, planFilter), search ? 400 : 0);
+    return () => clearTimeout(id);
+  }, [page, search, planFilter, fetchOrgs]);
 
   useEffect(() => () => clearTimeout(messageTimer.current), []);
 
@@ -106,11 +108,8 @@ const AdminOrganizations = () => {
   };
 
   const handleSearchChange = (e) => {
-    const val = e.target.value;
-    setSearch(val);
+    setSearch(e.target.value);
     setPage(1);
-    clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => fetchOrgs(1, val, planFilter), 400);
   };
 
   const handlePlanChange = (e) => {
