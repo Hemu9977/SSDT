@@ -1,0 +1,583 @@
+.marketing-home {
+  position: relative;
+  // Establishes this element as its own stacking-context root (z-index:auto
+  // would not) so the negative z-index on ::before below is contained here
+  // and can only ever sit behind this element's own content — it cannot
+  // escape to affect the Header or the particle canvas outside this page.
+  z-index: 0;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 2rem 2rem 4rem;
+  width: 100%;
+  color: var(--foreground);
+
+  @media (max-width: 768px) {
+    padding: 1.5rem 1rem 3rem;
+  }
+
+  /* Dampens the shared particle background specifically behind this page's
+     text so the dots read as an ambient texture instead of competing with
+     copy — same rgba-over-background technique as About.scss's
+     .about-panel, just calibrated lighter since it spans the full page
+     rather than individual cards. A *positioned* element with z-index:auto
+     actually paints AFTER non-positioned in-flow siblings (regardless of
+     DOM order), which was washing the text out — z-index:-1 is required so
+     this genuinely paints behind the content instead of over it. */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: rgba(240, 240, 240, 0.4);
+    pointer-events: none;
+  }
+}
+
+body.dark .marketing-home::before {
+  background: rgba(10, 10, 10, 0.45);
+}
+
+/* ── Hero ── */
+.marketing-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  align-items: center;
+  gap: 3rem;
+  padding: 3rem 0 2.5rem;
+}
+
+.marketing-eyebrow {
+  display: inline-block;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid rgba(255, 107, 0, 0.4);
+  border-radius: 999px;
+  padding: 0.35rem 0.9rem;
+  margin-bottom: 1.25rem;
+}
+
+.marketing-hero-title {
+  font-family: var(--font-title);
+  font-size: clamp(1.9rem, 4.2vw, 2.85rem);
+  font-weight: 800;
+  line-height: 1.25;
+  margin: 0 0 1.1rem;
+  color: var(--foreground);
+  /* Faint echo of the old splash screen's neon title glow, toned down for a
+     premium feel rather than a cyberpunk one. */
+  text-shadow: 0 0 30px rgba(255, 107, 0, 0.18);
+}
+
+.marketing-hero-subtitle {
+  font-size: 1.05rem;
+  line-height: 1.75;
+  color: var(--foreground-darker);
+  max-width: 560px;
+  margin: 0 0 1.75rem;
+}
+
+.marketing-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.marketing-btn {
+  font-family: var(--font-title);
+  font-size: 0.95rem;
+  padding: 0.9em 2em;
+  border-radius: 10px;
+  text-transform: uppercase;
+  cursor: pointer;
+  letter-spacing: 1.2px;
+  font-weight: 700;
+  transition: all 0.2s ease;
+  border: 2px solid var(--accent);
+
+  &--primary {
+    color: #000;
+    background: var(--accent);
+
+    &:hover {
+      background: var(--accent-light);
+      transform: translateY(-2px);
+    }
+  }
+
+  &--secondary {
+    color: var(--accent);
+    background: transparent;
+
+    &:hover {
+      color: #000;
+      background: var(--accent);
+      transform: translateY(-2px);
+    }
+  }
+}
+
+.marketing-hero-note {
+  margin: 1rem 0 0;
+  font-size: 0.85rem;
+  color: var(--foreground-darker);
+}
+
+/* ── Hero visual: stationary FORTEXA shield with a thin scanning ring around
+   it, no literal padlock/hacker imagery. The shield itself never rotates —
+   only the bright arc (a sibling layer, not a parent) and the node dots
+   animate, so the logo stays perfectly still while the ring communicates
+   "continuously scanning". ── */
+.marketing-hero-visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scan-ring {
+  --ring-size: min(260px, 60vw);
+  position: relative;
+  width: var(--ring-size);
+  height: var(--ring-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Local vignette that gently recedes the shared particle background
+   immediately behind the ring, so the dot grid doesn't visually compete
+   with the scanning animation. Sized off --ring-size (not the flex
+   container) so it stays a modest halo around the ring itself, not a large
+   blob. Scoped to this element only — the particle canvas itself (shared
+   across the whole app) is untouched. */
+.scan-ring::before {
+  content: '';
+  position: absolute;
+  inset: -14%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--background) 0%, rgba(0, 0, 0, 0) 68%);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Thin, static premium ring outline. */
+.scan-ring-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 107, 0, 0.28);
+  pointer-events: none;
+}
+
+/* Small bright arc that sweeps around the ring. It's an absolutely
+   positioned sibling of .scan-core, never a parent of it, so rotating it
+   cannot rotate the shield. A radial-gradient mask keeps only a thin
+   annulus visible so the conic-gradient reads as a stroke, not a filled
+   wedge. */
+.scan-ring-arc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    transparent 300deg,
+    rgba(255, 159, 64, 0.55) 330deg,
+    var(--accent-light) 353deg,
+    var(--accent-light) 360deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  filter: drop-shadow(0 0 3px rgba(255, 107, 0, 0.45));
+  animation: scan-arc-rotate 10s linear infinite;
+}
+
+/* Extremely subtle nodes around the outer ring — position is fixed (via
+   rotate+translate on the element itself); only opacity animates, so the
+   pulse never competes with the arc's motion or the shield. */
+.scan-ring-node {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.18;
+  pointer-events: none;
+  animation: scan-node-pulse 5s ease-in-out infinite;
+}
+
+.scan-ring-node--1 { transform: rotate(35deg)  translateX(calc(var(--ring-size) / 2)); animation-delay: 0s; }
+.scan-ring-node--2 { transform: rotate(140deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 1.3s; }
+.scan-ring-node--3 { transform: rotate(225deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 2.6s; }
+.scan-ring-node--4 { transform: rotate(305deg) translateX(calc(var(--ring-size) / 2)); animation-delay: 3.9s; }
+
+.scan-core {
+  position: relative;
+  z-index: 2;
+  width: calc(100% - 22px);
+  height: calc(100% - 22px);
+  border-radius: 50%;
+  background: var(--background);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 30px rgba(255, 107, 0, 0.15);
+}
+
+.scan-core-grade {
+  font-family: var(--font-title);
+  font-size: 4rem;
+  font-weight: 800;
+  color: #00d084;
+  text-shadow: 0 0 24px rgba(0, 208, 132, 0.4);
+}
+
+/* Percentage-based so it scales with --ring-size (including its fluid
+   min(px, vw) values) without needing separate breakpoint overrides. */
+.scan-core-logo {
+  height: 45%;
+  width: auto;
+  max-width: 65%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 14px rgba(255, 107, 0, 0.35));
+}
+
+@keyframes scan-arc-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes scan-node-pulse {
+  0%, 100% { opacity: 0.12; }
+  50% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-ring-arc,
+  .scan-ring-node {
+    animation: none;
+  }
+}
+
+/* ── Sections ── */
+.marketing-section {
+  margin-bottom: 3.5rem;
+}
+
+.marketing-section-title {
+  font-family: var(--font-title);
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--accent-light);
+  margin: 0 0 1.25rem;
+  letter-spacing: 1px;
+
+  &--center {
+    text-align: center;
+  }
+}
+
+/* ── Value proposition — 3 concise items, deliberately NOT bordered cards
+   (that's the About page's visual language). A thin accent rule per item
+   keeps this lighter and more editorial. ── */
+.marketing-values {
+  margin: 1rem 0 3.5rem;
+}
+
+.marketing-value-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2.5rem;
+
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+}
+
+.marketing-value-item {
+  text-align: center;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--accent);
+}
+
+.marketing-value-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--foreground);
+  margin: 0 0 0.5rem;
+}
+
+.marketing-value-description {
+  font-size: 0.92rem;
+  color: var(--foreground-darker);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* Spacing between the "Why FORTEXA" intro paragraphs and the reused
+   .about-feature-grid capability cards below them. */
+.marketing-capability-grid {
+  margin-top: 2rem;
+}
+
+/* ── AI-Powered Security Analysis — a dedicated, visually heavier panel so
+   AI reads as a core part of the product rather than one feature card among
+   several. Border + glow treatment echoes .about-feature-card, scaled up. ── */
+.marketing-ai-section {
+  margin-bottom: 3.5rem;
+}
+
+.marketing-ai-panel {
+  border: 2px solid var(--accent);
+  border-radius: var(--card-border-radius);
+  background: rgba(0, 0, 0, 0.65);
+  padding: 3rem 2.5rem;
+  box-shadow: 0 0 32px rgba(255, 107, 0, 0.18);
+}
+
+body.light .marketing-ai-panel {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.marketing-ai-title {
+  font-family: var(--font-title);
+  font-size: clamp(1.6rem, 3.4vw, 2.2rem);
+  font-weight: 800;
+  color: var(--accent-light);
+  margin: 0 0 1rem;
+  letter-spacing: 0.5px;
+}
+
+.marketing-ai-lead {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--foreground);
+  line-height: 1.6;
+  margin: 0 0 0.9rem;
+  max-width: 760px;
+}
+
+.marketing-ai-body {
+  font-size: 1rem;
+  line-height: 1.75;
+  color: var(--foreground-darker);
+  margin: 0 0 2rem;
+  max-width: 760px;
+}
+
+.marketing-ai-privacy {
+  border-top: 1px solid rgba(255, 107, 0, 0.25);
+  padding-top: 1.75rem;
+}
+
+.marketing-ai-privacy-title {
+  font-family: var(--font-title);
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--foreground);
+  margin: 0 0 0.6rem;
+}
+
+.marketing-ai-privacy-intro {
+  font-size: 0.95rem;
+  color: var(--foreground-darker);
+  line-height: 1.65;
+  margin: 0 0 1.1rem;
+  max-width: 760px;
+}
+
+.marketing-ai-privacy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.9rem;
+
+  li {
+    position: relative;
+    padding-left: 1.5rem;
+    font-size: 0.92rem;
+    line-height: 1.65;
+    color: var(--foreground-darker);
+
+    &::before {
+      content: '✓';
+      position: absolute;
+      left: 0;
+      color: #00d084;
+      font-weight: 800;
+    }
+  }
+}
+
+/* ── Product preview mockup — the single credibility/product signal ── */
+.marketing-preview-panel {
+  max-width: 480px;
+  margin: 0 auto;
+  border: 1px solid rgba(255, 107, 0, 0.25);
+  border-radius: var(--card-border-radius);
+  background: rgba(0, 0, 0, 0.4);
+  padding: 0.5rem 1.5rem;
+}
+
+body.light .marketing-preview-panel {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.marketing-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 0;
+
+  & + & {
+    border-top: 1px solid var(--outline);
+  }
+}
+
+.marketing-preview-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.marketing-preview-grade {
+  font-family: var(--font-title);
+  font-weight: 800;
+  font-size: 1.05rem;
+  padding: 0.2rem 0.7rem;
+  border-radius: 6px;
+
+  &--safe {
+    color: #00d084;
+  }
+
+  &--low {
+    color: #ffb900;
+  }
+
+  &--medium {
+    color: #ff8c00;
+  }
+
+  &--high {
+    color: #e81123;
+  }
+}
+
+/* ── Final CTA ── */
+.marketing-cta-section {
+  text-align: center;
+  padding: 3rem 0 1rem;
+}
+
+.marketing-cta-title {
+  font-family: var(--font-title);
+  font-size: 1.7rem;
+  font-weight: 800;
+  margin: 0 0 0.75rem;
+  color: var(--foreground);
+}
+
+.marketing-cta-subtitle {
+  font-size: 1rem;
+  color: var(--foreground-darker);
+  margin: 0 0 1.75rem;
+}
+
+.marketing-cta-actions {
+  justify-content: center;
+}
+
+/* ── Light-mode adjustments ── */
+body.light {
+  .marketing-btn--primary {
+    color: #fff;
+  }
+
+  .marketing-btn--secondary {
+    color: var(--accent-dark);
+    border-color: var(--accent-dark);
+
+    &:hover {
+      background: var(--accent-dark);
+      color: #fff;
+    }
+  }
+
+  .marketing-eyebrow {
+    color: var(--accent-dark);
+    border-color: rgba(204, 85, 0, 0.4);
+  }
+
+  .marketing-hero-title {
+    text-shadow: 0 0 24px rgba(204, 85, 0, 0.12);
+  }
+
+  .marketing-value-item {
+    border-top-color: var(--accent-dark);
+  }
+
+  .marketing-ai-panel {
+    border-color: var(--accent-dark);
+  }
+
+  .marketing-ai-title {
+    color: var(--accent-dark);
+  }
+}
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .marketing-hero {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    text-align: center;
+    padding: 2rem 0 1.5rem;
+  }
+
+  .marketing-hero-subtitle {
+    max-width: none;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .marketing-hero-actions {
+    justify-content: center;
+  }
+
+  .marketing-hero-visual {
+    order: -1;
+  }
+
+  .scan-ring {
+    --ring-size: min(200px, 55vw);
+  }
+}
+
+@media (max-width: 768px) {
+  .marketing-section {
+    margin-bottom: 2.25rem;
+  }
+
+  .marketing-values {
+    margin-bottom: 2.25rem;
+  }
+
+  .scan-core-grade {
+    font-size: 3rem;
+  }
+
+  .marketing-ai-panel {
+    padding: 2rem 1.5rem;
+  }
+}

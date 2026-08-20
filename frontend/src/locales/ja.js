@@ -912,10 +912,7 @@ export const ja = {
   adminScansThisWeek: 'この期間で{count}件のスキャン',
   adminTopOrgsByUsage: '利用状況上位の組織',
   adminTopOrgsByUsageExplain: '現在の請求サイクルにおける使用スキャン数で組織をランキングしています。',
-  // About page
-  about: '概要',
-  aboutHeroTitleSuffix: '－ウェブサイトセキュリティスキャン＆脆弱性検出',
-  aboutHeroCta: '今すぐ始める',
+  // ランディングページで再利用（旧・単独の /about ページ）
   aboutWhatWeDoTitle: 'FORTEXAとは',
   aboutWhatWeDoBody1: 'FORTEXAは指定したウェブサイトをスキャンし、セキュリティと品質に関するあらゆる情報を、専門知識がなくても理解できる一つのレポートにまとめます。',
   aboutWhatWeDoBody2: '自社のウェブサイトを継続的にチェックしたいユーザーや組織向けに作られています。会社アカウントで登録し、チームを招待し、必要なときにスキャンを実行できます。',
@@ -932,6 +929,8 @@ export const ja = {
   aboutFeatureAiDescription: 'すべてのチェックが完了すると、セキュリティ状況をわかりやすい言葉で説明する要約が自動生成されます。',
   aboutFeatureReportsTitle: 'ダウンロード可能なレポート',
   aboutFeatureReportsDescription: '結果はバイリンガル対応のPDFレポート、または構造化されたJSON形式でダウンロードできます。',
+  aboutFeatureOngoingTitle: 'チーム・組織のために',
+  aboutFeatureOngoingDescription: 'ウェブサイトのセキュリティ状態を常に把握できます。会社アカウントを作成してチームを招待し、必要なときにいつでもスキャンを実行できます。',
   aboutHowItWorksTitle: 'ご利用の流れ',
   aboutStep1Title: 'URLを入力',
   aboutStep1Description: '評価したいウェブサイトを入力します。認証付きスキャンの場合はログイン情報も併せて入力できます。',
@@ -955,6 +954,26 @@ export const ja = {
   aboutTrialsTitle: '一回限りのお試しプラン',
   aboutPaymentsTitle: '安全な決済',
   aboutPaymentsBody: '決済処理は広く利用されている決済代行サービスのStripeが担当しており、FORTEXAがカード情報を取得・保存することはありません。サブスクリプション課金と一回限りの支払いの両方に対応しており、決済確認後はプランが自動的に有効化されます。表示価格は税抜きで、決済時に消費税10%が加算されます。',
-  aboutFinalCtaTitle: '自社サイトの現状を確認してみませんか？',
+
+  // マーケティングランディングページ（未ログイン時のみ "/" に表示）
+  marketingHeroEyebrow: 'ウェブサイト セキュリティ診断',
+  marketingHeroTitle: 'ウェブサイトの安全性を、正確に把握する。',
+  marketingHeroSubtitle: 'FORTEXAはウェブサイトのセキュリティ・パフォーマンス・設定状況を一括で診断し、専門知識がなくても理解できるレポートにまとめます。今すぐ行動につながる、明確な結果をお届けします。',
+  marketingValueTitle: 'FORTEXAが選ばれる理由',
+  marketingAiTitle: 'AIによるセキュリティ分析',
+  marketingAiLead: '複雑なセキュリティスキャン結果を、わかりやすく実行可能なセキュリティレポートに変換します。',
+  marketingAiBody: 'AIがスキャン結果を分析し、専門的なセキュリティデータを、主要なリスク・要約・推奨対応を含むわかりやすいレポートへと変換します。',
+  marketingAiPrivacyTitle: 'プライバシーに配慮した設計',
+  marketingAiPrivacyIntro: 'セキュリティスキャンデータをAIが処理する前に、分析のために送信されるデータから識別情報を除去します。',
+  marketingAiPrivacyItemTargetLead: '対象情報はサニタイズされます。',
+  marketingAiPrivacyItemTargetRest: 'ウェブサイトのURL、ホスト名、IPアドレス、DNS情報、スキャン識別子は、AIによる主要な分析の前にマスキングされます。',
+  marketingAiPrivacyItemUserLead: 'ユーザーの識別情報は保護されます。',
+  marketingAiPrivacyItemUserRest: 'アカウント名やメールアドレスは、AI分析に使用されるデータから除去されます。',
+  marketingAiPrivacyItemHeadersLead: 'HTTPヘッダー値はサニタイズされます。',
+  marketingAiPrivacyItemHeadersRest: '識別につながる可能性のあるURL、ホスト名、IPアドレス、Cookie、リダイレクト情報は除去される一方、セキュリティ上有用なヘッダー情報は保持されます。',
+  marketingAiPrivacyItemGuardrail: 'また、AIへの入力内容に対する情報漏えい検知の仕組みも備えています。',
+  marketingFinalCtaTitle: 'セキュリティを明確に。AIの力で。',
+  marketingFinalCtaSecondary: '今すぐ始める',
+  marketingFinalCtaTagline: 'プライバシーに配慮したAIによる分析で、セキュリティをより明確に把握できます。',
 };
 
