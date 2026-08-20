@@ -39,7 +39,8 @@ const LoginPage = () => {
           localStorage.setItem('token', data.token);
           syncLanguage();
           setMessage(t('googleLoginSuccessful'));
-          setTimeout(() => navigate('/'), 2000);
+          const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+          setTimeout(() => navigate(target), 2000);
         } else {
           setError(data.message || t('googleLoginFailed'));
         }
@@ -71,7 +72,8 @@ const LoginPage = () => {
           localStorage.setItem('token', data.token);
           syncLanguage();
           setMessage(data.message);
-          setTimeout(() => navigate('/'), 2000);
+          const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
+          setTimeout(() => navigate(target), 2000);
         } else {
           setMessage(data.message);
           setTimeout(() => navigate('/verify-otp', { state: { email } }), 2000);

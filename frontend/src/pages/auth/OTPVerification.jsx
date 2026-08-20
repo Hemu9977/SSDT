@@ -42,8 +42,9 @@ const OTPVerification = () => {
       if (response.ok) {
         localStorage.setItem('token', data.token);
         setMessage(t('otpVerificationSuccess'));
+        const target = ['admin', 'superadmin'].includes(data.user?.systemRole) ? '/admin' : '/profile';
         setTimeout(() => {
-          navigate('/'); // Redirect to dashboard/home
+          navigate(target);
         }, 2000);
       } else {
         setError(data.message);

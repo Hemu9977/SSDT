@@ -189,6 +189,10 @@ app.use('/api/schedules', identifyUser, apiLimiter, require('./routes/scheduleRo
 // Notifications are polled by the browser as a WebSocket fallback.
 app.use('/api/notifications', identifyUser, pollLimiter, require('./routes/notificationRoutes'));
 
+// 👇 REGISTER GLOBAL ADMIN ROUTES
+app.use('/api/admin', apiLimiter, require('./routes/admin'));
+
+
 // ── /health — lightweight liveness probe (ECS health check target) ───────────
 // Returns 200 immediately; ECS uses this to decide whether to route traffic.
 // Intentionally minimal — no DB or Redis calls so it never blocks.

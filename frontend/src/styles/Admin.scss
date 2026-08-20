@@ -1,0 +1,918 @@
+// frontend/src/styles/Admin.scss
+// Admin Dashboard Styles — SSDT Design Language
+// Uses CSS custom properties from index.css for full dark/light mode support.
+// Reuses .profile-section, .stat-card, .stats-grid, .scan-status, .btn-edit from Profile.scss.
+@import './Profile.scss';
+
+
+// ── Page shell ───────────────────────────────────────────────────────────────
+// Admin reuses .profile-page / .profile-container / .profile-header from
+// Profile.scss (same Header, ParticleBackground, and page-title pattern as every
+// other page). .admin-wide only widens the content column — tables need more
+// room than the 1000px profile form — everything else (padding, centering,
+// mobile behavior) is inherited unchanged.
+.profile-container.admin-wide {
+  max-width: 1400px;
+}
+
+// ── Tab navigation ─────────────────────────────────────────────────────────────
+// Horizontal tabs, not a sidebar — no other page on the site uses a left nav,
+// so the admin section follows the same header-only layout instead of
+// introducing a second navigation paradigm.
+.admin-tabs {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--outline);
+
+  &::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--outline-darker);
+    border-radius: 2px;
+  }
+}
+
+.admin-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1.25rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--foreground-darker);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  .admin-tab-icon {
+    display: flex;
+    font-size: 0.95rem;
+  }
+
+  &:hover {
+    color: var(--accent);
+    background: rgba(255, 107, 0, 0.06);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px rgba(255, 107, 0, 0.35);
+  }
+
+  &.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: rgba(255, 107, 0, 0.08);
+  }
+}
+
+@media (max-width: 480px) {
+  .admin-tab {
+    padding: 0.65rem 0.9rem;
+    font-size: 0.8rem;
+
+    .admin-tab-label {
+      display: none;
+    }
+  }
+}
+
+// ── Content padding ───────────────────────────────────────────────────────────
+.admin-page {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+// ── Role Badges ───────────────────────────────────────────────────────────────
+.admin-role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  vertical-align: middle;
+
+  &.superadmin {
+    background: rgba(232, 17, 35, 0.15);
+    color: #e81123;
+    border: 1px solid rgba(232, 17, 35, 0.3);
+  }
+
+  &.admin-badge {
+    background: rgba(255, 107, 0, 0.15);
+    color: #FF6B00;
+    border: 1px solid rgba(255, 107, 0, 0.3);
+  }
+}
+
+// ── Section titles ────────────────────────────────────────────────────────────
+.admin-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--accent-light);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 0;
+}
+
+.admin-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: rgba(255, 107, 0, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(255, 107, 0, 0.25);
+
+  &--green {
+    background: rgba(0, 208, 132, 0.12);
+    color: #00d084;
+    border-color: rgba(0, 208, 132, 0.3);
+  }
+
+  &--yellow {
+    background: rgba(255, 185, 0, 0.12);
+    color: #ffb900;
+    border-color: rgba(255, 185, 0, 0.3);
+  }
+}
+
+// ── KPI Stats grid ────────────────────────────────────────────────────────────
+.admin-stats-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.admin-stat-card {
+  .admin-stat-icon {
+    font-size: 1.8rem;
+    margin-bottom: 0.75rem;
+    opacity: 0.85;
+  }
+
+  &--orange .admin-stat-icon,
+  &--orange .stat-value {
+    color: #FF6B00 !important;
+  }
+
+  &--green .admin-stat-icon,
+  &--green .stat-value {
+    color: #00d084 !important;
+  }
+
+  &--blue .admin-stat-icon,
+  &--blue .stat-value {
+    color: #3b82f6 !important;
+  }
+
+  &--purple .admin-stat-icon,
+  &--purple .stat-value {
+    color: #a855f7 !important;
+  }
+
+  &--yellow .admin-stat-icon,
+  &--yellow .stat-value {
+    color: #ffb900 !important;
+  }
+
+  &--cyan .admin-stat-icon,
+  &--cyan .stat-value {
+    color: #06b6d4 !important;
+  }
+}
+
+// ── Two column layout ─────────────────────────────────────────────────────────
+.admin-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+// ── Plan distribution ─────────────────────────────────────────────────────────
+.admin-plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.admin-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.admin-plan-badge {
+  font-size: 0.7rem;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 5px;
+  letter-spacing: 0.5px;
+  min-width: 60px;
+  text-align: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.admin-plan-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.admin-plan-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+  min-width: 2px;
+}
+
+.admin-plan-count {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--foreground-darker);
+  min-width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+// ── Explainability captions ───────────────────────────────────────────────────
+// A short, always-visible line under a chart/section title explaining what
+// it measures and where the number comes from — not a hover-only tooltip,
+// so the explanation isn't easy to miss.
+.admin-explain {
+  font-size: 0.8rem;
+  color: var(--foreground-darker);
+  opacity: 0.75;
+  margin: 0.25rem 0 1rem;
+  line-height: 1.5;
+}
+
+.admin-estimate-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: rgba(255, 185, 0, 0.15);
+  color: #ffb900;
+  border: 1px solid rgba(255, 185, 0, 0.3);
+  vertical-align: middle;
+}
+
+// ── Trend line chart ──────────────────────────────────────────────────────────
+.admin-trend-line {
+  width: 100%;
+  height: 64px;
+  display: block;
+  overflow: visible;
+}
+
+.admin-trend-line-area {
+  fill: rgba(255, 107, 0, 0.12);
+  stroke: none;
+}
+
+.admin-trend-line-stroke {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.admin-trend-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--foreground-darker);
+
+  strong {
+    font-size: 1.1rem;
+    color: var(--foreground);
+    font-weight: 800;
+  }
+}
+
+.pro-theme {
+  .admin-trend-line-stroke {
+    stroke: var(--neon-purple-primary) !important;
+  }
+
+  .admin-trend-line-area {
+    fill: rgba(168, 85, 247, 0.12) !important;
+  }
+}
+
+// ── Row action buttons ────────────────────────────────────────────────────────
+// Compact variant of .btn-edit / .btn-downgrade (same palette, hover behavior,
+// and border-radius family) sized to sit inline inside a table row instead of
+// as a full-width standalone CTA.
+.admin-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+// Matches .admin-action-btn's padding so a row with no available actions
+// (the current admin's own row) keeps the same vertical rhythm as rows with
+// buttons, instead of visually collapsing thinner than its neighbors.
+.admin-row-actions-placeholder {
+  display: inline-block;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+}
+
+.admin-action-btn {
+  padding: 0.35rem 0.7rem;
+  border-radius: 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255, 107, 0, 0.1);
+  border: 1px solid rgba(255, 107, 0, 0.3);
+  color: var(--accent);
+  white-space: nowrap;
+  font-family: var(--font-sans);
+
+  &:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--background);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(255, 107, 0, 0.35);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &.admin-action-btn--danger {
+    background: rgba(232, 17, 35, 0.12);
+    border-color: rgba(232, 17, 35, 0.35);
+    color: #e81123;
+
+    &:hover:not(:disabled) {
+      background: #e81123;
+      color: #fff;
+    }
+
+    &:focus-visible {
+      box-shadow: 0 0 0 2px rgba(232, 17, 35, 0.35);
+    }
+  }
+}
+
+// ── Tables ────────────────────────────────────────────────────────────────────
+.admin-table-wrap {
+  overflow-x: auto;
+  border-radius: 1rem;
+  margin-top: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  .admin-table-wrap {
+    border-color: rgba(0, 0, 0, .08);
+  }
+}
+
+body.light .admin-table-wrap {
+  border-color: rgba(0, 0, 0, .08);
+}
+
+// table-layout: fixed makes column widths deterministic — set once by the
+// <colgroup> each table renders, independent of cell content. Under the
+// default `auto` layout, a <td>'s max-width is only a hint the browser's
+// column-sizing algorithm can override once real content (a long email, a
+// long org name) is measured, which is what let text bleed into the next
+// column. Fixed layout removes that ambiguity entirely, so no per-cell
+// max-width or :has() overrides are needed anywhere below.
+.admin-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+
+  th {
+    padding: 0.9rem 1rem;
+    text-align: left;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--accent);
+    background: rgba(255, 107, 0, 0.06);
+    border-bottom: 1px solid rgba(255, 107, 0, 0.15);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    color: var(--foreground);
+    vertical-align: middle;
+    overflow: hidden;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
+  tr:hover td {
+    background: rgba(255, 107, 0, 0.04);
+  }
+
+  tbody tr {
+    transition: background 0.15s ease;
+  }
+
+  // Per-table minimum widths, matched to each table's actual column count/
+  // content in the JSX <colgroup>. Below this width the table scrolls
+  // horizontally as a whole (via .admin-table-wrap) instead of squeezing
+  // Plan/Role/Status/Actions into unreadable slivers.
+  &.admin-table--users,
+  &.admin-table--orgs {
+    min-width: 920px;
+  }
+
+  &.admin-table--scans {
+    min-width: 760px;
+  }
+
+  &.admin-table--compact {
+    min-width: 480px;
+  }
+}
+
+@media (prefers-color-scheme: light) {
+  .admin-table td {
+    border-bottom-color: rgba(0, 0, 0, .05);
+  }
+}
+
+body.light .admin-table td {
+  border-bottom-color: rgba(0, 0, 0, .05);
+}
+
+// Column width is set once, deterministically, by each table's <colgroup> —
+// these cells only need to clip their own overflow, not also constrain their
+// own width via max-width (that fought with table-layout: auto before and is
+// unnecessary now that the column width is fixed).
+.admin-td-email {
+  font-size: 0.82rem;
+  color: var(--foreground-darker);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Name column is a flex row so a long name truncates with an ellipsis while
+// the role badge (when present) stays fully visible and never gets squeezed
+// or pushed off — fixes names overflowing into neighboring columns.
+.admin-td-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+
+  .admin-td-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .admin-role-badge {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+  }
+}
+
+.admin-td-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-target-cell {
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+}
+
+.admin-muted {
+  color: var(--foreground-darker);
+  opacity: 0.5;
+}
+
+.admin-seats {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+// ── Search & filter bar ───────────────────────────────────────────────────────
+.admin-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  padding: 0 1rem;
+  margin-bottom: 1rem;
+  max-width: 400px;
+  transition: border-color 0.2s;
+
+  &:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 107, 0, 0.12);
+  }
+
+  .admin-search-icon {
+    color: var(--foreground-darker);
+    opacity: 0.5;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .admin-search-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--foreground);
+    font-size: 0.875rem;
+    padding: 0.7rem 0;
+    font-family: var(--font-sans);
+
+    &::placeholder {
+      color: var(--foreground-darker);
+      opacity: 0.5;
+    }
+  }
+}
+
+.admin-filter-bar {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.admin-select {
+  background: rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  color: var(--foreground);
+  font-size: 0.875rem;
+  padding: 0.65rem 1rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+
+  &:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 107, 0, 0.12);
+  }
+
+  option {
+    background: var(--background-light);
+    color: var(--foreground);
+  }
+}
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+.admin-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+
+  .admin-page-info {
+    font-size: 0.875rem;
+    color: var(--foreground-darker);
+  }
+}
+
+// ── System Health Grid ────────────────────────────────────────────────────────
+.admin-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.admin-health-card {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1.25rem;
+  padding: 1.25rem;
+  backdrop-filter: blur(3px);
+  transition: all 0.25s ease;
+
+  &--ok {
+    border-color: rgba(0, 208, 132, 0.2);
+    box-shadow: 0 0 10px rgba(0, 208, 132, 0.06);
+
+    &:hover {
+      border-color: rgba(0, 208, 132, 0.4);
+      box-shadow: 0 0 20px rgba(0, 208, 132, 0.15);
+      transform: translateY(-2px);
+    }
+  }
+
+  &--err {
+    border-color: rgba(232, 17, 35, 0.2);
+    box-shadow: 0 0 10px rgba(232, 17, 35, 0.06);
+
+    &:hover {
+      border-color: rgba(232, 17, 35, 0.35);
+      box-shadow: 0 0 20px rgba(232, 17, 35, 0.12);
+      transform: translateY(-2px);
+    }
+  }
+
+  .admin-health-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .admin-health-service-icon {
+    font-size: 1.1rem;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .admin-health-service-name {
+    flex: 1;
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--foreground);
+  }
+
+  .admin-health-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+
+  .admin-health-detail {
+    font-size: 0.75rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    padding: 3px 8px;
+    color: var(--foreground-darker);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+
+    svg {
+      font-size: 11px;
+    }
+
+    &.admin-health-error {
+      background: rgba(232, 17, 35, 0.08);
+      border-color: rgba(232, 17, 35, 0.2);
+      color: #e81123;
+    }
+  }
+}
+
+.admin-health-icon {
+  font-size: 1.1rem;
+
+  &.admin-health-online {
+    color: #00d084;
+  }
+
+  &.admin-health-offline {
+    color: #e81123;
+  }
+
+  &.admin-health-unknown {
+    color: #ffb900;
+  }
+}
+
+// ── Loading / error states ────────────────────────────────────────────────────
+.admin-section-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem;
+  gap: 1rem;
+  color: var(--foreground-darker);
+  font-size: 0.95rem;
+}
+
+.admin-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 107, 0, 0.2);
+  border-top-color: #FF6B00;
+  border-radius: 50%;
+  animation: admin-spin 0.7s linear infinite;
+}
+
+@keyframes admin-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.admin-spin {
+  animation: admin-spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+.admin-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 3rem;
+  text-align: center;
+  color: #e81123;
+  background: rgba(232, 17, 35, 0.06);
+  border: 1px solid rgba(232, 17, 35, 0.2);
+  border-radius: 1.25rem;
+  margin-top: 1rem;
+}
+
+.admin-empty {
+  text-align: center;
+  color: var(--foreground-darker);
+  opacity: 0.6;
+  padding: 2rem;
+  font-style: italic;
+}
+
+.admin-kpi-section {
+  margin-bottom: 1.5rem;
+}
+
+.admin-timestamp {
+  font-size: 0.8rem;
+  color: var(--foreground-darker);
+  opacity: 0.6;
+  margin: 0.5rem 0 0;
+}
+
+// ── Responsive ────────────────────────────────────────────────────────────────
+@media (max-width: 1024px) {
+  .admin-two-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .admin-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .admin-health-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-table th,
+  .admin-table td {
+    padding: 0.65rem 0.75rem;
+    font-size: 0.8rem;
+  }
+
+  .admin-pagination {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .admin-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+// ── Light Mode Overrides ─────────────────────────────────────────────────────
+body.light {
+  .admin-table-wrap {
+    border-color: rgba(0, 0, 0, 0.08);
+  }
+
+  .admin-table {
+    th {
+      background: rgba(255, 107, 0, 0.04);
+      border-bottom-color: rgba(255, 107, 0, 0.1);
+    }
+
+    td {
+      border-bottom-color: rgba(0, 0, 0, 0.05);
+    }
+
+    tr:hover td {
+      background: rgba(255, 107, 0, 0.03);
+    }
+  }
+
+  .admin-health-card {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(0, 0, 0, 0.08);
+
+    .admin-health-detail {
+      background: rgba(0, 0, 0, 0.04);
+      border-color: rgba(0, 0, 0, 0.08);
+    }
+  }
+
+  .admin-search-bar {
+    background: rgba(255, 255, 255, 0.6);
+  }
+
+  .admin-select {
+    background: rgba(255, 255, 255, 0.6);
+  }
+}
+
+// ── Pro Theme Override ────────────────────────────────────────────────────────
+.pro-theme {
+  .admin-tab {
+    &:hover {
+      background: rgba(168, 85, 247, 0.1) !important;
+      color: var(--neon-purple-bright) !important;
+    }
+
+    &.active {
+      background: rgba(168, 85, 247, 0.12) !important;
+      color: var(--neon-purple-primary) !important;
+      border-bottom-color: var(--neon-purple-primary) !important;
+    }
+  }
+
+  .admin-table th {
+    background: rgba(124, 58, 237, 0.15) !important;
+    color: var(--neon-purple-bright) !important;
+    border-bottom-color: var(--neon-purple-primary) !important;
+  }
+
+  .admin-table tr:hover td {
+    background: rgba(61, 43, 94, 0.4) !important;
+  }
+
+  .admin-count-badge {
+    background: rgba(168, 85, 247, 0.15) !important;
+    color: var(--neon-purple-bright) !important;
+    border-color: rgba(168, 85, 247, 0.3) !important;
+  }
+
+  .admin-section-title {
+    color: var(--neon-purple-bright) !important;
+  }
+
+  .admin-spinner {
+    border-color: rgba(168, 85, 247, 0.2) !important;
+    border-top-color: var(--neon-purple-primary) !important;
+  }
+}
