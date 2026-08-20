@@ -8,7 +8,7 @@
     "dev": "nodemon --max-http-header-size=81920 server.js",
     "worker": "node workers/startWorker.js",
     "worker:dev": "nodemon workers/startWorker.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/**/*.test.js"
   },
   "keywords": [
     "scanner",

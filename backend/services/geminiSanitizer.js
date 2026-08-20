@@ -29,8 +29,18 @@
  *   WAF vendor (Cloudflare, Akamai) — technology, not identity
  *   Technology stack list
  *   TLS protocol, cipher suite, grade
- *   Security header names and values
+ *   Security header NAMES (presence/absence of CSP, HSTS, X-Frame-Options, etc.)
  *   urlscan threat / malicious scores and aggregate request counts
+ *
+ * Fields SANITIZED IN PLACE (structure kept, embedded identity stripped):
+ *   HTTP response header VALUES — see sanitizeHeadersForLLM(). Header names are
+ *   safe technology signal, but values can embed the target's own hostname
+ *   (Content-Security-Policy directives, Set-Cookie Domain=, Location /
+ *   Content-Location / Refresh redirect targets). Structurally identity-bearing
+ *   headers (Set-Cookie, Location, Content-Location, Refresh) are fully
+ *   redacted; all other header values have embedded URLs/IPs/hostnames
+ *   scrubbed while directives, flags, and numeric settings (max-age, etc.)
+ *   are preserved.
  */
 
 const REDACTED = 'REDACTED';
@@ -39,6 +49,57 @@ const REDACTED = 'REDACTED';
 const IPV4_PATTERN = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
 const IPV6_PATTERN = /\b([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b/g;
 const URL_PATTERN  = /https?:\/\/[^\s"'<>)\]]+/gi;
+
+// Bare hostname with no scheme (e.g. a CSP `default-src` token like
+// "cdn.example.com"). The final label is required to be alphabetic so this
+// does not match version strings like "1.19.0" (Server: nginx/1.19.0) or
+// other dotted numeric tokens that are safe technology info.
+const BARE_DOMAIN_PATTERN = /\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}\b/g;
+
+// Header names whose VALUE is structurally identity-bearing regardless of
+// whether it happens to match a URL/hostname pattern — e.g. a Set-Cookie
+// value can carry a session token plus "Domain=" without ever containing
+// "http://". The whole value is redacted rather than pattern-scrubbed.
+const FULL_REDACT_HEADER_NAMES = new Set([
+  'set-cookie', 'set-cookie2', 'location', 'content-location', 'refresh',
+]);
+
+/** Strip URLs, IPs, and bare hostnames from a single string value. */
+function _scrubIdentityTokens(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(URL_PATTERN, REDACTED)
+    .replace(IPV4_PATTERN, REDACTED)
+    .replace(IPV6_PATTERN, REDACTED)
+    .replace(BARE_DOMAIN_PATTERN, REDACTED);
+}
+
+/**
+ * Sanitize an HTTP response-headers object (header-name -> value, as returned
+ * by the WebCheck `headers` sub-scan) before it reaches an LLM prompt.
+ *
+ * Called from sanitizeScanForLLM() for both `webCheckResult.headers` and
+ * `webCheckResult.fullResults.headers` — see the callers of this function for
+ * every path that must stay covered if the WebCheck result shape changes.
+ *
+ * @param {Object|null} headers  header-name -> value (or value[]) map
+ * @returns {Object|null}        new object; input is never mutated
+ */
+function sanitizeHeadersForLLM(headers) {
+  if (!headers || typeof headers !== 'object') return headers;
+  const out = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = String(name).toLowerCase();
+    if (FULL_REDACT_HEADER_NAMES.has(key)) {
+      out[name] = Array.isArray(value) ? [REDACTED] : REDACTED;
+    } else if (Array.isArray(value)) {
+      out[name] = value.map(_scrubIdentityTokens);
+    } else {
+      out[name] = _scrubIdentityTokens(value);
+    }
+  }
+  return out;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -89,6 +150,17 @@ function sanitizeScanForLLM(scanResult) {
     // fullResults may nest its own dns block
     if (safe.webCheckResult.fullResults?.dns?.a)    safe.webCheckResult.fullResults.dns.a    = [REDACTED];
     if (safe.webCheckResult.fullResults?.dns?.aaaa) safe.webCheckResult.fullResults.dns.aaaa = [REDACTED];
+
+    // HTTP response headers — values can embed the target's own domain via
+    // CSP, Set-Cookie, or Location even though header presence/names are safe
+    // technology signal. Covers both the inline and fullResults-nested shape,
+    // matching every path getFullResults()/GridFS results can take.
+    if (safe.webCheckResult.headers) {
+      safe.webCheckResult.headers = sanitizeHeadersForLLM(safe.webCheckResult.headers);
+    }
+    if (safe.webCheckResult.fullResults?.headers) {
+      safe.webCheckResult.fullResults.headers = sanitizeHeadersForLLM(safe.webCheckResult.fullResults.headers);
+    }
   }
 
   // ── ZAP alert occurrence URLs ─────────────────────────────────────────────
@@ -197,29 +269,48 @@ function sanitizeRefinedReportForLLM(reportText) {
 
 /**
  * Resolve the guardrail mode from the environment.
- *   'throw' — GEMINI_STRICT_GUARDRAIL='true': hard-fail on a hit (CI / controlled tests)
- *   'warn'  — unset AND non-production: log a warning on a hit (dev visibility, never breaks)
- *   'off'   — GEMINI_STRICT_GUARDRAIL='false', or unset in production
+ *   'throw' — GEMINI_STRICT_GUARDRAIL='true': hard-fail on a hit, before the
+ *             Gemini call is made (CI / controlled environments where every
+ *             caller is known to avoid legitimate-URL fields)
+ *   'warn'  — default in EVERY environment, including production: log a clear,
+ *             non-fatal warning on a hit so leakage is never silent
+ *   'off'   — GEMINI_STRICT_GUARDRAIL='false' (explicit opt-out only)
  *
- * Why not 'throw' by default outside production? Legitimate URLs legitimately
- * appear in prompts (ZAP `reference` OWASP doc links, CSP/Location header values
- * fed to refineReport). A hard throw on those would break report generation, so
- * the default is the non-fatal 'warn' mode in dev/test and silent in prod.
+ * Why is 'warn' the default everywhere (not 'throw')? ZAP's `alert.reference`
+ * field is copied verbatim from ZAP's own knowledge base and legitimately
+ * contains external documentation URLs (OWASP, CWE, etc.) — it is sent as-is
+ * to formatScanDataForPdf() by design (see geminiSanitizer.js module docstring,
+ * "PRESERVED" fields). A hard throw by default would fail nearly every PDF
+ * generation call that includes ZAP findings, which is not an acceptable
+ * trade-off for a check with no vendor-specific allowlist. 'warn' still runs
+ * unconditionally and logs every hit, closing the previous gap where
+ * production ran the check in 'off' mode and detected leakage was invisible
+ * unless someone had already opted in with GEMINI_STRICT_GUARDRAIL=true.
+ * Set GEMINI_STRICT_GUARDRAIL=true to upgrade to hard-fail once a given
+ * deployment's prompts are known not to carry legitimate reference URLs.
  *
  * @returns {'throw'|'warn'|'off'}
  */
 function _guardrailMode() {
   const flag = process.env.GEMINI_STRICT_GUARDRAIL;
-  if (flag === 'true') return 'throw';
+  if (flag === 'true')  return 'throw';
   if (flag === 'false') return 'off';
-  return process.env.NODE_ENV === 'production' ? 'off' : 'warn';
+  return 'warn';
 }
 
 /**
- * Pre-flight guardrail validator.
+ * Pre-flight guardrail validator. MUST be called — and is called, from
+ * _generate() in geminiService.js — before the Gemini API request is issued,
+ * so a 'throw' hit prevents the prompt from ever leaving the process.
+ *
  * Detects whether a prompt string still contains a live URL or IP after
  * sanitization. Behaviour depends on the resolved mode (see _guardrailMode()).
  * ~0 performance overhead when 'off' (env check exits immediately).
+ *
+ * Log safety: the matched leak text itself is NEVER written to logs or into
+ * the thrown Error's message — only its kind (URL/IP), length, and offset
+ * within the prompt. A log line that echoed the leaked domain/IP back out
+ * would just be a second copy of the same leak.
  *
  * @param {string} prompt    The full prompt string about to be sent to Gemini
  * @param {string} context   Human-readable label for error messages (function name)
@@ -229,30 +320,39 @@ function assertNoLeakage(prompt, context = '') {
   if (mode === 'off') return;
 
   // Match URLs that are NOT the literal string "REDACTED"
-  const urlHit = /https?:\/\/(?!REDACTED[^a-z])[^\s"'<>]{4,}/i.test(prompt);
+  const urlMatch = prompt.match(/https?:\/\/(?!REDACTED[^a-z])[^\s"'<>]{4,}/i);
   // Match IPv4 that are NOT preceded by "REDACTED"
-  const ipHit  = /(?<!REDACTED\s*)\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(prompt);
+  const ipMatch  = prompt.match(/(?<!REDACTED\s*)\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
 
-  if (!urlHit && !ipHit) return;
+  if (!urlMatch && !ipMatch) return;
 
-  const snippet = prompt.slice(0, 400);
+  const hits = [];
+  if (urlMatch) hits.push(`URL-like token (length ${urlMatch[0].length}) at offset ${urlMatch.index}`);
+  if (ipMatch)  hits.push(`IPv4-like token at offset ${ipMatch.index}`);
+
   const msg =
-    `[GEMINI GUARDRAIL] Potential identity leakage detected in Gemini prompt (context: ${context}).\n` +
-    `Snippet (first 400 chars): ${snippet}`;
+    `[GEMINI GUARDRAIL] Potential identity leakage detected in Gemini prompt ` +
+    `(context: ${context}, mode: ${mode}). ${hits.join('; ')}. ` +
+    `Prompt length: ${prompt.length} chars. Matched value withheld from this log.`;
 
   if (mode === 'throw') {
+    // Thrown before any network call — the caller (_generate) has not yet
+    // invoked ai.models.generateContent() at this point.
     throw new Error(msg);
   }
-  // 'warn' — surface in dev/test logs without breaking the request. Note: URLs from
-  // reference/CSP fields are expected here and are not necessarily identity leakage.
-  console.warn(`⚠️  ${msg}`);
+  // 'warn' — never blocks the request, but always logs at error level so the
+  // hit is visible in production log aggregation, not just dev consoles.
+  console.error(`⚠️  ${msg}`);
 }
 
 module.exports = {
   sanitizeScanForLLM,
+  sanitizeHeadersForLLM,
   sanitizeHistoryRowsForLLM,
   sanitizeTextsForLLM,
   sanitizeRefinedReportForLLM,
   assertNoLeakage,
   REDACTED,
+  // exported for unit tests only
+  _guardrailMode,
 };
