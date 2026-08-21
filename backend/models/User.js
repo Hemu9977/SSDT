@@ -165,6 +165,17 @@ const UserSchema = new mongoose.Schema({
   passwordResetAt: {
     type: Date,
     default: null
+  },
+
+  // ─── SESSION REVOCATION ─────────────────────────────────────────────────────
+  // JWTs are stateless and live for 7 days, so changing a password would
+  // otherwise leave every already-issued token working — a reset would not
+  // actually lock out whoever compromised the account. Any token whose `iat`
+  // predates this timestamp is rejected by middleware/auth.js.
+  // Null means "never revoked"; it is only set by the password-reset route.
+  tokensValidFrom: {
+    type: Date,
+    default: null
   }
 });
 

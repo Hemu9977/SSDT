@@ -181,11 +181,17 @@ test('every backend error code has a UI mapping and a translation in both locale
   const emitted = [...new Set([...backend.matchAll(/code:\s*'([A-Z_]+)'/g)].map((m) => m[1]))];
   assert.ok(emitted.length > 10, `expected a real set of codes, saw ${emitted.length}`);
 
-  const labels = read(path.join(REPO, 'frontend/src/pages/Admin/adminLabels.js'));
-  const errBlock = labels.slice(labels.indexOf('const ERROR_KEYS'));
-  const mapped = Object.fromEntries(
-    [...errBlock.matchAll(/([A-Z_]+):\s*'([A-Za-z0-9_]+)'/g)].map((m) => [m[1], m[2]])
-  );
+  // Two mapping tables now exist: adminLabels.js for the admin API, and the
+  // app-wide utils/apiErrors.js. A code mapped in either one is resolved.
+  const mapped = {};
+  for (const [file, marker] of [
+    ['frontend/src/pages/Admin/adminLabels.js', 'const ERROR_KEYS'],
+    ['frontend/src/utils/apiErrors.js', 'const CODE_KEYS'],
+  ]) {
+    const src = read(path.join(REPO, file));
+    const block = src.slice(src.indexOf(marker));
+    for (const m of block.matchAll(/([A-Z_]+):\s*'([A-Za-z0-9_]+)'/g)) mapped[m[1]] = m[2];
+  }
 
   const unmapped = emitted.filter((c) => !(c in mapped));
   assert.deepEqual(unmapped, [], `codes with no UI mapping: ${unmapped.join(', ')}`);

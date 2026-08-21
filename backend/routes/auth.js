@@ -6,6 +6,8 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const auth = require('../middleware/auth');
+const { invalidatePrincipal } = require('../middleware/auth');
+const { emailSendLimiter } = require('../middleware/rateLimiter');
 const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
 const crypto = require('crypto');
 const { verifyGoogleCredential } = require('../utils/googleAuth');
@@ -207,12 +209,134 @@ router.post('/verify-otp', async (req, res) => {
   }
 });
 
-router.post('/resend-otp', async (req, res) => {
-    /* ... Keep existing resend logic if needed, or minimal stub ... */
-    res.json({ code: 'AUTH_OTP_SENT', message: 'OTP sent' });
+// ─── PASSWORD RESET / OTP RESEND ─────────────────────────────────────────────
+// These three were stubs that returned success unconditionally while doing
+// nothing — no email sent, no password changed — even though the bilingual
+// templates and sendResetPasswordEmail() already existed and were imported.
+//
+// Two invariants apply to all three:
+//   1. The response is IDENTICAL whether or not the account exists. Otherwise
+//      an unauthenticated caller can enumerate registered addresses.
+//   2. Email sending is wrapped in try/catch (as /register does), so a mail
+//      failure never changes the HTTP response — which would leak the same
+//      thing by another route.
+// Both are additionally behind emailSendLimiter, keyed on the target address.
+
+/** The stored value is a hash: a database leak must not yield usable links. */
+const hashResetToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;  // 1 hour — matches the email copy
+const OTP_TTL_MS         = 10 * 60 * 1000;  // matches /register
+
+router.post('/resend-otp', emailSendLimiter, async (req, res) => {
+  const { email } = req.body;
+  // Same response shape on every path below.
+  const ack = () => res.json({ code: 'AUTH_OTP_SENT', message: 'OTP sent' });
+
+  if (!email || !EMAIL_RE.test(email)) {
+    return res.status(400).json({ code: 'AUTH_EMAIL_INVALID', message: 'Valid email is required' });
+  }
+
+  try {
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return ack();
+    if (await isAccountBlocked(user)) return ack();
+
+    user.otp = generateOTP();
+    user.otpExpires = new Date(Date.now() + OTP_TTL_MS);
+    await user.save();
+
+    try {
+      await sendOTPEmail(user.email, user.otp, user.preferredLanguage);
+    } catch (e) {
+      console.error('[resend-otp] email failed:', e.message);
+    }
+    return ack();
+  } catch (err) {
+    console.error('[resend-otp]', err.message);
+    return res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
+  }
 });
-router.post('/forgot-password', async (req, res) => { res.json({ code: 'AUTH_RESET_EMAIL_SENT', message: 'Reset email sent' }); });
-router.post('/reset-password', async (req, res) => { res.json({ code: 'AUTH_PASSWORD_RESET', message: 'Password reset' }); });
+
+router.post('/forgot-password', emailSendLimiter, async (req, res) => {
+  const { email } = req.body;
+  const ack = () => res.json({ code: 'AUTH_RESET_EMAIL_SENT', message: 'Reset email sent' });
+
+  if (!email || !EMAIL_RE.test(email)) {
+    return res.status(400).json({ code: 'AUTH_EMAIL_INVALID', message: 'Valid email is required' });
+  }
+
+  try {
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return ack();
+    if (await isAccountBlocked(user)) return ack();
+
+    // The raw token goes in the email; only its hash is persisted.
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = hashResetToken(rawToken);
+    user.resetPasswordExpires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+    await user.save();
+
+    try {
+      await sendResetPasswordEmail(user.email, rawToken, user.preferredLanguage);
+    } catch (e) {
+      console.error('[forgot-password] email failed:', e.message);
+    }
+    return ack();
+  } catch (err) {
+    console.error('[forgot-password]', err.message);
+    return res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
+  }
+});
+
+router.post('/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ code: 'AUTH_RESET_TOKEN_INVALID', message: 'Reset token is required' });
+  }
+  // Same minimum the register route enforces.
+  if (!password || password.length < 8) {
+    return res.status(400).json({ code: 'AUTH_PASSWORD_TOO_SHORT', message: 'Password must be at least 8 characters' });
+  }
+
+  try {
+    const user = await User.findOne({
+      resetPasswordToken: hashResetToken(token),
+      resetPasswordExpires: { $gt: new Date() },
+    });
+    // One code for "no such token" and "expired" alike — distinguishing them
+    // would tell an attacker which tokens once existed.
+    if (!user) {
+      return res.status(400).json({ code: 'AUTH_RESET_TOKEN_INVALID', message: 'Invalid or expired reset token' });
+    }
+
+    // No pre-save hook hashes this field — /register and /google both hash
+    // manually, and assigning plaintext here would store it in the clear.
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+
+    // Single-use.
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+
+    // The login route already reads this to skip OTP for 24h; nothing wrote it
+    // until now.
+    user.passwordResetAt = new Date();
+
+    // Revoke every token issued before this moment, so a reset actually locks
+    // out whoever held the old session rather than leaving it valid for 7 days.
+    user.tokensValidFrom = new Date();
+
+    await user.save();
+    invalidatePrincipal(user._id);   // apply on the very next request
+
+    return res.json({ code: 'AUTH_PASSWORD_RESET', message: 'Password reset' });
+  } catch (err) {
+    console.error('[reset-password]', err.message);
+    return res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
+  }
+});
 router.get('/me', auth, async (req, res) => {
     try { const user = await User.findById(req.user.id).select('-password'); res.json(user); } 
     catch(err) { res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' }); }

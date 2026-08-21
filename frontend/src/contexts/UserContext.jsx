@@ -58,8 +58,11 @@ export const UserProvider = ({ children }) => {
           // Non-JSON body (proxy error page); status alone still decides below.
         }
 
+        // A password reset revokes older tokens (SESSION_REVOKED) just as
+        // terminally as an admin disabling the account.
         const sessionIsDead =
-          res.status === 401 || (res.status === 403 && errorCode === 'ACCOUNT_DISABLED');
+          res.status === 401 ||
+          (res.status === 403 && (errorCode === 'ACCOUNT_DISABLED' || errorCode === 'SESSION_REVOKED'));
 
         if (sessionIsDead) {
           console.error('❌ UserContext: session rejected —', res.status, errorCode || '');

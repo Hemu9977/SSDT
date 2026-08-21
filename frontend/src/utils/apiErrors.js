@@ -10,6 +10,9 @@
 const CODE_KEYS = {
   // ── Session / account ──────────────────────────────────────────────────────
   ACCOUNT_DISABLED: 'errAccountDisabled',
+  SESSION_REVOKED: 'errSessionRevoked',
+  AUTH_RESET_TOKEN_INVALID: 'errAuthResetTokenInvalid',
+  TOO_MANY_REQUESTS: 'errTooManyRequests',
   UNAUTHORIZED: 'errUnauthorized',
   FORBIDDEN: 'errForbidden',
   SERVER_ERROR: 'errServer',
@@ -31,6 +34,24 @@ const CODE_KEYS = {
   AUTH_OTP_INVALID: 'errAuthOtpInvalid',
   AUTH_RESET_EMAIL_SENT: 'errAuthResetEmailSent',
   AUTH_PASSWORD_RESET: 'errAuthPasswordReset',
+
+  // ── Plan / quota (middleware/planCheck.js) ─────────────────────────────────
+  // A 401 here means the account row is gone: treat it as a dead session.
+  USER_NOT_FOUND: 'errUnauthorized',
+  ORG_CREATING: 'errOrgCreating',
+  PLAN_CHECK_ERROR: 'errPlanCheckFailed',
+  // These two already have long-standing keys; map them so call sites can drop
+  // their hand-rolled if-chains and go through this table instead.
+  PLAN_LIMIT_EXCEEDED: 'planLimitReached',
+  NO_ORGANIZATION: 'organizationRequired',
+
+  // ── Billing (routes/stripeRoutes.js) ───────────────────────────────────────
+  INSUFFICIENT_ROLE: 'errInsufficientRole',
+  ALREADY_SUBSCRIBED: 'errAlreadySubscribed',
+  TAX_NOT_CONFIGURED: 'billingUnavailable',
+
+  // ── Authenticated scanning (routes/zapAuthRoutes.js) ───────────────────────
+  SESSION_EXPIRED: 'sessionExpiredTestAgain',
 
   // ── Organizations & invites ────────────────────────────────────────────────
   ORG_NOT_FOUND: 'errOrgNotFound',
@@ -71,6 +92,7 @@ export const getApiErrorLabel = (t, source, fallbackKey = 'errUnexpected') => {
 
 /** True when the response says this session can never succeed again. */
 export const isSessionDead = (status, code) =>
-  status === 401 || (status === 403 && code === 'ACCOUNT_DISABLED');
+  status === 401 ||
+  (status === 403 && (code === 'ACCOUNT_DISABLED' || code === 'SESSION_REVOKED'));
 
 export default getApiErrorLabel;

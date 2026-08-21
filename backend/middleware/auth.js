@@ -15,13 +15,21 @@ const Organization = require('../models/Organization');
 // out-of-band (a direct DB edit, or another instance in a multi-task ECS
 // deployment, where each task holds its own cache).
 const DISABLED_CACHE_TTL_MS = 30 * 1000;
-const principalCache = new Map(); // userId -> { blocked: boolean, expires: number }
+// userId -> { blocked: boolean, tokensValidFrom: number|null, expires: number }
+const principalCache = new Map();
 
-async function isPrincipalBlocked(userId) {
+/**
+ * Resolve a principal's current state. Returns both the disabled verdict and
+ * the token cut-off, so the two checks share one cached read rather than
+ * adding a second query to the hot path of every authenticated request.
+ */
+async function getPrincipalState(userId) {
   const cached = principalCache.get(userId);
-  if (cached && cached.expires > Date.now()) return cached.blocked;
+  if (cached && cached.expires > Date.now()) return cached;
 
-  const user = await User.findById(userId).select('isDisabled organizationId').lean();
+  const user = await User.findById(userId)
+    .select('isDisabled organizationId tokensValidFrom')
+    .lean();
 
   let blocked;
   if (!user) {
@@ -35,8 +43,27 @@ async function isPrincipalBlocked(userId) {
     blocked = false;
   }
 
-  principalCache.set(userId, { blocked, expires: Date.now() + DISABLED_CACHE_TTL_MS });
-  return blocked;
+  const state = {
+    blocked,
+    // Null means "never revoked". Set only by the password-reset route.
+    tokensValidFrom: user && user.tokensValidFrom ? new Date(user.tokensValidFrom).getTime() : null,
+    expires: Date.now() + DISABLED_CACHE_TTL_MS,
+  };
+  principalCache.set(userId, state);
+  return state;
+}
+
+async function isPrincipalBlocked(userId) {
+  return (await getPrincipalState(userId)).blocked;
+}
+
+/**
+ * True when this token predates a password reset and must no longer be honoured.
+ * `iat` is in seconds; tokensValidFrom is in milliseconds.
+ */
+function isTokenRevoked(state, decoded) {
+  if (!state.tokensValidFrom || !decoded || !decoded.iat) return false;
+  return decoded.iat * 1000 < state.tokensValidFrom;
 }
 
 /** Drop one user's cached state so an admin action applies on the next request. */
@@ -100,7 +127,9 @@ async function auth(req, res, next) {
     // valid, this is a secondary control, and a transient Mongo blip must not
     // lock every user out of the platform at once.
     try {
-      if (await isPrincipalBlocked(decoded.user.id)) {
+      const state = await getPrincipalState(decoded.user.id);
+
+      if (state.blocked) {
         console.log('🚫 Auth: Disabled account attempted access —', decoded.user.id, 'on', req.path);
         return res.status(403).json({
           success: false,
@@ -109,8 +138,21 @@ async function auth(req, res, next) {
           message: 'This account has been disabled'
         });
       }
+
+      // A password reset revokes every token issued before it. Without this a
+      // reset would not lock out whoever held the old session — the stolen
+      // token would keep working for the rest of its 7-day life.
+      if (isTokenRevoked(state, decoded)) {
+        console.log('🚫 Auth: Revoked (pre-reset) token rejected —', decoded.user.id, 'on', req.path);
+        return res.status(403).json({
+          success: false,
+          error: 'SESSION_REVOKED',
+          code: 'SESSION_REVOKED',
+          message: 'This session has ended. Please sign in again.'
+        });
+      }
     } catch (dbErr) {
-      console.error('⚠️ Auth: disabled-state check failed, allowing request:', dbErr.message);
+      console.error('⚠️ Auth: principal-state check failed, allowing request:', dbErr.message);
     }
 
     next();
@@ -155,5 +197,7 @@ module.exports.identifyUser = identifyUser;
 // Exported so non-Express entry points that verify their own JWTs (the
 // Socket.IO handshake) enforce exactly the same rule instead of reimplementing it.
 module.exports.isPrincipalBlocked = isPrincipalBlocked;
+module.exports.getPrincipalState = getPrincipalState;
+module.exports.isTokenRevoked = isTokenRevoked;
 module.exports.invalidatePrincipal = invalidatePrincipal;
 module.exports.invalidateAllPrincipals = invalidateAllPrincipals;

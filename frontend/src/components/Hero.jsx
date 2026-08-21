@@ -12,6 +12,7 @@ import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 
 import { API_BASE } from '../config/api';
+import { getApiErrorLabel } from '../utils/apiErrors';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
 
@@ -879,7 +880,7 @@ const Hero = ({ historicalScan }) => {
           throw new Error(t('organizationRequired'));
         }
         console.error('❌ Scan request failed:', res.status, errorData);
-        throw new Error(t('scanFailedGeneric'));
+        throw new Error(getApiErrorLabel(t, errorData, 'scanFailedGeneric'));
       }
 
       const data = await res.json();

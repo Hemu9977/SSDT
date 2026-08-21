@@ -8,6 +8,7 @@ import { useUser } from '../contexts/UserContext';
 import '../styles/Profile.scss';
 
 import { API_BASE } from '../config/api';
+import { getApiErrorLabel } from '../utils/apiErrors';
 
 // Plan definitions — source of truth for the UI
 const PLANS = {
@@ -331,7 +332,7 @@ const Profile = () => {
       if (!res.ok) {
         // Backend error strings are English-only and internal; resolve known codes
         // through t() and fall back to a generic localized message.
-        throw new Error(data.code === 'TAX_NOT_CONFIGURED' ? t('billingUnavailable') : t('checkoutFailed'));
+        throw new Error(getApiErrorLabel(t, data, 'checkoutFailed'));
       }
       // Deliberately leave paymentLoading true — the page is navigating away. It is
       // reset if the user comes back without paying (see the bfcache effect below).

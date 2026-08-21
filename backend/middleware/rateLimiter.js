@@ -87,6 +87,35 @@ const apiLimiter = isRateLimitEnabled ? rateLimit({
 }) : createBypassMiddleware();
 
 // Strict rate limiter for authentication endpoints (20 requests per 15 minutes by default)
+// Routes that cause an email to be SENT to an address the caller supplies.
+// These need a tighter, differently-keyed budget than the rest of /auth: keyed
+// on the target address so one victim cannot be mail-bombed, and separate from
+// authLimiter so burning it does not also block legitimate logins from the
+// same IP (they share one 20-per-15-minute bucket otherwise).
+const EMAIL_SEND_WINDOW_MS = parseInt(process.env.EMAIL_SEND_WINDOW_MS || '900000', 10);
+const EMAIL_SEND_MAX       = parseInt(process.env.EMAIL_SEND_MAX || '5', 10);
+
+const emailSendLimiter = isRateLimitEnabled ? rateLimit({
+  windowMs: EMAIL_SEND_WINDOW_MS,
+  max: EMAIL_SEND_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Key on the recipient, falling back to IP when no email was supplied.
+  keyGenerator: (req) => {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    return email ? `email:${email}` : ipKeyGenerator(req.ip);
+  },
+  handler: (req, res) => {
+    console.log(`🚨 Email-send rate limit exceeded on ${req.path}`);
+    // Deliberately the same shape the routes return on success — this endpoint
+    // must not become an account-enumeration or existence oracle.
+    res.status(429).json({
+      code: 'TOO_MANY_REQUESTS',
+      message: 'Too many requests. Please try again later.'
+    });
+  }
+}) : createBypassMiddleware();
+
 const authLimiter = isRateLimitEnabled ? rateLimit({
   windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
   max: AUTH_RATE_LIMIT_MAX,
@@ -181,6 +210,7 @@ const pollLimiter = isRateLimitEnabled ? rateLimit({
 module.exports = {
   apiLimiter,
   authLimiter,
+  emailSendLimiter,
   scanLimiter,
   combinedScanLimiter,
   pollLimiter

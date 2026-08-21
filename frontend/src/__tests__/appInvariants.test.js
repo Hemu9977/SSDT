@@ -118,9 +118,14 @@ describe('post-login refresh', () => {
     expect(src).not.toMatch(/\['admin', 'superadmin'\]\.includes\(data\.user/);
   });
 
-  it('UserContext treats a disabled account as a dead session', () => {
+  it('UserContext treats a disabled OR revoked session as dead', () => {
     const ctx = read('contexts/UserContext.jsx');
-    expect(ctx).toMatch(/res\.status === 403 && errorCode === 'ACCOUNT_DISABLED'/);
+    // Assert the two terminal codes are both covered rather than pinning the
+    // exact expression, so widening the condition doesn't break the test.
+    const cond = ctx.slice(ctx.indexOf('const sessionIsDead'), ctx.indexOf('if (sessionIsDead)'));
+    expect(cond).toMatch(/res\.status === 401/);
+    expect(cond).toMatch(/ACCOUNT_DISABLED/);
+    expect(cond).toMatch(/SESSION_REVOKED/);
     const after = ctx.slice(ctx.indexOf('sessionIsDead'));
     expect(after).toMatch(/setUser\(null\)/);
     expect(after).toMatch(/removeItem\('user_data'\)/);
@@ -210,6 +215,54 @@ describe('translations', () => {
     const health = read('pages/Admin/AdminSystemHealth.jsx');
     expect(health.match(/title: '[^']+'/g)).toBeNull();
     expect(health).toMatch(/title=\{t\(svc\.labelKey\)\}/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API error codes
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('API error code mapping', () => {
+  const apiErrors = read('utils/apiErrors.js');
+  const codeKeys = Object.fromEntries(
+    [...apiErrors.slice(apiErrors.indexOf('const CODE_KEYS'))
+      .matchAll(/([A-Z_]+):\s*'([A-Za-z0-9_]+)'/g)].map((m) => [m[1], m[2]])
+  );
+
+  it('maps every code the mapper claims to handle to a key present in both locales', () => {
+    const missing = [];
+    for (const [code, key] of Object.entries(codeKeys)) {
+      if (!(key in en) || !(key in ja)) missing.push(`${code} -> ${key}`);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it.each([
+    'ALREADY_SUBSCRIBED', 'INSUFFICIENT_ROLE', 'ORG_CREATING',
+    'PLAN_CHECK_ERROR', 'USER_NOT_FOUND', 'SESSION_REVOKED',
+  ])('%s resolves to a specific message rather than a generic fallback', (code) => {
+    // These previously fell through to t('checkoutFailed') / t('scanFailedGeneric').
+    expect(codeKeys[code]).toBeDefined();
+  });
+
+  it('treats a revoked session as terminal, like a disabled account', () => {
+    expect(apiErrors).toMatch(/SESSION_REVOKED/);
+    expect(read('contexts/UserContext.jsx')).toMatch(/SESSION_REVOKED/);
+  });
+
+  it('routes checkout and scan-start failures through the shared mapper', () => {
+    expect(read('pages/Profile.jsx')).toMatch(/getApiErrorLabel\(t, data, 'checkoutFailed'\)/);
+    expect(read('components/Hero.jsx')).toMatch(/getApiErrorLabel\(t, errorData, 'scanFailedGeneric'\)/);
+  });
+
+  it('keeps the client password minimum aligned with the server', () => {
+    // A 6-char client minimum against an 8-char server rule meant a password
+    // could pass validation and then be rejected server-side.
+    for (const f of ['pages/auth/ResetPasswordPage.jsx', 'pages/JoinOrganization.jsx']) {
+      expect(read(f)).toMatch(/password\.length < 8/);
+    }
+    expect(en.passwordMinLength).toMatch(/8/);
+    expect(ja.passwordMinLength).toMatch(/8/);
   });
 });
 
