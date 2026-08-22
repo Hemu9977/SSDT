@@ -62,6 +62,14 @@ const buildConfirmConfig = (t, action, targetUser) => {
         confirmText: t('adminRemoveAdmin'),
         type: 'downgrade',
       };
+    case 'makeAdmin':
+      return {
+        title: t('adminGrantAdminTitle'),
+        message: t('adminGrantAdminMessage', { name }),
+        confirmText: t('adminMakeAdmin'),
+        // Granting rights is an escalation, not a downgrade.
+        type: 'upgrade',
+      };
     default:
       return null;
   }
@@ -70,6 +78,10 @@ const buildConfirmConfig = (t, action, targetUser) => {
 const AdminUsers = () => {
   const { t, currentLang } = useTranslation();
   const { user: currentUser } = useUser();
+  // routes/admin.js only lets a superadmin grant or revoke an administrator
+  // role (ADMIN_SUPERADMIN_REQUIRED), so a plain admin must not be shown
+  // controls whose request would always be refused.
+  const isSuperadmin = currentUser?.systemRole === 'superadmin';
   const [users, setUsers]         = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch]       = useState('');
@@ -140,6 +152,10 @@ const AdminUsers = () => {
           break;
         case 'removeAdmin':
           await adminService.updateUser(targetUser._id, { systemRole: 'user' });
+          showMessage('success', t('adminUserUpdated'));
+          break;
+        case 'makeAdmin':
+          await adminService.updateUser(targetUser._id, { systemRole: 'admin' });
           showMessage('success', t('adminUserUpdated'));
           break;
         default:
@@ -270,7 +286,18 @@ const AdminUsers = () => {
                             <span className="admin-muted admin-row-actions-placeholder">{t('adminYou')}</span>
                           ) : (
                             <div className="admin-row-actions">
-                              {u.systemRole === 'admin' && (
+                              {isSuperadmin && u.systemRole === 'user' && (
+                                <button
+                                  type="button"
+                                  className="admin-action-btn"
+                                  disabled={isBusy}
+                                  onClick={() => requestAction('makeAdmin', u)}
+                                >
+                                  {t('adminMakeAdmin')}
+                                </button>
+                              )}
+
+                              {isSuperadmin && u.systemRole === 'admin' && (
                                 <button
                                   type="button"
                                   className="admin-action-btn"

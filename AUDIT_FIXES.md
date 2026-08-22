@@ -73,7 +73,23 @@ choice to assert on `scanDataText` (identity-bearing fields only) in
 `formatScanDataForPdf` is therefore correct, not a bug.
 **Fix:** Enable the guardrail by DEFAULT in non-production (dev/test/CI) so leaks are
 caught during development, keep it opt-in for production, and document the caveat.
-**Status:** ✅ DONE — `geminiSanitizer.js`: added `_guardrailMode()` →
+**Status:** ✅ DONE, then SUPERSEDED — see the note below.
+
+> **Superseded (Aug 2026).** The behaviour described here — production defaulting
+> to `'off'` — is no longer what the code does, and reading only this section
+> would leave you believing production silently skips the leak check.
+> `_guardrailMode()` (`backend/services/geminiSanitizer.js`) now resolves an unset
+> `GEMINI_STRICT_GUARDRAIL` to **`'warn'` in every environment including
+> production**: the check always runs and always logs at error level, and only an
+> explicit `GEMINI_STRICT_GUARDRAIL=false` disables it. The value is also trimmed
+> and case-folded, so `TRUE` means what an operator intended instead of silently
+> falling through, and an unrecognised value warns once.
+> The sanitizer itself was also fixed around the same time: compressed IPv6
+> (`fe80::1`, `::1`), email addresses and dotless internal hostnames were passing
+> through unredacted, and `assertNoLeakage` was blind to the same shapes even in
+> `throw` mode. Covered by `backend/tests/geminiSanitizerLeakVectors.test.js`.
+
+Original status: added `_guardrailMode()` →
 `'throw'` (flag=true) / `'warn'` (unset + non-prod) / `'off'` (flag=false or prod).
 Warn mode logs without breaking reports (avoids false-positives on reference/CSP URLs).
 Left the `formatScanDataForPdf` assert on `scanDataText` (correct: full prompt embeds

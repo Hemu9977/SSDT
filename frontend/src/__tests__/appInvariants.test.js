@@ -267,6 +267,41 @@ describe('API error code mapping', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Admin role management
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('granting and revoking admin', () => {
+  const users = read('pages/Admin/AdminUsers.jsx');
+
+  it('offers both directions, not just revoke', () => {
+    // The strings existed but the grant action was never wired, so the only way
+    // to create an admin was scripts/makeAdmin.js on the server — meaning an
+    // accidental revoke needed shell access to undo.
+    expect(users).toMatch(/case 'makeAdmin':/);
+    expect(users).toMatch(/systemRole: 'admin'/);
+    expect(users).toMatch(/case 'removeAdmin':/);
+    expect(users).toMatch(/systemRole: 'user'/);
+  });
+
+  it('gates both controls on the caller being a superadmin', () => {
+    // routes/admin.js refuses either change from a plain admin
+    // (ADMIN_SUPERADMIN_REQUIRED), so showing the button would offer an action
+    // guaranteed to fail.
+    expect(users).toMatch(/const isSuperadmin = currentUser\?\.systemRole === 'superadmin';/);
+    expect(users).toMatch(/isSuperadmin && u\.systemRole === 'user'/);
+    expect(users).toMatch(/isSuperadmin && u\.systemRole === 'admin'/);
+  });
+
+  it('uses the confirmation strings that were previously dead', () => {
+    for (const key of ['adminMakeAdmin', 'adminGrantAdminTitle', 'adminGrantAdminMessage']) {
+      expect(users).toContain(key);
+      expect(en[key]).toBeDefined();
+      expect(ja[key]).toBeDefined();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CLAUDE.md: backend strings must never reach the UI
 // ─────────────────────────────────────────────────────────────────────────────
 

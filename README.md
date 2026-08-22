@@ -184,8 +184,14 @@ SSDT/
 
 ### Standard Scanning
 
-- `POST /api/vt/combined-url-scan` - Initiate combined scan (PSI + Observatory + ZAP + WebCheck + urlscan + AI) (legacy `/api/vt` prefix)
-- `GET /api/vt/combined-analysis/:id` - Poll for scan results (legacy `/api/vt` prefix)
+- `POST /api/scan/combined-url-scan` - Initiate combined scan (PSI + Observatory + ZAP + WebCheck + urlscan + AI)
+- `GET /api/scan/active-scan` - Poll for the caller's in-flight scan
+- `GET /api/scan/combined-analysis/:id` - Fetch scan results
+- `GET /api/scan/scan/:analysisId` - Load a historical scan
+  (`virustotalRoutes.js` is mounted at `/api/scan` in `server.js` — the filename
+  is legacy, the `/api/vt` prefix is not and never was a real mount.)
+- `GET|POST|PATCH|DELETE /api/admin/*` - Platform admin API (requires `systemRole`
+  of `admin` or `superadmin`; see CLAUDE.md for the bootstrap steps)
 
 ### Translation
 

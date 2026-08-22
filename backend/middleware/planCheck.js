@@ -10,7 +10,11 @@
  *  - Per-target scan quota (annual plans)
  *  - One-time / trial remaining scans
  *
- * After passing, increments usage counters (atomic via Organization.updateOne()).
+ * Does NOT increment anything. This middleware only calls checkScanQuota(),
+ * which is read-only — the atomic decrement happens later, in consumeScan()
+ * via finalizeSuccessfulScan(), when the scan actually completes.
+ * Consequence: quota is advisory at start, so two scans begun with one slot
+ * left can both pass here and both complete. See HANDOFF.md.
  * Attaches req.planUser (loaded user doc) for downstream use.
  */
 

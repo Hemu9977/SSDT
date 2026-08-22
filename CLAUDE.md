@@ -8,7 +8,10 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 ### Backend (Express, port 3001)
 - **MongoDB** with Mongoose ODM. Large scan results stored in **GridFS** (WebCheck results >10MB, ZAP detailed alerts).
 - **Authentication**: JWT tokens via `x-auth-token` header, Google OAuth, email OTP verification.
-- **AI Reports**: Gemini API (`GEMINI_MODEL` in .env, currently `gemini-3-flash`) generates security analysis reports.
+- **AI Reports**: Gemini via Vertex AI. Models come from `GEMINI_MODEL_PRO`
+  (default `gemini-2.5-pro`) and `GEMINI_MODEL_FLASH` (default `gemini-2.5-flash`)
+  — see `services/geminiService.js:13-14`. There is no `GEMINI_MODEL` variable.
+  Everything sent to Gemini passes through `services/geminiSanitizer.js` first.
 - **PDF Generation**: Bilingual (English/Japanese) vulnerability reports.
 
 ### Frontend (React 19, CRA, port 3000 dev)
@@ -32,7 +35,10 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 ## Key Components
 
 ### Normal Scan Flow (`Hero.jsx`)
-- User enters URL → `POST /api/vt/combined-analysis` → polls `/api/vt/active-scan` every 3s
+- User enters URL → `POST /api/scan/combined-url-scan` → polls `GET /api/scan/active-scan`
+  every 3s, then `GET /api/scan/combined-analysis/:id` for the result.
+  (`virustotalRoutes.js` is mounted at **`/api/scan`** — `server.js:157`. The
+  `/api/vt` prefix in older notes never existed on this codebase.)
 - Background scans (ZAP, WebCheck) run independently on the server
 - Results displayed in 26 score cards + 2 collapsible details sections (ZAP Report, WebCheck Analysis)
 - Downloads: PDF (English/Japanese), JSON export
@@ -47,8 +53,26 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 - **`WebCheckDetails.jsx`** - Renders all 29 WebCheck scan types. Props: `{ webCheckReport, theme }`. Used by both Hero.jsx and AuthenticatedScanPanel.jsx.
 - **`ZapReportEnhanced.jsx`** - ZAP vulnerability report with severity filtering. Props include `apiPrefix` (different for auth vs normal).
 
+### Admin Panel (`pages/Admin/`)
+- `AdminPanel.jsx` is the shell; tabs are `AdminOverview`, `AdminAnalytics`,
+  `AdminUsers`, `AdminOrganizations`, `AdminScans`, `AdminSystemHealth`.
+- `adminLabels.js` maps backend enums **and error codes** to translation keys;
+  `adminFormat.js` handles locale-aware number/date formatting;
+  `adminCharts.jsx` is pure CSS (no chart library).
+- `services/adminService.js` is the only place admin API calls are made.
+- `components/RequireAdmin.jsx` guards the route. It decides during render with
+  `<Navigate>` rather than in an effect, so an unauthorised visitor never mounts
+  the panel and never fires admin requests that could only 403.
+
+### Shared Frontend Utilities
+- `utils/apiErrors.js` — backend error code → translation key for the whole app.
+- `utils/authRedirect.js` — `ADMIN_ROLES`, `isSystemAdmin`, `postLoginTarget`.
+  The role list lives here once; do not inline it at call sites.
+- `components/MarketingHome.jsx` — the signed-out landing page. It replaced the
+  splash screen and absorbed the old `/about` page (which now redirects to `/`).
+
 ### Historical Scans
-- `ScanViewer.jsx` loads historical scan via `GET /api/vt/scan/:analysisId`
+- `ScanViewer.jsx` loads historical scan via `GET /api/scan/scan/:analysisId`
 - Passes data to `LandingPage → Hero` for display
 - Profile page lists past scans with 7-day retention
 
@@ -77,6 +101,12 @@ ScanResult {
 - `profile.js` - User profile, scan history
 - `translateRoutes.js` - Japanese translation via Google Translate
 - `pageSpeedRoutes.js`, `urlscanRoutes.js` - Direct API proxies
+- `admin.js` - Platform admin API (KPIs, users, organizations, scans, system
+  health, analytics + user/org mutations). Guarded by `auth` + `adminAuth`.
+- `orgRoutes.js` - Organization invites and membership (accept-invite issues a JWT)
+- `scheduleRoutes.js` - Scheduled scans
+- `notificationRoutes.js` - Notification polling (WebSocket fallback)
+- `stripeRoutes.js` - Checkout, webhooks, subscription lifecycle
 
 ## WebCheck Data
 - `getFullResults(webCheckResult)` in `webCheckService.js` handles both inline and GridFS storage
@@ -94,17 +124,55 @@ Both Hero.jsx (normal scan) and AuthenticatedScanPanel.jsx (auth scan) MUST have
 - JSON export
 - Observatory grade summary
 
+## Testing
+
+Both halves have real suites and neither needs credentials, a database, Docker,
+or a running server — they are static analysis plus handler-level execution.
+
+```bash
+cd backend  && npm test                                    # node --test
+cd frontend && CI=true npx react-scripts test --watchAll=false
+cd frontend && CI=true npx react-scripts build              # must stay warning-free
+```
+
+- `backend/tests/adminApiInvariants.test.js` — query projections, the
+  admin/superadmin decision matrix, `$regex` escaping, and a census asserting
+  every `jwt.sign` is gated and every independent `jwt.verify` checks disabled state.
+- `backend/tests/geminiSanitizer*.test.js` — redaction and over-redaction, incl.
+  compressed IPv6, emails and internal hostnames.
+- `backend/tests/passwordReset.test.js` — executes the reset/resend handlers
+  against a stubbed model layer.
+- `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
+  import resolution, locale parity, and that no backend string reaches the UI.
+
+The build is clean at `CI=true`; `.github/workflows/frontend-deploy.yml` still
+sets `CI: false`, which can now be removed. **That workflow auto-deploys to S3 +
+CloudFront on any push to `main` touching `frontend/**`.**
+
 ## Current Branch: `main`
-Recent work:
-- Extracted shared WebCheckDetails.jsx component from duplicated code in Hero.jsx and AuthenticatedScanPanel.jsx
-- Added stale scan watchdog (24h ZAP, 6h WebCheck) that fails entire scan on timeout
-- Backend GridFS cache to prevent redundant downloads
-- Frontend AbortController to prevent React StrictMode double-fetches
-- Fixed: Quality Metrics raw JSON display, trace route all-asterisk rows, ranking visualization, font consistency
-- Fixed GridFS bucket mismatch for auth scans (pdfService, virustotalRoutes, historical loader)
-- Increased GridFS timeout to 1 hour
-- Removed recharts, replaced with pure CSS ranking visualization
-- Synced AJAX spider behavior (no stuck detection) between normal and auth scan
+
+Recent work (this batch merged three feature branches and reviewed them; see
+`HANDOFF.md` for the full account and the open items):
+- Merged `admin-dashboard`, `gemini-masking`, and `landing-page`.
+- Admin dashboard made reachable and hardened: a render-time route guard,
+  superadmin hierarchy, `$regex` escaping, and per-request `isDisabled`
+  enforcement with a 30s cache that admin mutations invalidate directly.
+- Session revocation: `User.tokensValidFrom` is stamped by a password reset and
+  checked in `middleware/auth.js`, so a reset actually ends older sessions.
+- Password reset and OTP resend implemented — they were previously stubs that
+  returned success while sending no email and changing no password.
+- Gemini sanitizer: compressed IPv6, emails and dotless internal hostnames were
+  leaking to the LLM; the same pattern also over-redacted HTTP `Date` headers.
+- Every backend error response now carries a stable `code`, mapped to a
+  translated string (see the UI Language Policy above).
+- The marketing landing page replaced the splash screen; `Dashboard.jsx`,
+  `sidebar.jsx`, `SplashScreen.jsx` and `About.jsx` were deleted. `/about` and
+  any unmatched path now redirect to `/`.
+
+Earlier work still worth knowing:
+- Shared `WebCheckDetails.jsx` extracted from Hero/AuthenticatedScanPanel.
+- Stale scan watchdog (24h ZAP, 6h WebCheck); GridFS cache and 1h timeout.
+- recharts removed in favour of pure CSS visualisations.
 
 ## Service Plan - Implementation Goals
 
@@ -157,14 +225,28 @@ see `planchanges.md` for the planned rework.
 - [x] **TASK 5**: Trial one-time scan mode — `billingCycle: 'onetime'` + `Organization.oneTimeRemainingScans`
 - [x] **Stripe billing** (not originally listed) — `backend/routes/stripeRoutes.js`, `models/StripeEvent.js` for webhook idempotency
 - [ ] **TASK 6**: Usage tracking dashboard — partially present in the Profile page; see `planchanges.md`
-- [ ] **TASK 7**: Admin panel for managing company accounts and plans
+- [x] **TASK 7**: Admin panel — `backend/routes/admin.js` (12 endpoints),
+  `frontend/src/pages/Admin/*`, guarded by `components/RequireAdmin.jsx` at the
+  `/admin` route. Platform role lives on `User.systemRole`
+  (`user` | `admin` | `superadmin`), separate from the org-level `role`.
+  **Only a `superadmin` may grant or revoke an admin role, or act on an account
+  that already holds one** (`middleware/adminAuth.js` admits both, so the
+  hierarchy is enforced in `routes/admin.js`).
+  Bootstrap: `cd backend && node scripts/backfillSystemRole.js`, then
+  `node scripts/makeAdmin.js <email> superadmin` — the second argument is
+  load-bearing; anything but `superadmin` yields a plain `admin`.
 
 ### Quota Enforcement Notes
 - Quota is checked at scan **start** (`planCheck.js`) but charged only at successful
   **completion** (`finalizeSuccessfulScan`, guarded by `ScanResult.quotaConsumed`).
-- Monthly counters reset on a **UTC** calendar-month boundary (`planService.js`).
-  `backend/routes/profile.js` currently computes its month boundary in *server-local* time —
-  these disagree; see `planchanges.md`.
+- Monthly counters reset on a **UTC** calendar-month boundary (`planService.js:93-96`).
+  `backend/routes/profile.js:35` also uses `Date.UTC(...)`, so the two agree. (An
+  earlier note here claimed they disagreed; the code was fixed without updating
+  the doc.) `profile.js`'s `scansThisMonth` is cosmetic anyway — bounded by the
+  7-day TTL — while `org.scansUsed` is the authoritative counter.
+- **Known gap:** `checkScanQuota` reserves nothing at scan start; the atomic
+  decrement happens only at completion. Two scans started with one slot left can
+  both pass and both complete. See `HANDOFF.md` for this and related billing gaps.
 - `ScanResult` documents carry a **7-day TTL**, so they cannot be used to compute monthly
   usage. `Organization.scansUsed` is authoritative.
 
@@ -185,6 +267,11 @@ see `planchanges.md` for the planned rework.
   learn that OWASP ZAP, WebCheck, urlscan.io, Mozilla Observatory, PageSpeed, or Gemini are
   used. Score cards and progress text use neutral wording; scan progress is reported as
   "Step N of 6" via `frontend/src/utils/scanStatus.js`.
+- **Two mapping tables implement the rule below** — every backend response carries a
+  stable `code`, and these are the only places a code becomes user-facing text:
+  `frontend/src/utils/apiErrors.js` (app-wide) and
+  `frontend/src/pages/Admin/adminLabels.js` (admin API). Adding a backend `code`
+  means adding a row to one of them plus keys in **both** `en.js` and `ja.js`.
 - **Never render a backend-supplied `message` or `error` string in the UI.** Those are English-only,
   bypass i18n, and name the scan engines (e.g. `'ZAP scan timed out'`). They are for server logs.
   Derive user-facing status from structured fields and resolve it through `t()`.
