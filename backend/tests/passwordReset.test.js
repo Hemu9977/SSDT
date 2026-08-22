@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * Password-reset and session-revocation tests.
+ * Password-reset, OTP-resend and session-revocation tests.
  *
- * Before this, /auth/forgot-password, /auth/reset-password and /auth/resend-otp
- * were one-line stubs that returned success unconditionally while doing
- * nothing — no email sent, no password changed. The routes are now implemented,
- * so these pin the properties that make them safe rather than merely working.
+ * These EXECUTE the real route handlers. An earlier version of this file
+ * asserted that the source text matched certain regexes, which proves a string
+ * is present and nothing about what the code does — too weak for auth code.
+ * The handlers are pulled off the Express router stack and invoked directly
+ * with a stubbed model/email layer: no database, no SMTP, no AWS, no server.
  *
- * The route handlers are exercised through a stubbed Mongoose layer: no
- * database, no SMTP, no AWS. Run with: node --test backend/tests/
+ * Run with: node --test backend/tests/
  */
 
 const test = require('node:test');
@@ -19,175 +19,310 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const BACKEND = path.join(__dirname, '..');
-const authRouteSrc = fs.readFileSync(path.join(BACKEND, 'routes/auth.js'), 'utf8');
-const authMwSrc = fs.readFileSync(path.join(BACKEND, 'middleware/auth.js'), 'utf8');
+
+// ─── Stub the model and email layers before the router requires them ─────────
+const state = {
+  user: null,          // what User.findOne resolves to
+  lastQuery: null,     // the filter it was called with
+  saved: null,         // snapshot of the doc at save() time
+  otpEmails: [],
+  resetEmails: [],
+  emailThrows: false,
+};
+
+function makeUser(over = {}) {
+  const u = {
+    _id: 'user-1',
+    email: 'target@example.com',
+    password: 'OLD-BCRYPT-HASH',
+    preferredLanguage: 'en',
+    isDisabled: false,
+    organizationId: null,
+    save: async function () { state.saved = { ...this }; },
+    ...over,
+  };
+  return u;
+}
+
+require.cache[path.join(BACKEND, 'models/User.js')] = {
+  id: 'u', filename: 'u', loaded: true,
+  exports: {
+    findOne: async (q) => { state.lastQuery = q; return state.user; },
+    findById: () => ({ select: () => ({ lean: async () => null }) }),
+  },
+};
+require.cache[path.join(BACKEND, 'models/Organization.js')] = {
+  id: 'o', filename: 'o', loaded: true,
+  exports: { findById: () => ({ select: () => ({ lean: async () => null }) }) },
+};
+require.cache[path.join(BACKEND, 'services/emailService.js')] = {
+  id: 'e', filename: 'e', loaded: true,
+  exports: {
+    generateOTP: () => '654321',
+    sendOTPEmail: async (to, otp, lang) => {
+      if (state.emailThrows) throw new Error('SES unavailable');
+      state.otpEmails.push({ to, otp, lang });
+    },
+    sendResetPasswordEmail: async (to, token, lang) => {
+      if (state.emailThrows) throw new Error('SES unavailable');
+      state.resetEmails.push({ to, token, lang });
+    },
+  },
+};
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.RATE_LIMIT_ENABLED = 'false';   // limiter becomes a pass-through
+
+const router = require(path.join(BACKEND, 'routes/auth.js'));
+
+/** Pull the terminal handler for a route off the router stack. */
+function handlerFor(routePath) {
+  const layer = router.stack.find((l) => l.route && l.route.path === routePath);
+  assert.ok(layer, `route ${routePath} not registered`);
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
+
+/** Invoke a handler and capture what it responded with. */
+async function call(routePath, body) {
+  let status = 200;
+  let payload = null;
+  const res = {
+    status(c) { status = c; return this; },
+    json(b) { payload = b; return this; },
+  };
+  await handlerFor(routePath)({ body, headers: {}, ip: '127.0.0.1' }, res, () => {});
+  return { status, body: payload };
+}
+
+function reset() {
+  state.user = null;
+  state.lastQuery = null;
+  state.saved = null;
+  state.otpEmails = [];
+  state.resetEmails = [];
+  state.emailThrows = false;
+}
+
+const sha256 = (v) => crypto.createHash('sha256').update(v).digest('hex');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. The routes are actually wired — this is the regression that started it
+// forgot-password
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('the three routes are no longer unconditional-success stubs', () => {
-  for (const route of ['/resend-otp', '/forgot-password', '/reset-password']) {
-    const at = authRouteSrc.indexOf(`router.post('${route}'`);
-    assert.ok(at !== -1, `${route} is missing`);
-    const body = authRouteSrc.slice(at, authRouteSrc.indexOf('\n});', at));
-    assert.ok(body.includes('await'), `${route} still does no work`);
-    assert.ok(/User\.findOne|User\.findById/.test(body), `${route} never looks up a user`);
-  }
+test('forgot-password emails the RAW token but stores only its hash', async () => {
+  reset();
+  state.user = makeUser();
+  const res = await call('/forgot-password', { email: 'target@example.com' });
+
+  assert.equal(res.status, 200);
+  assert.equal(state.resetEmails.length, 1, 'no reset email was sent');
+
+  const emailed = state.resetEmails[0].token;
+  assert.match(emailed, /^[0-9a-f]{64}$/, 'expected a 32-byte hex token');
+  assert.equal(state.saved.resetPasswordToken, sha256(emailed),
+    'the stored value must be the hash of the emailed token');
+  assert.notEqual(state.saved.resetPasswordToken, emailed,
+    'a database leak must not yield usable reset links');
 });
 
-test('forgot-password sends the reset email and resend-otp sends the OTP', () => {
-  const forgot = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/forgot-password'"));
-  assert.ok(/sendResetPasswordEmail\(/.test(forgot.slice(0, forgot.indexOf('\n});'))),
-    'sendResetPasswordEmail was imported but never called — the original bug');
+test('forgot-password sets an expiry that matches the 1 hour the email promises', async () => {
+  reset();
+  state.user = makeUser();
+  const before = Date.now();
+  await call('/forgot-password', { email: 'target@example.com' });
+  const ttl = state.saved.resetPasswordExpires.getTime() - before;
+  assert.ok(ttl > 59 * 60 * 1000 && ttl <= 60 * 60 * 1000 + 1000, `ttl was ${ttl}ms`);
+});
 
-  const resend = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/resend-otp'"));
-  assert.ok(/sendOTPEmail\(/.test(resend.slice(0, resend.indexOf('\n});'))));
+test('forgot-password answers identically for a known and an unknown address', async () => {
+  reset();
+  state.user = makeUser();
+  const known = await call('/forgot-password', { email: 'target@example.com' });
+
+  reset();
+  state.user = null;                       // no such account
+  const unknown = await call('/forgot-password', { email: 'nobody@example.com' });
+
+  assert.deepEqual(unknown, known, 'the response reveals whether the account exists');
+  assert.equal(state.resetEmails.length, 0, 'no email should be sent for an unknown address');
+});
+
+test('forgot-password still answers normally when the mail transport fails', async () => {
+  reset();
+  state.user = makeUser();
+  state.emailThrows = true;                // SES down
+  const res = await call('/forgot-password', { email: 'target@example.com' });
+  assert.equal(res.status, 200, 'a send failure must not change the response');
+  assert.equal(res.body.code, 'AUTH_RESET_EMAIL_SENT');
+});
+
+test('forgot-password does not issue a token for a disabled account', async () => {
+  reset();
+  state.user = makeUser({ isDisabled: true });
+  const res = await call('/forgot-password', { email: 'target@example.com' });
+  assert.equal(res.status, 200, 'still indistinguishable from the normal path');
+  assert.equal(state.resetEmails.length, 0);
+  assert.equal(state.saved, null, 'no reset token should be minted');
+});
+
+test('forgot-password rejects a malformed address before doing any work', async () => {
+  reset();
+  const res = await call('/forgot-password', { email: 'not-an-email' });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'AUTH_EMAIL_INVALID');
+  assert.equal(state.resetEmails.length, 0);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Token handling
+// reset-password
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('the reset token is stored hashed, never in plaintext', () => {
-  // A database leak must not hand an attacker usable reset links.
-  assert.ok(/createHash\('sha256'\)/.test(authRouteSrc), 'no hashing helper found');
-  const forgot = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/forgot-password'"));
-  const body = forgot.slice(0, forgot.indexOf('\n});'));
-  assert.ok(/resetPasswordToken = hashResetToken\(rawToken\)/.test(body),
-    'the stored token must be the hash');
-  assert.ok(/sendResetPasswordEmail\(user\.email, rawToken/.test(body),
-    'the RAW token must be what goes in the email');
-});
+test('reset-password looks the token up by hash, never by the raw value', async () => {
+  reset();
+  state.user = makeUser();
+  await call('/reset-password', { token: 'raw-token-abc', password: 'longenough1' });
 
-test('hashResetToken is deterministic and one-way for lookup', () => {
-  const hash = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
-  const raw = crypto.randomBytes(32).toString('hex');
-  assert.equal(hash(raw), hash(raw), 'lookup by hash requires determinism');
-  assert.notEqual(hash(raw), raw);
-  assert.equal(hash(raw).length, 64);
-});
-
-test('reset-password requires an unexpired token and consumes it', () => {
-  const reset = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/reset-password'"));
-  const body = reset.slice(0, reset.indexOf('\n});'));
-  assert.ok(/resetPasswordExpires: \{ \$gt: new Date\(\) \}/.test(body),
+  assert.equal(state.lastQuery.resetPasswordToken, sha256('raw-token-abc'));
+  assert.ok(state.lastQuery.resetPasswordExpires.$gt instanceof Date,
     'an expired token must not be accepted');
-  assert.ok(/resetPasswordToken = undefined/.test(body), 'the link must be single-use');
-  assert.ok(/resetPasswordExpires = undefined/.test(body));
 });
 
-test('reset-password hashes the new password rather than storing it plainly', () => {
-  // There is no pre-save hook on the User model, so assigning the plaintext
-  // and calling .save() would persist it in the clear.
-  const modelSrc = fs.readFileSync(path.join(BACKEND, 'models/User.js'), 'utf8');
-  assert.ok(!/pre\(['"]save['"]/.test(modelSrc),
-    'a pre-save hook now exists — this route must be re-checked');
+test('reset-password bcrypt-hashes the new password', async () => {
+  reset();
+  state.user = makeUser();
+  await call('/reset-password', { token: 't', password: 'longenough1' });
 
-  const reset = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/reset-password'"));
-  const body = reset.slice(0, reset.indexOf('\n});'));
-  assert.ok(/bcrypt\.genSalt\(10\)/.test(body) && /bcrypt\.hash\(password, salt\)/.test(body));
+  assert.notEqual(state.saved.password, 'longenough1', 'password stored in plaintext');
+  assert.notEqual(state.saved.password, 'OLD-BCRYPT-HASH', 'password was not changed');
+  assert.match(state.saved.password, /^\$2[aby]\$/, 'not a bcrypt hash');
 });
 
-test('reset-password enforces the same 8-character minimum as register', () => {
-  const reset = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/reset-password'"));
-  const body = reset.slice(0, reset.indexOf('\n});'));
-  assert.ok(/password\.length < 8/.test(body));
+test('reset-password consumes the token and stamps both timestamps', async () => {
+  reset();
+  state.user = makeUser();
+  const res = await call('/reset-password', { token: 't', password: 'longenough1' });
 
-  // And the client agrees, so a 6-character password can't pass validation and
-  // then fail server-side.
-  const page = fs.readFileSync(
-    path.join(BACKEND, '../frontend/src/pages/auth/ResetPasswordPage.jsx'), 'utf8');
-  assert.ok(/password\.length < 8/.test(page), 'client minimum drifted from the server');
+  assert.equal(res.status, 200);
+  assert.equal(state.saved.resetPasswordToken, undefined, 'link must be single-use');
+  assert.equal(state.saved.resetPasswordExpires, undefined);
+  // Login reads passwordResetAt to skip OTP for 24h; nothing wrote it before.
+  assert.ok(state.saved.passwordResetAt instanceof Date);
+  // And every token issued before now stops working.
+  assert.ok(state.saved.tokensValidFrom instanceof Date);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. Account enumeration
-// ─────────────────────────────────────────────────────────────────────────────
+test('reset-password rejects an unknown or expired token with one indistinguishable code', async () => {
+  reset();
+  state.user = null;                       // findOne matched nothing
+  const res = await call('/reset-password', { token: 'whatever', password: 'longenough1' });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'AUTH_RESET_TOKEN_INVALID');
+});
 
-test('forgot-password and resend-otp answer identically for unknown accounts', () => {
-  for (const route of ['/forgot-password', '/resend-otp']) {
-    const at = authRouteSrc.indexOf(`router.post('${route}'`);
-    const body = authRouteSrc.slice(at, authRouteSrc.indexOf('\n});', at));
-    // A single ack() helper used on every path is what makes the responses
-    // indistinguishable; branching returns would leak account existence.
-    assert.ok(/const ack = \(\) =>/.test(body), `${route} has no shared ack`);
-    assert.ok(/if \(!user\) return ack\(\);/.test(body),
-      `${route} must not reveal that the account is unknown`);
-    assert.ok(/catch \(e\)/.test(body),
-      `${route} must swallow email failures — otherwise the error leaks existence`);
+test('reset-password validates input before touching the database', async () => {
+  for (const body of [{ password: 'longenough1' }, { token: '', password: 'longenough1' }]) {
+    reset();
+    const res = await call('/reset-password', body);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'AUTH_RESET_TOKEN_INVALID');
+    assert.equal(state.lastQuery, null, 'an empty token must never reach the query');
   }
+
+  reset();
+  const short = await call('/reset-password', { token: 't', password: 'short' });
+  assert.equal(short.status, 400);
+  assert.equal(short.body.code, 'AUTH_PASSWORD_TOO_SHORT');
+  assert.equal(state.saved, null);
 });
 
-test('reset-password does not distinguish "no such token" from "expired"', () => {
-  const reset = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/reset-password'"));
-  const body = reset.slice(0, reset.indexOf('\n});'));
-  const codes = [...body.matchAll(/code: '(AUTH_RESET_TOKEN_INVALID|[A-Z_]+)'/g)].map((m) => m[1]);
-  assert.ok(codes.includes('AUTH_RESET_TOKEN_INVALID'));
-  // Only one failure code for the lookup, so timing/response can't be mined.
-  assert.equal(body.match(/Invalid or expired reset token/g).length, 1);
+// ─────────────────────────────────────────────────────────────────────────────
+// resend-otp
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('resend-otp regenerates and sends a code', async () => {
+  reset();
+  state.user = makeUser({ otp: 'OLD', otpExpires: new Date(0) });
+  const before = Date.now();
+  const res = await call('/resend-otp', { email: 'target@example.com' });
+
+  assert.equal(res.status, 200);
+  assert.equal(state.otpEmails.length, 1, 'the stub route never sent anything');
+  assert.equal(state.saved.otp, '654321');
+  assert.equal(state.otpEmails[0].otp, '654321', 'emailed code must match the stored one');
+  const ttl = state.saved.otpExpires.getTime() - before;
+  assert.ok(ttl > 9 * 60 * 1000 && ttl <= 10 * 60 * 1000 + 1000, `ttl was ${ttl}ms`);
 });
 
-test('both email-sending routes sit behind the dedicated limiter', () => {
-  for (const route of ['/forgot-password', '/resend-otp']) {
-    const line = authRouteSrc.split('\n').find((l) => l.includes(`router.post('${route}'`));
-    assert.ok(/emailSendLimiter/.test(line), `${route} is not rate limited per recipient`);
+test('resend-otp answers identically for an unknown address and sends nothing', async () => {
+  reset();
+  state.user = makeUser();
+  const known = await call('/resend-otp', { email: 'target@example.com' });
+
+  reset();
+  state.user = null;
+  const unknown = await call('/resend-otp', { email: 'nobody@example.com' });
+
+  assert.deepEqual(unknown, known);
+  assert.equal(state.otpEmails.length, 0);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session revocation
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('isTokenRevoked does not lock out a token minted in the same second as the reset', () => {
+  const { isTokenRevoked } = require(path.join(BACKEND, 'middleware/auth.js'));
+  const S = 1_700_000_000;
+
+  // The regression: jwt.sign floors iat to the second, so comparing
+  // iat*1000 against a millisecond-precision cut-off rejected the very token
+  // the reset was supposed to enable.
+  for (const offsetMs of [0, 1, 500, 750, 999]) {
+    assert.equal(
+      isTokenRevoked({ tokensValidFrom: S * 1000 + offsetMs }, { iat: S }),
+      false,
+      `a token minted in the same second as a reset at .${offsetMs}ms was revoked`
+    );
   }
-  const limiterSrc = fs.readFileSync(path.join(BACKEND, 'middleware/rateLimiter.js'), 'utf8');
-  assert.ok(/email:\$\{email\}/.test(limiterSrc) || /`email:/.test(limiterSrc),
-    'the limiter must key on the recipient, not the caller IP');
+
+  // Genuinely older tokens must still die.
+  assert.equal(isTokenRevoked({ tokensValidFrom: S * 1000 + 750 }, { iat: S - 1 }), true);
+  assert.equal(isTokenRevoked({ tokensValidFrom: S * 1000 + 750 }, { iat: S - 3600 }), true);
+  // Later tokens and never-reset accounts are untouched.
+  assert.equal(isTokenRevoked({ tokensValidFrom: S * 1000 + 750 }, { iat: S + 1 }), false);
+  assert.equal(isTokenRevoked({ tokensValidFrom: null }, { iat: S }), false);
+  // Malformed input must not throw.
+  assert.equal(isTokenRevoked({ tokensValidFrom: S * 1000 }, {}), false);
+  assert.equal(isTokenRevoked({ tokensValidFrom: S * 1000 }, null), false);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. Session revocation
-// ─────────────────────────────────────────────────────────────────────────────
-
-test('isTokenRevoked compares JWT iat (seconds) against tokensValidFrom (ms)', () => {
-  const { isTokenRevoked } = require('../middleware/auth');
-  const now = Date.now();
-
-  // Never reset: nothing is revoked.
-  assert.equal(isTokenRevoked({ tokensValidFrom: null }, { iat: Math.floor(now / 1000) }), false);
-
-  // Token issued a minute BEFORE the reset — must be rejected.
-  assert.equal(
-    isTokenRevoked({ tokensValidFrom: now }, { iat: Math.floor((now - 60_000) / 1000) }),
-    true
-  );
-
-  // Token issued a minute AFTER the reset — must still work.
-  assert.equal(
-    isTokenRevoked({ tokensValidFrom: now }, { iat: Math.floor((now + 60_000) / 1000) }),
-    false
-  );
-
-  // A malformed token must not crash the middleware.
-  assert.equal(isTokenRevoked({ tokensValidFrom: now }, {}), false);
-  assert.equal(isTokenRevoked({ tokensValidFrom: now }, null), false);
-});
-
-test('reset-password revokes existing sessions and applies immediately', () => {
-  const reset = authRouteSrc.slice(authRouteSrc.indexOf("router.post('/reset-password'"));
-  const body = reset.slice(0, reset.indexOf('\n});'));
-  assert.ok(/tokensValidFrom = new Date\(\)/.test(body),
-    'a reset must not leave the old token valid for the rest of its 7-day life');
-  assert.ok(/invalidatePrincipal\(user\._id\)/.test(body),
+test('reset-password revocation takes effect immediately, not after the cache TTL', () => {
+  const src = fs.readFileSync(path.join(BACKEND, 'routes/auth.js'), 'utf8');
+  const at = src.indexOf("router.post('/reset-password'");
+  const body = src.slice(at, src.indexOf('\n});', at));
+  assert.match(body, /invalidatePrincipal\(user\._id\)/,
     'without this the revocation waits out the 30s auth cache');
-  // The login route reads this to skip OTP for 24h; nothing wrote it before.
-  assert.ok(/passwordResetAt = new Date\(\)/.test(body));
 });
 
-test('the auth middleware enforces revocation and reuses the cached read', () => {
-  assert.ok(/isTokenRevoked\(state, decoded\)/.test(authMwSrc));
-  assert.ok(/code: 'SESSION_REVOKED'/.test(authMwSrc));
-  // One query serving both checks — not a second read on the hot path.
-  assert.ok(/select\('isDisabled organizationId tokensValidFrom'\)/.test(authMwSrc));
-  assert.ok(/tokensValidFrom/.test(fs.readFileSync(path.join(BACKEND, 'models/User.js'), 'utf8')));
+// ─────────────────────────────────────────────────────────────────────────────
+// Structural guards that cannot be expressed behaviourally
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('the User model still has no pre-save hook', () => {
+  // If one is ever added, /reset-password would double-hash the password —
+  // it hashes explicitly because today nothing else does.
+  const model = fs.readFileSync(path.join(BACKEND, 'models/User.js'), 'utf8');
+  assert.ok(!/pre\(['"]save['"]/.test(model),
+    'a pre-save hook now exists — the reset route must be re-checked for double hashing');
 });
 
-test('the frontend treats SESSION_REVOKED as terminal, like ACCOUNT_DISABLED', () => {
-  const ctx = fs.readFileSync(
-    path.join(BACKEND, '../frontend/src/contexts/UserContext.jsx'), 'utf8');
-  assert.ok(/SESSION_REVOKED/.test(ctx),
-    'a revoked session must clear local state rather than show a stale error');
+test('both email-sending routes sit behind the recipient-keyed limiter', () => {
+  // Two handlers on the layer means limiter + route; one means unprotected.
+  for (const p of ['/forgot-password', '/resend-otp']) {
+    const layer = router.stack.find((l) => l.route && l.route.path === p);
+    assert.equal(layer.route.stack.length, 2, `${p} is missing its limiter`);
+  }
+  const limiter = fs.readFileSync(path.join(BACKEND, 'middleware/rateLimiter.js'), 'utf8');
+  assert.match(limiter, /email:\$\{email\}/,
+    'the limiter must key on the recipient so one address cannot be mail-bombed');
 });

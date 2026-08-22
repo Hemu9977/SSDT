@@ -87,7 +87,7 @@ const ResetPasswordPage = () => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  minLength="6"
+                  minLength="8"
                 />
                 <EyeIcon isVisible={showPassword} onClick={() => setShowPassword(!showPassword)} />
               </div>
@@ -99,7 +99,7 @@ const ResetPasswordPage = () => {
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
-                  minLength="6"
+                  minLength="8"
                 />
                 <EyeIcon isVisible={showConfirmPassword} onClick={() => setShowConfirmPassword(!showConfirmPassword)} />
               </div>

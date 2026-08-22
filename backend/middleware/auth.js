@@ -59,11 +59,22 @@ async function isPrincipalBlocked(userId) {
 
 /**
  * True when this token predates a password reset and must no longer be honoured.
- * `iat` is in seconds; tokensValidFrom is in milliseconds.
+ *
+ * Both sides are compared at SECOND granularity, which is the only precision a
+ * JWT actually carries: `jwt.sign` stamps `iat` as Math.floor(Date.now()/1000),
+ * discarding milliseconds, while `tokensValidFrom` is a full Date.
+ *
+ * Comparing `iat * 1000 < tokensValidFrom` therefore locks out the very token
+ * the reset was meant to enable. A reset at 12:00:00.750 stores ...750, and a
+ * login in that same second mints iat=12:00:00 → 000 < 750 → the brand-new
+ * token is rejected as revoked. Flooring the cut-off to its second closes that
+ * window. The cost is that a token minted earlier in the same second as the
+ * reset survives — at most a sub-second gap, and far preferable to locking a
+ * user out of the account they just recovered.
  */
 function isTokenRevoked(state, decoded) {
   if (!state.tokensValidFrom || !decoded || !decoded.iat) return false;
-  return decoded.iat * 1000 < state.tokensValidFrom;
+  return decoded.iat < Math.floor(state.tokensValidFrom / 1000);
 }
 
 /** Drop one user's cached state so an admin action applies on the next request. */
