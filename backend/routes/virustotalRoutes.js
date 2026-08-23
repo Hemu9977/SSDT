@@ -10,6 +10,7 @@ const User = require('../models/User');
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
+const { claimScanSlot } = require('../services/planService');
 const { combinedScanLimiter, scanLimiter } = require('../middleware/rateLimiter');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { lighthouseScores } = require('../utils/scoreFormat');
@@ -495,8 +496,7 @@ router.post('/combined-url-scan', auth, planCheck, scanLimiter, combinedScanLimi
     const { url } = req.body;
 
     if (!url || typeof url !== 'string') {
-      // Scan never starts — give the gated quota slot back.
-
+      // Nothing to give back: planCheck only reads quota, it never reserves.
       return res.status(400).json({ error: 'URL is required' });
     }
 
@@ -516,9 +516,27 @@ router.post('/combined-url-scan', auth, planCheck, scanLimiter, combinedScanLimi
       target: url,
       analysisId,
       status: 'queued',
-      userId: req.user.id
+      userId: req.user.id,
+      organizationId: req.organization?._id || null
     }).save();
     console.log(`[Billing] Scan started: ${analysisId}`);
+
+    // planCheck is advisory — it reserves nothing, so concurrent starts can all pass
+    // it. This is the authoritative check, and it has to run after the record exists
+    // because the record's _id is what orders concurrent starters.
+    if (req.organization && !(await claimScanSlot(req.organization._id, analysisId))) {
+      await ScanResult.updateOne(
+        { analysisId },
+        { $set: { status: 'cancelled', updatedAt: new Date() } }
+      );
+      return res.status(403).json({
+        success: false,
+        code: 'PLAN_LIMIT_EXCEEDED',
+        error: 'PLAN_LIMIT_EXCEEDED',
+        message: 'Scan limit reached or subscription inactive. Please upgrade your plan.',
+        limitType: 'concurrent_scans_exceed_remaining_quota'
+      });
+    }
 
     // Enqueue the scan job — BullMQ worker picks it up and runs all scanners
     await addScanJob(analysisId, url, req.user.id);
@@ -532,7 +550,8 @@ router.post('/combined-url-scan', auth, planCheck, scanLimiter, combinedScanLimi
     });
   } catch (err) {
     console.error('❌ Combined URL scan error:', err);
-    // Scan failed to initiate — refund the gated quota slot.
+    // Nothing to refund: quota is charged at successful completion, and the
+    // ScanResult created above leaves in-flight state that the watchdog clears.
 
     // Graceful error handling for duplicates if race condition occurs
     if (err.code === 11000) {

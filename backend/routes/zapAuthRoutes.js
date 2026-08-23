@@ -10,6 +10,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
+const { claimScanSlot } = require('../services/planService');
 const { v4: uuidv4 } = require('uuid');
 const { detectLoginFields } = require('../services/loginDetectionService');
 const { testLogin } = require('../services/loginTestService');
@@ -22,19 +23,16 @@ const {
 const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
-const { handleScanComplete } = require('../services/notificationService');
 
 // Additional scanner services (same as normal scan)
 const { getPageSpeedReport } = require('../services/pagespeedService');
 const { scanHost } = require('../services/observatoryService');
 const { runUrlScan } = require('../services/urlscanService');
 const { startAsyncWebCheckScan, getFullResults } = require('../services/webCheckService');
-const { refineReport } = require('../services/geminiService');
 const User = require('../models/User');
-const { getSanitizedAlerts, getSanitizedZapData, getSanitizedZapReport } = require('../utils/vulnFilter');
+const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { lighthouseScores } = require('../utils/scoreFormat');
 const { scanLimiter } = require('../middleware/rateLimiter');
-const { sanitizeScanForLLM } = require('../services/geminiSanitizer');
 
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
@@ -50,9 +48,6 @@ async function resolveVulnAccessLevel(userId) {
   } catch (_) { /* non-fatal */ }
   return 'critical-high';
 }
-
-// In-memory lock to prevent parallel Gemini AI report calls for the same scan
-const geminiInProgress = new Set();
 
 // ============================================================================
 // IN-MEMORY AUTH SESSION STORE
@@ -258,6 +253,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
           analysisId: scanId,
           status: 'queued',
           userId: req.user.id,
+          organizationId: req.organization?._id || null,
           triggerSource: triggerSource || 'manual',
           languagePreference: lang || 'en',
           authScanResult: { status: 'provisioning', phase: 'provisioning', progress: 0 },
@@ -268,6 +264,23 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
       { upsert: true }
     );
     console.log(`[Billing] Scan started: ${scanId}`);
+
+    // planCheck is advisory — it reserves nothing, so concurrent starts can all pass
+    // it. Authoritative check, run after the record exists because its _id is what
+    // orders concurrent starters. See planService.claimScanSlot.
+    if (req.organization && !(await claimScanSlot(req.organization._id, scanId))) {
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { status: 'cancelled', updatedAt: new Date() } }
+      );
+      return res.status(403).json({
+        success: false,
+        code: 'PLAN_LIMIT_EXCEEDED',
+        error: 'PLAN_LIMIT_EXCEEDED',
+        message: 'Scan limit reached or subscription inactive. Please upgrade your plan.',
+        limitType: 'concurrent_scans_exceed_remaining_quota'
+      });
+    }
 
     // Delete session after use (one-time use)
     authSessions.delete(tempSessionId);
@@ -503,9 +516,9 @@ router.get('/status/:scanId', auth, async (req, res) => {
     // never assessed. This mirrors geminiCompletionService for the normal scan
     // flow, which CLAUDE.md requires to stay in parity.
     //
-    // A failed WebCheck is NOT fatal: its report section renders N/A. Failing the
-    // whole scan on WebCheck also billed the customer, because a successful auth
-    // ZAP has already charged the quota by this point (zapAuthService).
+    // A failed WebCheck is NOT fatal: its report section renders N/A. Nothing is
+    // billed at this point either way — quota is charged only when
+    // geminiCompletionService reaches a completed report.
     if (authZapStatus === 'failed' && !scan.refinedReport) {
       console.error(`[ZAP-AUTH] ❌ Vulnerability scan failed: ${scan.authScanResult?.error || 'unknown error'}. Failing entire scan.`);
       await ScanResult.updateOne(
@@ -537,90 +550,28 @@ router.get('/status/:scanId', auth, async (req, res) => {
       }
     }
 
-    if (authZapDone && webCheckDone && !scan.refinedReport && scan.pagespeedResult && scan.observatoryResult) {
-      if (geminiInProgress.has(scanId)) {
-        console.log('[ZAP-AUTH] Gemini report already being generated for this scan, skipping...');
-      } else {
-        geminiInProgress.add(scanId);
-        console.log('[ZAP-AUTH] All scans finished. Generating Gemini AI report...');
+    // Hand completion to geminiCompletionService — the SINGLE place that finishes a
+    // scan and charges its quota, for both the normal and the authenticated flow.
+    //
+    // This route used to generate the report inline. That duplicated ~80 lines of
+    // geminiCompletionService, and — because it wrote `refinedReport` + `completed`
+    // without calling finalizeSuccessfulScan — whichever path won the race decided
+    // whether the customer was billed at all. Authenticated scans finished here were
+    // delivered free.
+    //
+    // Fire-and-forget: generation can take minutes, and a status poll must return
+    // immediately. The client polls every 3s and picks the report up on a later tick.
+    if (authZapDone && webCheckDone && !scan.refinedReport) {
+      setImmediate(() => {
         try {
-          const freshScan = await ScanResult.findOne({ analysisId: scanId, userId: req.user.id });
-
-          // Sanitize freshScan before any data reaches Gemini — strips target URL,
-          // domain, IPs, DNS records from the object graph.
-          // Original freshScan is NOT mutated; DB writes still use freshScan.
-          const llmSafeScan = sanitizeScanForLLM(freshScan);
-
-          const psiReport = llmSafeScan.pagespeedResult?.error ? null : llmSafeScan.pagespeedResult;
-          const observatoryReport = llmSafeScan.observatoryResult?.error ? null : llmSafeScan.observatoryResult;
-          const urlscanReport = llmSafeScan.urlscanResult?.error ? null : llmSafeScan.urlscanResult;
-
-          // Use auth ZAP data for the report — apply plan filter BEFORE sending to AI
-          const authZapCompleted = freshScan.authScanResult?.status === 'completed';
-          const aiAccessLevel = await resolveVulnAccessLevel(req.user.id);
-          const zapReport = authZapCompleted
-            ? getSanitizedZapReport(llmSafeScan.authScanResult, aiAccessLevel, llmSafeScan.target)
-            : null;
-
-          // WebCheck data — retrieve then sanitize DNS/IPs
-          let webCheckReport = null;
-          const freshWebCheck = freshScan.webCheckResult;
-          const wcCompleted = freshWebCheck?.status === 'completed' || freshWebCheck?.status === 'completed_partial' || freshWebCheck?.status === 'completed_with_errors';
-          if (wcCompleted) {
-            const rawWebCheck = await getFullResults(freshWebCheck);
-            if (rawWebCheck) {
-              const sanitizedWC = sanitizeScanForLLM({ webCheckResult: { fullResults: rawWebCheck } });
-              webCheckReport = sanitizedWC?.webCheckResult?.fullResults || rawWebCheck;
-            }
-          }
-
-          const aiReport = await refineReport(
-            null,
-            psiReport,
-            observatoryReport,
-            llmSafeScan.target,   // "REDACTED"
-            zapReport,
-            urlscanReport,
-            webCheckReport
+          const { checkAndGenerateGemini } = require('../services/geminiCompletionService');
+          checkAndGenerateGemini(scanId, String(req.user.id)).catch(e =>
+            console.error(`[ZAP-AUTH][${scanId}] checkAndGenerateGemini error (status poll):`, e.message)
           );
-
-          await ScanResult.updateOne(
-            { analysisId: scanId },
-            { $set: { refinedReport: aiReport, status: 'completed', updatedAt: new Date() } }
-          );
-          scan.refinedReport = aiReport;
-          scan.status = 'completed';
-          console.log('[ZAP-AUTH] Gemini AI report generated!');
-          // Trigger notification (email + UI popup)
-          handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
-        } catch (geminiError) {
-          console.error('[ZAP-AUTH] Gemini report failed:', geminiError.message);
-          const fallback = `AI analysis temporarily unavailable. Error: ${geminiError.message}`;
-          await ScanResult.updateOne(
-            { analysisId: scanId },
-            { $set: { refinedReport: fallback, status: 'completed', updatedAt: new Date() } }
-          );
-          scan.refinedReport = fallback;
-          scan.status = 'completed';
-          // Trigger notification even if AI report failed
-          handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
-        } finally {
-          geminiInProgress.delete(scanId);
+        } catch (e) {
+          console.error(`[ZAP-AUTH][${scanId}] Failed to load geminiCompletionService:`, e.message);
         }
-      }
-    } else if (authZapDone && (webCheckDone || !scan.webCheckResult) && !scan.refinedReport) {
-      // WebCheck may not have started or both done but missing fast scans
-      if (!scan.pagespeedResult || !scan.observatoryResult) {
-        const fallback = 'AI analysis could not be generated - some scan data was unavailable. Please view individual scan results below.';
-        await ScanResult.updateOne(
-          { analysisId: scanId },
-          { $set: { refinedReport: fallback, status: 'completed', updatedAt: new Date() } }
-        );
-        scan.refinedReport = fallback;
-        scan.status = 'completed';
-        // Trigger notification for fallback completion
-        handleScanComplete(scanId, req.user.id, 'Authenticated Scan', scan.target);
-      }
+      });
     }
 
     // ── STEP D: Build response with all scan data (progressive loading) ──

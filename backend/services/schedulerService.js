@@ -15,7 +15,6 @@ const ScheduledScan = require('../models/ScheduledScan');
 const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
 const {
-  handleScanComplete,
   handleScanFailed,
   handleScheduledScanTriggered,
   emitScanStarted
@@ -27,10 +26,8 @@ const { scanHost } = require('./observatoryService');
 const { runUrlScan } = require('./urlscanService');
 const { startAsyncZapScan } = require('./zapService');
 const { startAsyncWebCheckScan } = require('./webCheckService');
-const { refineReport } = require('./geminiService');
-const { sanitizeScanForLLM } = require('./geminiSanitizer');
 
-const { checkScanQuota } = require('./planService');
+const { checkScanQuota, claimScanSlot } = require('./planService');
 
 let schedulerTask = null;
 let isProcessing = false;
@@ -104,6 +101,30 @@ async function processScheduledScans() {
 }
 
 /**
+ * Mark a schedule failed because the org has no capacity, and tell the user.
+ * Shared by the advisory pre-check and the authoritative claimScanSlot refusal so
+ * both produce the same schedule state and the same notification.
+ */
+async function failScheduleOnPlanLimit(schedule, user) {
+  console.log(`[Scheduler] Schedule ${schedule._id}: Plan limit exceeded or inactive`);
+  schedule.status = 'failed';
+  schedule.lastFailure = {
+    reason: 'Scan limit reached or subscription inactive',
+    failureType: 'plan_limit_exceeded',
+    timestamp: new Date()
+  };
+  await schedule.save();
+
+  await handleScanFailed(
+    null,
+    user._id.toString(),
+    schedule.scanType === 'public' ? 'Public Scan' : 'Authenticated Scan',
+    schedule.targetUrl,
+    'Scan limit reached or subscription inactive'
+  );
+}
+
+/**
  * Execute a single scheduled scan
  */
 async function executeSingleSchedule(schedule) {
@@ -122,7 +143,8 @@ async function executeSingleSchedule(schedule) {
     return;
   }
 
-  // Validate plan limits before execution
+  // Validate plan limits before execution. Advisory only — the authoritative check
+  // is claimScanSlot inside the trigger functions, which can also refuse.
   const limits = user.getAccountLimits ? user.getAccountLimits() : {};
   const result = await checkScanQuota(user.organizationId, {
     target: schedule.targetUrl,
@@ -130,23 +152,7 @@ async function executeSingleSchedule(schedule) {
     targetsPerMonth: limits.targetsPerMonth
   });
   if (!result) {
-    console.log(`[Scheduler] Schedule ${schedule._id}: Plan limit exceeded or inactive`);
-    schedule.status = 'failed';
-    schedule.lastFailure = {
-      reason: 'Scan limit reached or subscription inactive',
-      failureType: 'plan_limit_exceeded',
-      timestamp: new Date()
-    };
-    await schedule.save();
-
-    // Notify user of failure
-    await handleScanFailed(
-      null,
-      user._id.toString(),
-      schedule.scanType === 'public' ? 'Public Scan' : 'Authenticated Scan',
-      schedule.targetUrl,
-      'Scan limit reached or subscription inactive'
-    );
+    await failScheduleOnPlanLimit(schedule, user);
     return;
   }
 
@@ -175,23 +181,32 @@ async function executeSingleSchedule(schedule) {
     );
 
     // Trigger the actual scan based on scan type
+    const triggerMeta = {
+      triggerSource: 'scheduled',
+      scheduleId: schedule._id.toString(),
+      scheduledFor,
+      startedAt
+    };
+
+    let triggerResult;
     if (schedule.scanType === 'public') {
-      const publicResult = await triggerPublicScan(scanId, schedule.targetUrl, user._id.toString(), {
-        triggerSource: 'scheduled',
-        scheduleId: schedule._id.toString(),
-        scheduledFor,
-        startedAt
-      });
-      if (publicResult && publicResult.scanId) {
-        schedule.lastScanId = publicResult.scanId; // Update with the real backend-generated ID
+      triggerResult = await triggerPublicScan(
+        scanId, schedule.targetUrl, user._id.toString(), triggerMeta, user.organizationId
+      );
+      if (triggerResult && triggerResult.scanId) {
+        schedule.lastScanId = triggerResult.scanId; // Update with the real backend-generated ID
       }
     } else {
-      await triggerAuthenticatedScan(scanId, schedule.targetUrl, user._id.toString(), schedule.authConfig, {
-        triggerSource: 'scheduled',
-        scheduleId: schedule._id.toString(),
-        scheduledFor,
-        startedAt
-      });
+      triggerResult = await triggerAuthenticatedScan(
+        scanId, schedule.targetUrl, user._id.toString(), schedule.authConfig, triggerMeta, user.organizationId
+      );
+    }
+
+    // The org ran out of capacity between the advisory check above and the claim —
+    // e.g. a manual scan started in between. Treat it exactly like the pre-check.
+    if (triggerResult && triggerResult.refused) {
+      await failScheduleOnPlanLimit(schedule, user);
+      return;
     }
 
     // Handle schedule completion
@@ -246,25 +261,38 @@ async function executeSingleSchedule(schedule) {
 /**
  * Trigger a public scan via internal API orchestration (guarantees combined scan runs fully)
  */
-async function triggerPublicScan(scanId, targetUrl, userId, meta) {
+async function triggerPublicScan(scanId, targetUrl, userId, meta, organizationId = null) {
+  console.log(`[Scheduler] Orchestrating internal combined scan for ${targetUrl}`);
+
+  const scan = new ScanResult({
+    target: targetUrl,
+    analysisId: scanId,
+    status: 'combining',
+    userId: userId,
+    organizationId: organizationId || null,
+    triggerSource: 'scheduled',
+    languagePreference: 'en'
+  });
+  await scan.save();
+
+  // Authoritative quota check — see planService.claimScanSlot. The checkScanQuota
+  // call in executeSchedule is advisory and reserves nothing, so a schedule firing
+  // alongside in-flight manual scans could otherwise overshoot the plan.
+  // Runs before emitScanStarted so a refused scan never announces itself.
+  if (organizationId && !(await claimScanSlot(organizationId, scanId))) {
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      { $set: { status: 'cancelled', updatedAt: new Date() } }
+    );
+    return { scanId, refused: true };
+  }
+
   emitScanStarted(userId, {
     scanId,
     targetUrl,
     scanType: 'Public Scan',
     ...(meta || {})
   });
-
-  console.log(`[Scheduler] Orchestrating internal combined scan for ${targetUrl}`);
-  
-  const scan = new ScanResult({
-    target: targetUrl,
-    analysisId: scanId,
-    status: 'combining',
-    userId: userId,
-    triggerSource: 'scheduled',
-    languagePreference: 'en'
-  });
-  await scan.save();
 
   try {
     const hostname = new URL(targetUrl).hostname;
@@ -310,8 +338,12 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta) {
 /**
  * Trigger an authenticated scan
  */
-async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, meta) {
+async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, meta, organizationId = null) {
   const { startAsyncAuthScan } = require('./zapAuthService');
+
+  // Unlike triggerPublicScan, the start event is emitted before the slot claim: the
+  // background login below runs first and the ScanResult (which the claim needs) only
+  // exists after it. A refusal still reaches the user, as a scan-failed notification.
 
   emitScanStarted(userId, {
     scanId,
@@ -351,10 +383,20 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     analysisId: scanId,
     status: 'pending',
     userId: userId,
+    organizationId: organizationId || null,
     triggerSource: 'scheduled',
     languagePreference: 'en'
   });
   await skeletonScan.save();
+
+  // Authoritative quota check — see triggerPublicScan for the rationale.
+  if (organizationId && !(await claimScanSlot(organizationId, scanId))) {
+    await ScanResult.updateOne(
+      { analysisId: scanId },
+      { $set: { status: 'cancelled', updatedAt: new Date() } }
+    );
+    return { scanId, refused: true };
+  }
 
   const result = await startAsyncAuthScan(
     targetUrl,
@@ -405,8 +447,6 @@ async function finalizeRunningScans() {
 
     for (const scan of runningScans) {
       try {
-        const isAuthScan = !!scan.authScanResult || (scan.analysisId && scan.analysisId.startsWith('scheduled-'));
-        
         // Timeout check logic
         const ZAP_STALE_TIMEOUT_MS = 24 * 60 * 60 * 1000;
         const now = Date.now();
@@ -422,55 +462,23 @@ async function finalizeRunningScans() {
         const isWebCheckComplete = !scan.webCheckResult || ['completed', 'completed_partial', 'completed_with_errors', 'failed'].includes(scan.webCheckResult.status);
 
         if (isZAPComplete && isWebCheckComplete && !scan.refinedReport) {
-          console.log(`[Scheduler] Generating AI report for completed scan ${scan.analysisId}`);
-          
-          let aiReport = null;
-          try {
-            const safeScan = sanitizeScanForLLM(scan);
-            if (isAuthScan) {
-              // Auth scan: pass sanitized auth/zap result in the correct slot (zapReport)
-              aiReport = await refineReport(
-                null,                                         // _unused
-                safeScan.pagespeedResult  || null,           // psiReport
-                safeScan.observatoryResult || null,           // observatoryReport
-                safeScan.target,                             // url (= "REDACTED")
-                safeScan.authScanResult || safeScan.zapResult, // zapReport
-                safeScan.urlscanResult  || null,             // urlscanReport
-                safeScan.webCheckResult || null              // webCheckReport
-              );
-            } else {
-              // Public scan: correct arg order
-              aiReport = await refineReport(
-                null,                          // _unused
-                safeScan.pagespeedResult,      // psiReport
-                safeScan.observatoryResult,    // observatoryReport
-                safeScan.target,               // url (= "REDACTED")
-                safeScan.zapResult,            // zapReport
-                safeScan.urlscanResult,        // urlscanReport
-                safeScan.webCheckResult        // webCheckReport
-              );
-            }
-          } catch (aiErr) {
-            console.warn(`[Scheduler] AI generation failed for ${scan.analysisId}:`, aiErr.message);
-            aiReport = { error: 'Failed to generate AI summary' };
-          }
-
-          await ScanResult.updateOne(
-            { _id: scan._id },
-            { 
-              $set: { 
-                refinedReport: aiReport,
-                status: 'completed',
-                updatedAt: new Date()
-              } 
-            }
-          );
-          
-          await handleScanComplete(
-            scan.analysisId, 
-            scan.userId.toString(), 
-            isAuthScan ? 'Authenticated Scan' : 'Public Scan', 
-            scan.target
+          // Delegate to the completion service rather than generating inline.
+          //
+          // This block used to call refineReport itself and write
+          // `refinedReport` + `status: completed` directly. Three things were wrong
+          // with that: it never called finalizeSuccessfulScan, so a scheduled scan
+          // finished here was delivered free; it raced checkAndGenerateGemini, which
+          // then short-circuited on the refinedReport it found; and it passed raw
+          // alerts to the LLM without the plan's severity filter and without loading
+          // WebCheck full results from GridFS.
+          //
+          // checkAndGenerateGemini is idempotent and lock-protected, so calling it
+          // from this poller is safe. If the scan is not actually ready it returns
+          // without doing anything and the next poll retries.
+          console.log(`[Scheduler] Handing ${scan.analysisId} to the completion service`);
+          const { checkAndGenerateGemini } = require('./geminiCompletionService');
+          await checkAndGenerateGemini(scan.analysisId, String(scan.userId)).catch(e =>
+            console.error(`[Scheduler] checkAndGenerateGemini failed for ${scan.analysisId}:`, e.message)
           );
         }
       } catch (err) {

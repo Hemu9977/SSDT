@@ -103,6 +103,14 @@ const scanResultSchema = new mongoose.Schema({
   quotaConsumed: {
     type: Boolean,
     default: false
+  },
+  // Which pool paid for this scan. Support-only: when a customer disputes a
+  // charge, this is the difference between "your monthly allowance" and "a credit
+  // you bought in March". Written by finalizeSuccessfulScan after the charge lands.
+  quotaSource: {
+    type: String,
+    enum: ['subscription', 'credit', 'legacy', null],
+    default: null
   }
 });
 

@@ -265,6 +265,16 @@ async function _finishAsFailed(scan, scanId, userId, failureReason) {
 
 // ─── Fallback completion ───────────────────────────────────────────────────────
 
+/**
+ * Label used in the completion email/notification. Authenticated scans used to be
+ * completed by zapAuthRoutes, which passed its own label; now that both flows finish
+ * here, the label has to be derived so auth customers don't get told their
+ * authenticated scan was a plain combined scan.
+ */
+function _scanTypeLabel(scan) {
+  return scan?.authScanResult ? 'Authenticated Scan' : 'Combined Security Scan';
+}
+
 async function _finishWithFallback(scan, scanId, userId, message) {
   const fallback = message || 'AI analysis could not be generated due to missing scan data.';
   console.log(`[Gemini][${scanId}] Finishing with fallback message`);
@@ -280,7 +290,7 @@ async function _finishWithFallback(scan, scanId, userId, message) {
   await finalizeSuccessfulScan(scanId).catch(e => console.error(`[Gemini][${scanId}] Failed to finalize scan quota:`, e.message));
 
   await publishScanProgress(scanId, userId, { status: 'completed', progress: 100, message: 'Scan complete' });
-  handleScanComplete(scanId, userId, 'Combined Security Scan', scan.target);
+  handleScanComplete(scanId, userId, _scanTypeLabel(scan), scan.target);
 }
 
 // ─── Main entry point ──────────────────────────────────────────────────────────
@@ -501,7 +511,7 @@ async function _doGenerate(scanId, userId) {
     });
 
     // ── Notifications ─────────────────────────────────────────────────────────
-    handleScanComplete(scanId, userId, 'Combined Security Scan', scan.target);
+    handleScanComplete(scanId, userId, _scanTypeLabel(scan), scan.target);
 
   } catch (err) {
     // This outer catch only fires when something OUTSIDE the Gemini call throws

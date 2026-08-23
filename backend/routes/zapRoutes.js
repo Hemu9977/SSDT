@@ -32,6 +32,7 @@ const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
 const ZapAlert = require('../models/ZapAlert');
 const { handleScanComplete } = require('../services/notificationService');
+const { consumeScan } = require('../services/planService');
 
 /**
  * Enhanced ZAP Routes - Maximum Performance Scanner
@@ -158,6 +159,22 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         const result = await withZapInstance('normal', scanId,
           () => runZapScanWithDB(url, userId, { quickMode, scanId, zapUrl }));
         console.log(`✅ Scan completed for user ${userId}: ${result.scanId}`);
+
+        // Standalone one-shot route: it never enters the orchestrated pipeline, so
+        // geminiCompletionService never sees it and cannot charge it. Charge inline
+        // on success instead — the same pattern as pageSpeedRoutes/webCheckRoutes.
+        // (This used to live in runZapScanWithDB as a finalizeSuccessfulScan call;
+        // it moved here so finalizeSuccessfulScan has exactly one caller.)
+        if (req.organization && req.planUser) {
+          const limits = req.planUser.getAccountLimits(req.organization);
+          await consumeScan(req.organization._id, {
+            target: url,
+            scansPerTarget: limits.scansPerTarget,
+            targetsPerMonth: limits.targetsPerMonth
+          }).catch(e => console.error(`[Billing] consumeScan failed for ${scanId}:`, e.message));
+          console.log(`[Billing] Scan completed - quota deducted: ${scanId}`);
+        }
+
         handleScanComplete(result.scanId || scanId, userId, 'Public Scan', url);
       } catch (error) {
         console.error(`❌ Scan failed for user ${userId}:`, error.message);

@@ -68,6 +68,93 @@ function hasLegacyOneTimeBalance(org) {
 }
 
 /**
+ * Total scans the org could still pay for right now: unused subscription
+ * allowance plus every live credit. Used by claimScanSlot to decide how many
+ * concurrent scans may be in flight at once.
+ */
+function availableCapacity(org, now = new Date()) {
+  let capacity = 0;
+
+  if (hasActiveSubscription(org) && org.scanLimit > 0) {
+    capacity += Math.max(0, org.scanLimit - (org.scansUsed || 0));
+  }
+
+  const creditBalance = (org.scanCredits || [])
+    .filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
+    .reduce((sum, c) => sum + c.scansRemaining, 0);
+
+  if (creditBalance > 0) {
+    capacity += creditBalance;
+  } else if (hasLegacyOneTimeBalance(org)) {
+    // Mirrors consumeScan: the bare scalar only counts when no batches exist.
+    capacity += org.oneTimeRemainingScans || 0;
+  }
+
+  return capacity;
+}
+
+// Statuses in which a scan is still running and has therefore not yet been billed.
+const IN_FLIGHT_STATUSES = ['queued', 'pending', 'combining'];
+
+/**
+ * Decide whether a freshly-created scan is allowed to run, accounting for the
+ * org's other in-flight scans. Call this immediately AFTER saving the ScanResult.
+ *
+ * Why this exists: quota is charged at successful completion, so checkScanQuota at
+ * scan start reserves nothing. Two scans begun with one slot left both passed the
+ * check and both completed, and the customer got one free (HANDOFF.md §6.1).
+ *
+ * Why it is not a reservation counter: a counter has to be released on every
+ * failure path, and a leaked reservation locks a paying customer out of their own
+ * plan — strictly worse than the over-delivery it fixes. Instead the answer is
+ * derived from documents that already exist, so there is nothing to leak: the
+ * stale-scan watchdog moving a wedged scan to `failed` frees its slot for free.
+ *
+ * How it is race-free: `rank` counts only in-flight scans with a LOWER `_id`.
+ * ObjectIds are unique and monotonic, so concurrent starters get distinct ranks
+ * and exactly `capacity` of them clear the bar — no over-admission, and (unlike a
+ * plain "count them all" check) no mutual rejection either.
+ *
+ * @param {string} orgId
+ * @param {string} analysisId  the scan that was just created
+ * @returns {Promise<boolean>} true if the scan may proceed
+ */
+async function claimScanSlot(orgId, analysisId) {
+  const ScanResult = require('../models/ScanResult');
+
+  try {
+    if (!orgId) return true; // no org → nothing to meter against; planCheck already 403s
+
+    const scan = await ScanResult.findOne({ analysisId }, { _id: 1, organizationId: 1 });
+    if (!scan) return true; // caller order bug, not the customer's problem — let it run
+
+    const org = await Organization.findById(orgId);
+    if (!org) return true;
+
+    const capacity = availableCapacity(org);
+
+    const rank = await ScanResult.countDocuments({
+      organizationId: orgId,
+      status: { $in: IN_FLIGHT_STATUSES },
+      _id: { $lt: scan._id }
+    });
+
+    if (rank < capacity) return true;
+
+    console.warn(
+      `[Billing] Scan ${analysisId} refused: ${rank} scan(s) already in flight ahead of it ` +
+      `for org ${orgId}, capacity ${capacity}.`
+    );
+    return false;
+  } catch (err) {
+    // Fail OPEN, matching middleware/auth.js: a Mongo blip must not stop every
+    // customer from scanning. The completion-time charge still enforces the cap.
+    console.error(`⚠️  [planService] claimScanSlot failed for ${analysisId}:`, err.message);
+    return true;
+  }
+}
+
+/**
  * Check if the organization has quota to run a scan without consuming it.
  * Performs monthly reset if needed.
  *
@@ -224,7 +311,7 @@ async function consumeScan(orgId, opts = {}) {
       { $inc: inc },
       { new: true }
     );
-    if (sub) return sub;
+    if (sub) return tagSource(sub, 'subscription');
     // Lost a race for the last subscription slot — fall through to credits,
     // which mirrors "monthly allowance exhausted" becoming true concurrently.
   }
@@ -239,10 +326,20 @@ async function consumeScan(orgId, opts = {}) {
       { $inc: { oneTimeRemainingScans: -1, totalScansAllTime: 1 } },
       { new: true }
     );
-    if (legacy) return legacy;
+    if (legacy) return tagSource(legacy, 'legacy');
   }
 
   return consumeFromCreditBatch(orgId, target);
+}
+
+/**
+ * Record which pool paid for a scan, for support and for the completion log.
+ * Non-persisted: it is a plain property on the returned document, never a schema
+ * field on Organization.
+ */
+function tagSource(org, source) {
+  if (org) org.__quotaSource = source;
+  return org;
 }
 
 async function consumeFromCreditBatch(orgId, target, attempt = 0) {
@@ -273,14 +370,19 @@ async function consumeFromCreditBatch(orgId, target, attempt = 0) {
     { new: true }
   );
 
-  if (result) return result;
+  if (result) return tagSource(result, 'credit');
   // Lost the race for this specific batch — retry against the next-soonest.
   return consumeFromCreditBatch(orgId, target, attempt + 1);
 }
 
 /**
- * Called when a scan successfully completes. 
+ * Called when a scan successfully completes.
  * Fetches the ScanResult, checks limits, and deducts the quota atomically.
+ *
+ * ⚠️ This must stay the ONLY caller of consumeScan() in the orchestrated pipeline.
+ * `backend/tests/billingInvariants.test.js` asserts that, because a second billing
+ * site is exactly how auth scans ended up billed or not depending on which completion
+ * path won the race.
  */
 async function finalizeSuccessfulScan(scanId) {
   const ScanResult = require('../models/ScanResult');
@@ -289,30 +391,42 @@ async function finalizeSuccessfulScan(scanId) {
   try {
     const scan = await ScanResult.findOne({ analysisId: scanId });
     if (!scan) return;
-    
-    // Ensure we only charge once
+
+    // Cheap fast path only — the real guard is the atomic claim further down.
+    // Several components can reach finalize for the same scan, so a plain read
+    // here decides nothing on its own.
     if (scan.quotaConsumed) return;
 
-    // Strict success check: do not bill if the scan is not fully completed or if any required phase failed
+    // A scan is billable exactly when it reached `completed`, which the pipeline
+    // allows only when the vulnerability assessment produced results. Keep the
+    // phase guards below in step with that rule — a guard stricter than the
+    // completion policy means a report the customer already has, for free.
     if (scan.status !== 'completed' && scan.status !== 'success') {
       console.log(`[Billing] Scan ${scanId} is not in a terminal success state (${scan.status}), skipping deduction.`);
       return;
     }
-    
+
+    // The vulnerability assessment IS the product: without it the report would tell
+    // the customer their site is clean when nothing was checked. geminiCompletionService
+    // already refuses to complete such a scan, so these are belt-and-braces.
     if (scan.zapResult && scan.zapResult.status === 'failed') {
-      console.log(`[Billing] Scan ${scanId} had a failed ZAP phase, skipping deduction.`);
+      console.log(`[Billing] Scan ${scanId} had a failed vulnerability phase, skipping deduction.`);
       return;
     }
-    
-    if (scan.webCheckResult && scan.webCheckResult.status === 'failed') {
-      console.log(`[Billing] Scan ${scanId} had a failed WebCheck phase, skipping deduction.`);
-      return;
-    }
-    
+
     if (scan.authScanResult && scan.authScanResult.status === 'failed') {
-      console.log(`[Billing] Scan ${scanId} had a failed Auth Scan phase, skipping deduction.`);
+      console.log(`[Billing] Scan ${scanId} had a failed authenticated phase, skipping deduction.`);
       return;
     }
+
+    // NOTE: a failed WebCheck is deliberately NOT checked here.
+    //
+    // geminiCompletionService treats it as non-fatal by design — the scan completes,
+    // the AI report is generated, and the WebCheck section renders N/A. This function
+    // used to refuse the charge anyway, so every scan with a failed WebCheck was
+    // delivered in full and never billed. Billing must follow the completion policy,
+    // not contradict it; if a failed WebCheck should void the sale, the scan has to
+    // stop completing, and that decision belongs in geminiCompletionService.
 
     const user = await User.findById(scan.userId);
     if (!user || !user.organizationId) return;
@@ -322,6 +436,20 @@ async function finalizeSuccessfulScan(scanId) {
 
     const limits = user.getAccountLimits(org);
 
+    // ── Claim BEFORE charging ──────────────────────────────────────────────────
+    // Previously the flag was read at the top of this function and written after
+    // consumeScan, several awaits later. Two finalize calls for the same scan could
+    // both pass the read and both charge the org. findOneAndUpdate is atomic in the
+    // server, so exactly one caller sees the un-consumed document and proceeds.
+    const claimed = await ScanResult.findOneAndUpdate(
+      { analysisId: scanId, quotaConsumed: false },
+      { $set: { quotaConsumed: true } }
+    );
+    if (!claimed) {
+      console.log(`[Billing] Scan ${scanId} already claimed by another finalize call — not charging again.`);
+      return;
+    }
+
     // Charge the quota
     const result = await consumeScan(user.organizationId, {
       target: scan.target,
@@ -329,21 +457,39 @@ async function finalizeSuccessfulScan(scanId) {
       targetsPerMonth: limits.targetsPerMonth
     });
 
-    if (result) {
-      // Mark as consumed
+    if (!result) {
+      // Could not charge — release the claim so a retry (or the cleanup watchdog)
+      // can charge it later. Leaving it set would deliver the scan for free and
+      // hide the fact that it was never billed.
       await ScanResult.updateOne(
-        { analysisId: scanId, quotaConsumed: false },
-        { $set: { quotaConsumed: true } }
+        { analysisId: scanId },
+        { $set: { quotaConsumed: false } }
       );
-      console.log(`[Billing] Scan completed - quota deducted: ${scanId}`);
+      console.warn(`[Billing] consumeScan declined for ${scanId} — claim released.`);
+      return;
     }
+
+    if (result.__quotaSource) {
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { quotaSource: result.__quotaSource } }
+      ).catch(() => { /* bookkeeping only — never fail a settled charge over it */ });
+    }
+
+    console.log(`[Billing] Scan completed - quota deducted: ${scanId} (source=${result.__quotaSource || 'unknown'})`);
   } catch (err) {
     console.error(`⚠️ [Billing] Failed to finalize scan ${scanId}:`, err.message);
   }
 }
 
 /**
- * Reverse a single consumeScan() increment. (Legacy support, may not be needed anymore)
+ * Reverse a single consumeScan() increment.
+ *
+ * ⚠️ Currently has NO callers anywhere in the repo — kept because it is the only
+ * refund primitive that exists, and a Stripe refund/chargeback handler will need
+ * one. Note it does not know which credit batch a scan was charged to, so it would
+ * have to take `quotaSource`/batch id before it is safe to use on a credit-funded
+ * scan (it blindly $incs the oneTimeRemainingScans mirror today).
  */
 async function refundScan(orgId, billingCycle, target = null) {
   if (!orgId) return;
@@ -373,4 +519,13 @@ async function refundScan(orgId, billingCycle, target = null) {
   }
 }
 
-module.exports = { checkScanQuota, consumeScan, finalizeSuccessfulScan, refundScan };
+module.exports = {
+  checkScanQuota,
+  claimScanSlot,
+  consumeScan,
+  finalizeSuccessfulScan,
+  refundScan,
+  // exported for tests
+  availableCapacity,
+  IN_FLIGHT_STATUSES
+};

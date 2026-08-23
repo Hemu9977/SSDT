@@ -7,7 +7,6 @@ const ZapAlert = require('../models/ZapAlert');
 const gridfsService = require('./gridfsService');
 const cleanupService = require('./cleanupService');
 const { publishScanProgress } = require('./scanProgressService');
-const { finalizeSuccessfulScan } = require('./planService');
 const { getSanitizedAlerts } = require('../utils/vulnFilter');
 const User = require('../models/User');
 
@@ -1403,9 +1402,9 @@ async function runZapScanWithDB(targetUrl, userId, options = {}) {
     console.log(`   Total occurrences: ${summaryAlerts.reduce((sum, a) => sum + a.totalOccurrences, 0)}`);
     console.log(`   Risk breakdown: High=${riskCounts.High}, Medium=${riskCounts.Medium}, Low=${riskCounts.Low}, Info=${riskCounts.Informational}`);
 
-    // Deduct scan from user quota only upon successful completion
-    await finalizeSuccessfulScan(scanId).catch(e => console.error(`[ZAP][${scanId}] Failed to finalize scan quota:`, e.message));
-
+    // Quota is NOT charged here. ZAP finishing is not the product finishing —
+    // WebCheck and the AI report still have to land. geminiCompletionService is the
+    // single billing point for both scan flows.
     // Emit real-time progress: ZAP done
     await publishScanProgress(scanId, scanResult.userId, {
       status: 'combining',

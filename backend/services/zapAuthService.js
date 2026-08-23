@@ -10,7 +10,6 @@ const axios = require('axios');
 const http = require('http');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('./gridfsService');
-const { finalizeSuccessfulScan } = require('./planService');
 
 // ============================================================================
 // ZAP AUTH API CONFIGURATION
@@ -916,9 +915,9 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       }
     );
 
-    // Deduct scan from user quota only upon successful completion
-    await finalizeSuccessfulScan(scanId).catch(e => console.error(`[ZAP-AUTH][${scanId}] Failed to finalize scan quota:`, e.message));
-
+    // Quota is NOT charged here. The scan is only in "combining" at this point —
+    // geminiCompletionService charges it when the report is finished, which is the
+    // single billing point for both scan flows.
     console.log(`[ZAP-AUTH] Scan complete: ${scanId}`);
     console.log(`[ZAP-AUTH]   URLs found: ${urlsFound}`);
     console.log(`[ZAP-AUTH]   Alert types: ${summaryAlerts.length}`);

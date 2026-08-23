@@ -13,9 +13,14 @@
  * Does NOT increment anything. This middleware only calls checkScanQuota(),
  * which is read-only — the atomic decrement happens later, in consumeScan()
  * via finalizeSuccessfulScan(), when the scan actually completes.
- * Consequence: quota is advisory at start, so two scans begun with one slot
- * left can both pass here and both complete. See HANDOFF.md.
- * Attaches req.planUser (loaded user doc) for downstream use.
+ *
+ * Because it reserves nothing, this check is ADVISORY: it exists to fail an
+ * obviously-over-quota request early and cheaply. The authoritative check is
+ * planService.claimScanSlot(), which every scan-start route calls immediately
+ * after creating its ScanResult — that is what stops concurrent scans from
+ * collectively exceeding the plan.
+ *
+ * Attaches req.organization and req.planUser (loaded user doc) for downstream use.
  */
 
 const User = require('../models/User');
