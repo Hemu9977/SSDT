@@ -2,7 +2,6 @@
 const express = require('express');
 const router = express.Router();
 const webCheckService = require('../services/webCheckService');
-const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
@@ -64,15 +63,6 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     }
 });
 
-// GET /api/webcheck/types
-// Returns list of available scan types
-router.get('/types', (req, res) => {
-    res.json({
-        scanTypes: webCheckService.getAvailableScans(),
-        usage: 'POST /api/webcheck/scan with { url, type }'
-    });
-});
-
 // GET /api/webcheck/health
 // Check if WebCheck container is running
 router.get('/health', async (req, res) => {
@@ -88,51 +78,9 @@ router.get('/health', async (req, res) => {
     }
 });
 
-// POST /api/webcheck/save-results
-// Save WebCheck results to a scan record in the database
-// This allows resuming scans after page refresh
-router.post('/save-results', auth, async (req, res) => {
-    try {
-        const { scanId, results } = req.body;
-
-        if (!scanId) {
-            return res.status(400).json({ error: 'Scan ID is required' });
-        }
-
-        if (!results || typeof results !== 'object') {
-            return res.status(400).json({ error: 'Results object is required' });
-        }
-
-        // Find the scan and verify ownership
-        const scan = await ScanResult.findOne({
-            analysisId: scanId,
-            userId: req.user.id
-        });
-
-        if (!scan) {
-            return res.status(404).json({ error: 'Scan not found or access denied' });
-        }
-
-        // Update the scan with WebCheck results
-        scan.webCheckResult = results;
-        scan.updatedAt = new Date();
-        await scan.save();
-
-        console.log(`✅ WebCheck results saved for scan: ${scanId}`);
-
-        res.json({
-            success: true,
-            message: 'WebCheck results saved successfully',
-            scanId: scanId
-        });
-
-    } catch (error) {
-        console.error('❌ Error saving WebCheck results:', error.message);
-        res.status(500).json({
-            error: 'Failed to save WebCheck results',
-            details: error.message
-        });
-    }
-});
+// Removed: GET /types and POST /save-results. Neither had a caller anywhere in
+// the repo. /save-results in particular took a client-supplied `results` object
+// and wrote it straight onto the scan document with no shape validation, so the
+// deletion removes an unused write path into scan records as well as dead code.
 
 module.exports = router;
