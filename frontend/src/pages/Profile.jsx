@@ -10,25 +10,10 @@ import '../styles/Profile.scss';
 import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
 
-// Plan definitions — source of truth for the UI
-const PLANS = {
-  monthly: [
-    { planType: 'light',  billingCycle: 'monthly', price: '¥30,000',   period: 'periodMonth', accounts: 1, totalScans: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'monthly', price: '¥50,000',   period: 'periodMonth', accounts: 3, totalScans: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'monthly', price: '¥100,000',  period: 'periodMonth', accounts: 5, totalScans: 10, severity: 'all' },
-  ],
-  annual: [
-    { planType: 'light',  billingCycle: 'annual', price: '¥300,000',   period: 'periodYear', accounts: 1, totalScans: 3,  severity: 'critical-high' },
-    { planType: 'basic',  billingCycle: 'annual', price: '¥500,000',   period: 'periodYear', accounts: 3, totalScans: 5,  severity: 'all' },
-    { planType: 'pro',    billingCycle: 'annual', price: '¥1,000,000', period: 'periodYear', accounts: 5, totalScans: 10, severity: 'all' },
-  ],
-  onetime: [
-    { planType: 'trial1', billingCycle: 'onetime', price: '¥20,000', period: '', accounts: 1, totalScans: 1, severity: 'critical-high' },
-    { planType: 'trial2', billingCycle: 'onetime', price: '¥30,000', period: '', accounts: 1, totalScans: 2, severity: 'all' },
-  ],
-};
+// Plan definitions live in config/planCatalog.js, shared with MarketingHome and
+// kept in step with the backend catalog by a test — see that file.
+import { PLANS, PLAN_NAMES, formatYen } from '../config/planCatalog';
 
-const PLAN_NAMES = { light: 'planLight', basic: 'planBasic', pro: 'planPro', trial1: 'planTrial1', trial2: 'planTrial2' };
 const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', onetime: 'billingOneTime' };
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
@@ -41,8 +26,7 @@ const PAYMENT_POLL_INTERVAL_MS = 2000;
 // enforces it at runtime — if one changes, change the other.
 const TAX_RATE = 0.1;
 const parsePriceYen = (priceStr) => Number(String(priceStr).replace(/[^\d.]/g, '')) || 0;
-const formatPriceYen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
-const priceIncludingTax = (priceStr) => formatPriceYen(parsePriceYen(priceStr) * (1 + TAX_RATE));
+const priceIncludingTax = (priceStr) => formatYen(parsePriceYen(priceStr) * (1 + TAX_RATE));
 
 // Shared plan-card markup — used by both the full plan chooser (no active
 // plan) and the top-up section (subscribed users buying extra scans).

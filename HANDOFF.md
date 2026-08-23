@@ -69,8 +69,8 @@ existed come back `undefined` until it runs.
 ## 3. What is verified, and how
 
 ```bash
-cd backend  && npm test                                     # 89 tests
-cd frontend && CI=true npx react-scripts test --watchAll=false   # 36 tests
+cd backend  && npm test                                     # 117 tests
+cd frontend && CI=true npx react-scripts test --watchAll=false   # 39 tests
 cd frontend && CI=true npx react-scripts build              # clean, warnings-as-errors
 ```
 
@@ -159,43 +159,127 @@ Worth your time, none of it blocking:
 
 ---
 
-## 6. Known open defects — not fixed here
+## 6. Billing and quota defects — RESOLVED
 
-Real problems in quota and billing code that this work never touched. Fixing a
-billing race is design work, not verification, so they are reported rather than
-patched.
+> **Update (2026-08-22, follow-up batch).** All four defects below are fixed, and the
+> smaller loose ends are cleared. Two claims in the original write-up were wrong; they are
+> corrected in place. `backend/tests/billingInvariants.test.js` (28 tests) now covers this
+> area — it did not exist when this section was written.
 
-1. **Concurrent scans can exceed the monthly cap.** `checkScanQuota`
-   (`services/planService.js:78-152`) is advisory and reserves nothing; the
-   atomic decrement happens only at completion (`consumeScan`, `:222-226`). Two
-   scans started with one slot left both pass, both complete, and the loser is
-   delivered free with `quotaConsumed` never set.
-2. **Auth scans may never be billed.** `routes/zapAuthRoutes.js:540-624`
-   re-implements Gemini completion inline, guarded only by an in-process Set. If
-   a status poll writes `refinedReport` + `status:'completed'` first, the
-   Redis-locked `checkAndGenerateGemini` — the only path calling
-   `finalizeSuccessfulScan` for auth scans — returns early and the org is never
-   charged.
-3. **`finalizeSuccessfulScan` is check-then-act** (`planService.js:294` read vs
-   `:334` write, several awaits apart). Safe today only because of an incidental
-   Redis lock upstream, not any property of the function itself.
-4. **Plan pricing is hand-duplicated in four places** — `User.js` `PLAN_LIMITS`,
-   `stripeRoutes.js` `PLAN_CONFIGS`/`PRICE_IDS`, `admin.js` `PLAN_PRICES`,
-   `Profile.jsx` `PLANS`. All agree numerically today; nothing enforces it, and
-   `stripeRoutes.js:60-61` already admits the tax rate has the same problem.
+### The four defects, and what was done
 
-Checked and **correct**: Stripe webhook idempotency (atomic claim before side
-effects), signature verification, raw-body mount ordering, and the cancellation
-→ free-tier fallback.
+**1. Concurrent scans could exceed the monthly cap.** — **Fixed.**
+`planCheck` stays advisory; `planService.claimScanSlot()` is the new authoritative check,
+called by every scan-start path immediately after the `ScanResult` is created. It admits a
+scan only if the count of the org's in-flight scans with a **lower `_id`** is below its
+remaining capacity (subscription allowance + live credits).
 
-### Smaller loose ends
+A reservation counter was considered and rejected: it needs a release on every failure
+path, and a leaked reservation locks a paying customer out of their own plan — strictly
+worse than the over-delivery it fixes. Deriving rank from documents that already exist
+leaves nothing to leak; the stale-scan watchdog frees a wedged scan’s slot for free.
 
-- ~21 orphaned locale keys, mostly from the merged branches.
-- Two WebCheck endpoints with no caller anywhere: `/types`, `/save-results`.
-- Four pre-existing orphaned frontend files: `ScanCompletionPopup.jsx`,
-  `pages/AuthenticatedScan.jsx`, `utils/apiClient.js`, `hooks/useTranslation.js`
-  (a dead duplicate of the hook re-exported from `TranslationContext.jsx`).
-- `Admin.scss` has 5 light-theme hooks across 918 lines — see checklist item 7.
+This required `ScanResult.organizationId` to actually be written. It was declared and
+indexed but **set by nothing anywhere in the repo**, so the rank query would have matched
+zero documents and admitted everything. All four creation sites now stamp it.
+
+**2. Auth scans may never be billed.** — **Fixed.** The defect was real; the explanation
+given here was not.
+
+This section claimed a successful auth ZAP "has already charged the quota by this point
+(zapAuthService)". It had not. `zapAuthService` called `finalizeSuccessfulScan` immediately
+after writing `status: 'combining'`, and that function returns early unless the status is
+`completed` — **that call was a no-op.**
+
+What actually billed an auth scan was `checkAndGenerateGemini`, triggered by
+`zapAuthService` on ZAP completion and by `webCheckService` on WebCheck completion.
+`zapAuthService` copies `authScanResult` into `zapResult`, so its readiness check passed and
+it charged on its own completion path.
+
+So auth scans were billed **non-deterministically**, not never: the background completion
+service charges, the status-poll route's inline block does not, and both could run for the
+same scan. Whether the customer paid depended on which reached the write first. Once the
+poll route had set `refinedReport`, *later* `checkAndGenerateGemini` invocations
+short-circuited and never charged — though one already in flight continued and did.
+
+An earlier draft of this update said auth scans "have never been billed". That was wrong,
+and wrong in the direction that matters: it would have you expecting a uniform revenue
+increase from this fix rather than the removal of a coin-flip.
+
+The ~80-line inline Gemini block in the status route is gone; the route now triggers
+`checkAndGenerateGemini` like every other completion path. `finalizeSuccessfulScan` is
+called from `geminiCompletionService` **only**, for both flows, and a census test enforces
+that — a second billing site is exactly how this defect arose.
+
+**A further unbilled path, not in the original list.** `schedulerService.finalizeRunningScans`
+— the 2-minute poller that finishes scheduled scans — was a *fourth* re-implementation of
+Gemini completion. It wrote `refinedReport` + `status: 'completed'` directly, so scheduled
+scans it finished were never charged, it raced `checkAndGenerateGemini` (which then
+short-circuited on the report it found), and it sent alerts to the LLM **without the plan's
+severity filter** and without loading WebCheck full results from GridFS. It now delegates
+like every other path.
+
+**A scan with a failed WebCheck was delivered free — also fixed.** This one was a
+contradiction between two files rather than a duplicated path.
+`geminiCompletionService` treats a failed WebCheck as explicitly **non-fatal**: the scan
+completes, the AI report is generated, and that section renders N/A. But
+`finalizeSuccessfulScan` then refused the charge on `webCheckResult.status === 'failed'`.
+So the customer received a complete report and the org was never billed. The guard is gone;
+billing now follows the completion policy instead of second-guessing it.
+
+**The resulting rule, which is now the whole of it:** a scan is charged if and only if it
+reached `completed`, and it reaches `completed` if and only if the vulnerability assessment
+produced results. Everything else — WebCheck, PageSpeed, Observatory, even Gemini itself
+falling back to a structured report — degrades the report without voiding the sale. If you
+ever want a failed phase to void the sale, make it stop the scan completing; do not add a
+second opinion in the billing path. `billingInvariants.test.js` asserts the two files agree.
+
+Consequence worth knowing, agreed before implementing: a scan that never reaches a completed
+report is **no longer charged**. Previously the normal flow charged at ZAP completion
+(`zapService.js`), so it billed for scans that never produced a report.
+
+**3. `finalizeSuccessfulScan` was check-then-act.** — **Fixed.**
+It now claims `quotaConsumed` with an atomic `findOneAndUpdate` *before* charging, and
+releases the claim if `consumeScan` declines — so a decline cannot silently deliver a free
+scan. The resolved pool (`subscription` / `credit` / `legacy`) is persisted to
+`ScanResult.quotaSource` for support.
+
+**4. Plan pricing was hand-duplicated.** — **Fixed. It was five places, not four**:
+`MarketingHome.jsx` carried a fifth copy. Now `backend/config/planCatalog.js` is the single
+source — `PLAN_LIMITS`, Stripe provisioning and the admin revenue figures all derive from
+it. The frontend keeps a deliberate mirror at `frontend/src/config/planCatalog.js` (a
+pricing endpoint would put a network call in front of the signed-out landing page), and a
+test reads the backend file off disk and fails if the two disagree.
+
+The tax rate remains genuinely unenforceable: `TAX_RATE` in `Profile.jsx` must match the
+Stripe Tax Rate object behind `STRIPE_TAX_RATE_ID`, which no code can read. Comments warn;
+nothing checks.
+
+**Also found while doing this:** `refundScan` has **no callers anywhere**, despite a comment
+in `virustotalRoutes.js` claiming the error path refunds a gated slot. It is kept (a Stripe
+refund handler will need a refund primitive) but is now documented as unused, and flagged as
+unsafe for credit-funded scans until it takes a batch id.
+
+Still **correct** and untouched: Stripe webhook idempotency (atomic claim before side
+effects), signature verification, raw-body mount ordering, and the cancellation →
+free-tier fallback.
+
+### Smaller loose ends — cleared
+
+- **Orphaned locale keys: 72 removed** from `en.js` and `ja.js` in lockstep (not ~21 as
+  estimated here). A naive scan reports 113; ~30 of those are false positives because
+  `MarketingHome.jsx` builds keys dynamically (`` t(`aboutFeature${key}Title`) ``). The
+  detector used an explicit allowlist for those prefixes. Both files now have zero orphans,
+  zero duplicates, and no ja-only key.
+- **Two WebCheck endpoints removed**: `/types` and `/save-results`. The latter took a
+  client-supplied `results` object and wrote it onto the scan document with no shape
+  validation, so this removed an unused write path as well as dead code.
+- **Four orphaned frontend files deleted** — plus `ScanCompletionPopup.scss`, which only
+  that component imported. Note `context/LanguageContext.js` is **not** dead despite
+  appearing so: `contexts/TranslationContext.jsx` is a re-export shim over it, and it is the
+  live implementation.
+- `Admin.scss` light theme — **deliberately not touched.** No static change can confirm a
+  contrast result; see checklist item 7.
 
 ---
 

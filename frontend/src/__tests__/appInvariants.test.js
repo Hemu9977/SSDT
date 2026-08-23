@@ -348,3 +348,67 @@ describe('admin pages never render a backend-supplied string', () => {
     expect(read('services/adminService.js')).toMatch(/err\.code\s*=/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan catalog parity
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('plan catalog', () => {
+  // The frontend cannot import the backend, so it keeps its own copy of the
+  // commercial numbers rather than fetching them (a pricing endpoint would put a
+  // network round-trip in front of the signed-out landing page). Nothing at
+  // runtime makes the two agree — this test is what makes them agree.
+  //
+  // Before the catalogs existed these figures were hand-copied into five places
+  // and happened to match. A price change had to land in five diffs to be right.
+  const BACKEND_CATALOG = path.join(SRC, '..', '..', 'backend', 'config', 'planCatalog.js');
+
+  // eslint-disable-next-line no-new-func
+  const frontendCatalog = new Function(
+    `${read('config/planCatalog.js').replace(/export const/g, 'const').replace(/export /g, '')}
+     return { PLAN_CATALOG, PLANS };`
+  )();
+
+  const backendAvailable = fs.existsSync(BACKEND_CATALOG);
+  // Skips rather than fails when only the frontend tree is checked out (the
+  // deploy workflow builds frontend/ alone).
+  const maybeIt = backendAvailable ? it : it.skip;
+
+  maybeIt('agrees with the backend catalog on every plan', () => {
+    const src = fs
+      .readFileSync(BACKEND_CATALOG, 'utf8')
+      .replace(/^\s*(const|function)\s+(RECURRING_PLANS|ONETIME_PLANS|ONETIME_SCANS|PLAN_PROVISIONING|monthlyEquivalent)[\s\S]*$/m, '');
+    // eslint-disable-next-line no-new-func
+    const backend = new Function(`${src}\nreturn PLAN_CATALOG;`)();
+
+    const frontend = frontendCatalog.PLAN_CATALOG;
+
+    expect(Object.keys(frontend).sort()).toEqual(Object.keys(backend).sort());
+
+    for (const plan of Object.keys(backend)) {
+      expect([plan, frontend[plan].seats]).toEqual([plan, backend[plan].seats]);
+      expect([plan, frontend[plan].scans]).toEqual([plan, backend[plan].scans]);
+      expect([plan, frontend[plan].severity]).toEqual(
+        [plan, backend[plan].vulnerabilityAccessLevel]
+      );
+      expect([plan, frontend[plan].price]).toEqual([plan, backend[plan].price]);
+    }
+  });
+
+  it('renders every price as a grouped yen string', () => {
+    const rendered = []
+      .concat(frontendCatalog.PLANS.monthly, frontendCatalog.PLANS.annual, frontendCatalog.PLANS.onetime)
+      .map((p) => p.price);
+    expect(rendered.length).toBe(8);
+    for (const price of rendered) expect(price).toMatch(/^¥[\d,]+$/);
+  });
+
+  it('is the only place the UI states a plan price', () => {
+    // A literal yen figure anywhere else is a copy that will drift.
+    const offenders = sourceFiles
+      .filter((f) => !f.endsWith(path.join('config', 'planCatalog.js')))
+      .filter((f) => /¥\s?\d{2,3},\d{3}/.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(SRC, f));
+    expect(offenders).toEqual([]);
+  });
+});

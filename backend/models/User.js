@@ -212,24 +212,51 @@ UserSchema.methods.checkAndResetMonthlyScans = function () {
   return false;
 };
 
-// ─── PLAN DEFINITIONS (single source of truth) ───────────────────────────────
-const PLAN_LIMITS = {
-  // Monthly plans
-  light_monthly: { scansPerMonth: 3, targetsPerMonth: 3, scansPerTarget: null, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
-  basic_monthly: { scansPerMonth: 5, targetsPerMonth: 5, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 3 },
-  pro_monthly: { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: null, vulnerabilityAccessLevel: 'all', maxSchedules: 10 },
-  // Annual plans (same quota counts but enforced per-target per month)
-  light_annual: { scansPerMonth: 3, targetsPerMonth: 3, scansPerTarget: 3, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 1 },
-  basic_annual: { scansPerMonth: 5, targetsPerMonth: 5, scansPerTarget: 5, vulnerabilityAccessLevel: 'all', maxSchedules: 3 },
-  pro_annual: { scansPerMonth: 10, targetsPerMonth: 10, scansPerTarget: 10, vulnerabilityAccessLevel: 'all', maxSchedules: 10 },
-  // One-time / trial
-  trial1_onetime: { scansPerMonth: 1, targetsPerMonth: 1, scansPerTarget: 1, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 0 },
-  trial2_onetime: { scansPerMonth: 2, targetsPerMonth: 1, scansPerTarget: 2, vulnerabilityAccessLevel: 'all', maxSchedules: 0 },
-  // Free / no plan — also the fallback for an org whose paid plan was nulled on
-  // cancellation. Vulnerability access defaults to the MOST RESTRICTIVE level
-  // (matches vulnFilter.DEFAULT_LEVEL) so a downgraded/expired account never sees
-  // more severities than the lowest paid tier (Light).
-  free: { scansPerMonth: 20, targetsPerMonth: -1, scansPerTarget: null, vulnerabilityAccessLevel: 'critical-high', maxSchedules: 2 },
+// ─── PLAN DEFINITIONS ────────────────────────────────────────────────────────
+// The commercial numbers (seats, scans, targets, severity, schedules) come from
+// config/planCatalog.js, which is also what Stripe provisioning and the admin
+// revenue figures read. This table only shapes them into quota keys.
+//
+// The one rule that lives here rather than in the catalog: MONTHLY plans have no
+// per-target cap (the cap is the global scansPerMonth), while ANNUAL plans cap
+// scans per target. That is a billing-cycle behaviour, not a property of the plan.
+const { PLAN_CATALOG, RECURRING_PLANS, ONETIME_PLANS } = require('../config/planCatalog');
+
+const PLAN_LIMITS = {};
+
+for (const plan of RECURRING_PLANS) {
+  const c = PLAN_CATALOG[plan];
+  const shared = {
+    scansPerMonth: c.scans,
+    targetsPerMonth: c.targets,
+    vulnerabilityAccessLevel: c.vulnerabilityAccessLevel,
+    maxSchedules: c.maxSchedules
+  };
+  PLAN_LIMITS[`${plan}_monthly`] = { ...shared, scansPerTarget: null };
+  PLAN_LIMITS[`${plan}_annual`] = { ...shared, scansPerTarget: c.scans };
+}
+
+for (const plan of ONETIME_PLANS) {
+  const c = PLAN_CATALOG[plan];
+  PLAN_LIMITS[`${plan}_onetime`] = {
+    scansPerMonth: c.scans,
+    targetsPerMonth: c.targets,
+    scansPerTarget: c.scans,
+    vulnerabilityAccessLevel: c.vulnerabilityAccessLevel,
+    maxSchedules: c.maxSchedules
+  };
+}
+
+// Free / no plan — not purchasable, so it has no catalog entry. Also the fallback
+// for an org whose paid plan was nulled on cancellation. Vulnerability access
+// defaults to the MOST RESTRICTIVE level (matches vulnFilter.DEFAULT_LEVEL) so a
+// downgraded/expired account never sees more severities than the lowest paid tier.
+PLAN_LIMITS.free = {
+  scansPerMonth: 20,
+  targetsPerMonth: -1,
+  scansPerTarget: null,
+  vulnerabilityAccessLevel: 'critical-high',
+  maxSchedules: 2
 };
 
 // ─── METHOD: Get account limits (SINGLE SOURCE OF TRUTH) ─────────────────────

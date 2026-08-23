@@ -468,16 +468,9 @@ router.get('/system-health', async (req, res) => {
 // PLANS constant in frontend/src/pages/Profile.jsx exactly. Monthly-equivalent
 // is annual ÷ 12, used only to make monthly and annual subscribers comparable
 // on one chart — it is not a discount calculation.
-const PLAN_PRICES = {
-  light: { monthly: 30000, annual: 300000 },
-  basic: { monthly: 50000, annual: 500000 },
-  pro:   { monthly: 100000, annual: 1000000 },
-};
-const monthlyEquivalent = (planType, billingCycle) => {
-  const p = PLAN_PRICES[planType];
-  if (!p) return 0; // trial1/trial2 are one-time purchases, not recurring — excluded by design
-  return billingCycle === 'annual' ? Math.round(p.annual / 12) : p.monthly;
-};
+// Prices come from the plan catalog. monthlyEquivalent returns 0 for trial1/trial2:
+// they are one-time purchases, not recurring revenue, and are excluded by design.
+const { monthlyEquivalent } = require('../config/planCatalog');
 
 // Produces a continuous [{ date: 'YYYY-MM-DD', count }] series for the last N
 // days (inclusive of today), filling in zero for days with no matching docs —

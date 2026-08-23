@@ -36,11 +36,9 @@ const PRICE_IDS = {
   trial2_onetime: process.env.STRIPE_PRICE_TRIAL2 || 'price_trial2',
 };
 
-// One-time plan scan allocations
-const ONETIME_SCANS = {
-  trial1_onetime: 1,
-  trial2_onetime: 2,
-};
+// One-time plan scan allocations and subscription provisioning (seats + monthly
+// scan allowance) both come from the plan catalog — see config/planCatalog.js.
+const { ONETIME_SCANS, PLAN_PROVISIONING } = require('../config/planCatalog');
 
 // Validity window for a purchased one-off scan credit batch, from purchase.
 const CREDIT_VALIDITY_DAYS = 90;
@@ -519,14 +517,7 @@ async function handleCheckoutComplete(session) {
     org.stripeSubscriptionId = null;
     org.expiresAt = new Date(Date.now() + CREDIT_VALIDITY_DAYS * 24 * 60 * 60 * 1000);
   } else {
-    const PLAN_CONFIGS = {
-      light: { seatsAllowed: 1, scanLimit: 3 },
-      basic: { seatsAllowed: 3, scanLimit: 5 },
-      pro: { seatsAllowed: 5, scanLimit: 10 },
-      trial1: { seatsAllowed: 1, scanLimit: 0 },
-      trial2: { seatsAllowed: 1, scanLimit: 0 }
-    };
-    const config = PLAN_CONFIGS[planType] || { seatsAllowed: 1, scanLimit: 0 };
+    const config = PLAN_PROVISIONING[planType] || { seatsAllowed: 1, scanLimit: 0 };
     org.seatsAllowed = config.seatsAllowed;
     org.scanLimit = config.scanLimit;
     org.stripeSubscriptionId = session.subscription || null;

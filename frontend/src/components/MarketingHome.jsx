@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, useReducedMotion } from 'framer-motion';
 import { useTranslation } from '../contexts/TranslationContext';
+import { plansForCycle, PLAN_NAMES } from '../config/planCatalog';
 import logo from '../assets/logo.png';
 import '../styles/MarketingHome.scss';
 // Reused for the sections merged in from the removed /about page (feature
@@ -10,21 +11,19 @@ import '../styles/MarketingHome.scss';
 // the exact same visual design.
 import '../styles/About.scss';
 
-// Mirrors the plan data shown on the Profile page's plan chooser — figures
-// must stay in sync with PLANS in pages/Profile.jsx. Moved here from the
-// removed /about page.
-const PLANS = [
-  { planType: 'light', price: '¥30,000', annualPrice: '¥300,000', accounts: 1, totalScans: 3, severity: 'critical-high' },
-  { planType: 'basic', price: '¥50,000', annualPrice: '¥500,000', accounts: 3, totalScans: 5, severity: 'all' },
-  { planType: 'pro', price: '¥100,000', annualPrice: '¥1,000,000', accounts: 5, totalScans: 10, severity: 'all' },
-];
+// Plan figures come from the shared catalog, which the Profile plan chooser also
+// reads and which a test keeps in step with the backend — see
+// config/planCatalog.js. This page shows the monthly price with the annual figure
+// as a sub-line, so it pairs the two cycles rather than using one directly.
+const PLANS = plansForCycle('monthly').map((plan, i) => ({
+  ...plan,
+  annualPrice: plansForCycle('annual')[i].price,
+}));
 
-const TRIALS = [
-  { planType: 'trial1', price: '¥20,000', scans: 1, severity: 'critical-high' },
-  { planType: 'trial2', price: '¥30,000', scans: 2, severity: 'all' },
-];
-
-const PLAN_NAMES = { light: 'planLight', basic: 'planBasic', pro: 'planPro', trial1: 'planTrial1', trial2: 'planTrial2' };
+const TRIALS = plansForCycle('onetime').map((plan) => ({
+  ...plan,
+  scans: plan.totalScans,
+}));
 
 // "AI-Powered Analysis" is deliberately excluded here — it gets its own
 // dedicated, more prominent section below rather than competing as one card

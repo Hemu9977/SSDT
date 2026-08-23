@@ -142,8 +142,13 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   compressed IPv6, emails and internal hostnames.
 - `backend/tests/passwordReset.test.js` — executes the reset/resend handlers
   against a stubbed model layer.
+- `backend/tests/billingInvariants.test.js` — executes `finalizeSuccessfulScan` and
+  `claimScanSlot` against a stubbed model layer: charge-exactly-once under concurrency,
+  claim release when a charge is declined, rank/capacity arithmetic, and a census
+  asserting quota is charged from exactly one service.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
-  import resolution, locale parity, and that no backend string reaches the UI.
+  import resolution, locale parity, that no backend string reaches the UI, and
+  plan-catalog parity with the backend catalog.
 
 The build is clean at `CI=true`; `.github/workflows/frontend-deploy.yml` still
 sets `CI: false`, which can now be removed. **That workflow auto-deploys to S3 +
@@ -151,8 +156,29 @@ CloudFront on any push to `main` touching `frontend/**`.**
 
 ## Current Branch: `main`
 
-Recent work (this batch merged three feature branches and reviewed them; see
-`HANDOFF.md` for the full account and the open items):
+Most recent work — the billing and quota defects `HANDOFF.md` §6 reported but did not fix:
+- **One billing point.** `finalizeSuccessfulScan` is now called from
+  `geminiCompletionService` only, for both scan flows. The ~80-line inline Gemini block in
+  the authenticated status route is gone, as are `zapService`/`zapAuthService`'s own calls
+  (`zapAuthService`'s was a no-op: it fired while the scan was still `combining`).
+  Auth scans were previously billed non-deterministically: the completion service charges,
+  the status-poll route did not, and whichever reached the write first decided whether the
+  customer paid.
+  `schedulerService.finalizeRunningScans` was a fourth such path and is gone too — it
+  also skipped the plan severity filter when building the AI prompt.
+- **Concurrency cannot beat the cap.** `planService.claimScanSlot()` (rank by `_id` among
+  in-flight scans vs. remaining capacity), called after each `ScanResult` is created.
+  `ScanResult.organizationId` is finally written — it was indexed but set by nothing.
+- **`finalizeSuccessfulScan` claims `quotaConsumed` atomically** before charging and
+  releases the claim if the charge is declined; the paying pool lands in
+  `ScanResult.quotaSource`.
+- **`backend/config/planCatalog.js`** replaces five hand-copied pricing tables, with a test
+  holding the frontend mirror in step.
+- Dead code removed: 72 orphaned locale keys (both files), `/api/webcheck/types` and
+  `/save-results`, and five orphaned frontend files.
+
+Earlier work — that batch merged three feature branches and reviewed them; see
+`HANDOFF.md` for the full account:
 - Merged `admin-dashboard`, `gemini-masking`, and `landing-page`.
 - Admin dashboard made reachable and hardened: a render-time route guard,
   superadmin hierarchy, `$regex` escaping, and per-request `isDisabled`
@@ -180,9 +206,16 @@ Earlier work still worth knowing:
 
 ### Subscription Tiers
 
-> **Single source of truth: `PLAN_LIMITS` in `backend/models/User.js`.** The table below
-> mirrors that constant — if they ever disagree, the code is right and this table is stale.
-> Read via `user.getAccountLimits(org)`; keys are `` `${planType}_${billingCycle}` ``.
+> **Single source of truth: `PLAN_CATALOG` in `backend/config/planCatalog.js`.** The table
+> below mirrors that constant — if they ever disagree, the code is right and this table is
+> stale. `PLAN_LIMITS` (`models/User.js`), Stripe provisioning and the admin revenue figures
+> are all derived from it. Read quota limits via `user.getAccountLimits(org)`; keys are
+> `` `${planType}_${billingCycle}` ``.
+>
+> The frontend keeps a mirror at `frontend/src/config/planCatalog.js` — it cannot import
+> backend code, and a pricing endpoint would put a network call in front of the signed-out
+> landing page. A test in `frontend/src/__tests__/appInvariants.test.js` reads the backend
+> file off disk and fails if the two disagree, so **a price change must land in both.**
 
 | Feature | Light | Basic | Pro |
 |---------|-------|-------|-----|
@@ -207,9 +240,11 @@ Notes:
 - **Trial 1** (`trial1_onetime`): ¥20,000 — 1 account, 1 scan, 1 target, `critical-high`, no schedules
 - **Trial 2** (`trial2_onetime`): ¥30,000 — 1 account, 2 scans, 1 target, `all` severities, no schedules
 
-Scan allocations live in `ONETIME_SCANS` (`backend/routes/stripeRoutes.js`). One-time is
-currently an org-wide *mode* (`Organization.billingCycle === 'onetime'`), not a credit balance —
-see `planchanges.md` for the planned rework.
+Scan allocations are derived in `ONETIME_SCANS` (`backend/config/planCatalog.js`).
+One-time purchases are **credit batches** (`Organization.scanCredits`), consumed only after
+the monthly allowance is exhausted, so a subscriber can buy a top-up without losing their
+plan. `billingCycle === 'onetime'` survives as a legacy org-wide mode for unmigrated trial
+accounts — see `hasLegacyOneTimeBalance` in `planService.js`.
 
 ### Environment Scale Targets
 - Light plan: support 10 companies
@@ -224,7 +259,8 @@ see `planchanges.md` for the planned rework.
 - [x] **TASK 4**: Plan-based scan limits — `backend/services/planService.js` (`checkScanQuota`, `consumeScan`, `finalizeSuccessfulScan`) enforced by `middleware/planCheck.js`
 - [x] **TASK 5**: Trial one-time scan mode — `billingCycle: 'onetime'` + `Organization.oneTimeRemainingScans`
 - [x] **Stripe billing** (not originally listed) — `backend/routes/stripeRoutes.js`, `models/StripeEvent.js` for webhook idempotency
-- [ ] **TASK 6**: Usage tracking dashboard — partially present in the Profile page; see `planchanges.md`
+- [x] **TASK 6**: Usage tracking dashboard — the Profile Statistics grid shows the plan
+  scan limit, scans this month, and remaining purchased credits with their expiry date
 - [x] **TASK 7**: Admin panel — `backend/routes/admin.js` (12 endpoints),
   `frontend/src/pages/Admin/*`, guarded by `components/RequireAdmin.jsx` at the
   `/admin` route. Platform role lives on `User.systemRole`
@@ -244,9 +280,20 @@ see `planchanges.md` for the planned rework.
   earlier note here claimed they disagreed; the code was fixed without updating
   the doc.) `profile.js`'s `scansThisMonth` is cosmetic anyway — bounded by the
   7-day TTL — while `org.scansUsed` is the authoritative counter.
-- **Known gap:** `checkScanQuota` reserves nothing at scan start; the atomic
-  decrement happens only at completion. Two scans started with one slot left can
-  both pass and both complete. See `HANDOFF.md` for this and related billing gaps.
+- `planCheck` is **advisory** — `checkScanQuota` reserves nothing. The authoritative check
+  is `planService.claimScanSlot()`, which every scan-start path calls immediately after
+  creating its `ScanResult`: it admits a scan only if the number of the org's in-flight
+  scans with a **lower `_id`** is below the org's remaining capacity (subscription
+  allowance + live credits). ObjectIds are unique and monotonic, so concurrent starters get
+  distinct ranks and exactly `capacity` of them win. Nothing is reserved, so nothing can
+  leak and lock a customer out, and the stale-scan watchdog frees a wedged scan's slot.
+- **`finalizeSuccessfulScan` is the only place quota is charged**, and it is called from
+  `geminiCompletionService` **only** — for both the normal and the authenticated flow. It
+  claims `quotaConsumed` atomically *before* charging, and releases the claim if the charge
+  is declined. `backend/tests/billingInvariants.test.js` enforces the single-caller rule; a
+  second billing site is how authenticated scans previously went unbilled. Standalone
+  one-shot routes (`pageSpeedRoutes`, `webCheckRoutes`, `zapRoutes`) are the exception:
+  they create no `ScanResult`, never enter the pipeline, and call `consumeScan()` inline.
 - `ScanResult` documents carry a **7-day TTL**, so they cannot be used to compute monthly
   usage. `Organization.scansUsed` is authoritative.
 
