@@ -24,11 +24,10 @@ const { requestContainer, releaseContainer } = require('../services/zapContainer
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
 
-// Additional scanner services (same as normal scan)
-const { getPageSpeedReport } = require('../services/pagespeedService');
-const { scanHost } = require('../services/observatoryService');
-const { runUrlScan } = require('../services/urlscanService');
-const { startAsyncWebCheckScan, getFullResults } = require('../services/webCheckService');
+// The four fast scanners are no longer started from this file — that moved to
+// services/authFastScanService.js. Only the WebCheck result reader is still needed
+// here, to render a stored report.
+const { getFullResults } = require('../services/webCheckService');
 const User = require('../models/User');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { lighthouseScores } = require('../utils/scoreFormat');
@@ -58,7 +57,7 @@ async function resolveVulnAccessLevel(userId) {
 const authSessions = new Map();
 
 // Cleanup expired sessions every 5 minutes
-setInterval(() => {
+const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
   for (const [key, session] of authSessions) {
@@ -72,9 +71,26 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// A housekeeping timer must not be a reason for the process to stay alive. Without
+// this, merely requiring this module keeps the event loop busy forever, which hangs
+// `node --test` after the suite finishes. No effect on the server, where the HTTP
+// listener holds the loop open anyway.
+if (typeof sessionCleanupTimer?.unref === 'function') sessionCleanupTimer.unref();
+
 // ============================================================================
 // ROUTES
 // ============================================================================
+
+/**
+ * The fast-scanner orchestration moved to services/authFastScanService.js so the
+ * scheduler can run it too — a scheduled authenticated scan has no browser polling
+ * GET /status/:scanId, and previously never ran these four scanners at all.
+ *
+ * Still re-exported from this module at the bottom of the file: that is the surface
+ * backend/tests/authFastScanRace.test.js drives, i.e. the proof that the fast
+ * scanners can be started without an HTTP poll.
+ */
+const { ensureAuthFastScans } = require('../services/authFastScanService');
 
 /**
  * GET /api/zap-auth/health
@@ -285,8 +301,32 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     // Delete session after use (one-time use)
     authSessions.delete(tempSessionId);
 
+    // Warm ZAP capacity up before responding, so the scale-from-zero overlaps the
+    // client's first poll rather than being added to the scan. Not awaited and never
+    // fatal — withZapInstance below performs the authoritative wait under the lock.
+    // No-ops unless capacity management is enabled for 'auth'.
+    {
+      const { markZapDemand, ensureZapCapacity } = require('../services/zapCapacityManager');
+      markZapDemand('auth').catch(() => {});
+      ensureZapCapacity('auth', { scanId }).catch(err =>
+        console.warn(`[ZapCapacity] warm-up failed for ${scanId}: ${err.message}`)
+      );
+    }
+
     // Respond immediately — provisioning + scan run in background.
     res.json({ success: true, scanId, message: 'Authenticated scan started' });
+
+    // Start the fast scanners now, at acceptance. They used to be kicked off lazily
+    // from GET /status/:scanId, which made them dependent on a browser polling: in
+    // production the ZAP leg once finished 14 minutes before anything started them.
+    // Starting here also means they overlap the ZAP scan instead of following it.
+    //
+    // Not awaited (the response is already sent) and never fatal — the ZAP leg is the
+    // product, and ensureAuthFastScans claims atomically so the status-poll fallback
+    // cannot start a second copy.
+    ensureAuthFastScans(scanId, String(req.user.id)).catch(e =>
+      console.error(`[ZAP-AUTH][${scanId}] fast-scan kick-off failed:`, e.message)
+    );
 
     // Async: provision container → scan → release
     (async () => {
@@ -389,75 +429,17 @@ router.get('/status/:scanId', auth, async (req, res) => {
       });
     }
 
-    // ── STEP A: Trigger fast scans (only once) ──
-    const needsFastScans = !scan.pagespeedResult || !scan.observatoryResult || !scan.urlscanResult;
-    const webCheckNotStarted = !scan.webCheckResult || (!scan.webCheckResult.status && !scan.webCheckResult.error);
-
-    if (needsFastScans || webCheckNotStarted) {
-      try {
-        const hostname = new URL(scan.target).hostname;
-        const scanPromises = [];
-
-        // PageSpeed
-        if (!scan.pagespeedResult) {
-          scanPromises.push(getPageSpeedReport(scan.target).catch(e => ({ error: e.message })));
-        } else {
-          scanPromises.push(Promise.resolve(null));
-        }
-
-        // Observatory
-        if (!scan.observatoryResult) {
-          scanPromises.push(scanHost(hostname).catch(e => ({ error: e.message })));
-        } else {
-          scanPromises.push(Promise.resolve(null));
-        }
-
-        // URLScan
-        if (!scan.urlscanResult) {
-          scanPromises.push(runUrlScan(scan.target).catch(e => ({ error: e.message })));
-        } else {
-          scanPromises.push(Promise.resolve(null));
-        }
-
-        // WebCheck (async background scan)
-        if (webCheckNotStarted) {
-          scanPromises.push(startAsyncWebCheckScan(scan.target, scan.analysisId, req.user.id).catch(e => ({ status: 'failed', error: e.message })));
-        } else {
-          scanPromises.push(Promise.resolve(null));
-        }
-
-        const [psiResult, obsResult, urlscanResult, webCheckInitResult] = await Promise.all(scanPromises);
-
-        const updateFields = {};
-
-        if (psiResult && !scan.pagespeedResult) {
-          updateFields.pagespeedResult = psiResult;
-          scan.pagespeedResult = psiResult;
-          console.log('[ZAP-AUTH] PageSpeed completed');
-        }
-        if (obsResult && !scan.observatoryResult) {
-          updateFields.observatoryResult = obsResult;
-          scan.observatoryResult = obsResult;
-          console.log('[ZAP-AUTH] Observatory completed');
-        }
-        if (urlscanResult && !scan.urlscanResult) {
-          updateFields.urlscanResult = urlscanResult;
-          scan.urlscanResult = urlscanResult;
-          console.log('[ZAP-AUTH] URLScan completed');
-        }
-        if (webCheckInitResult && webCheckNotStarted) {
-          updateFields.webCheckResult = webCheckInitResult;
-          scan.webCheckResult = webCheckInitResult;
-          console.log('[ZAP-AUTH] WebCheck started in background');
-        }
-
-        if (Object.keys(updateFields).length > 0) {
-          await ScanResult.updateOne({ analysisId: scanId }, { $set: updateFields });
-        }
-      } catch (fastScanError) {
-        console.error('[ZAP-AUTH] Fast scan orchestration error:', fastScanError.message);
-      }
-    }
+    // ── STEP A: Fast scans ──
+    // These are started at scan acceptance now (POST /scan). This call is a
+    // fallback for scans accepted before that change shipped, and a self-heal if
+    // the accept-time kick-off ever fails. ensureAuthFastScans claims atomically,
+    // so calling it from every poll starts nothing twice.
+    //
+    // Deliberately NOT awaited. It used to be, which made a status poll block for
+    // as long as the slowest scanner (urlscan polls its own API, ~20s).
+    ensureAuthFastScans(scanId, String(req.user.id)).catch(e =>
+      console.error(`[ZAP-AUTH][${scanId}] fast-scan orchestration error:`, e.message)
+    );
 
     // ── Re-fetch scan to get latest auth ZAP + WebCheck progress ──
     scan = await ScanResult.findOne({ analysisId: scanId, userId: req.user.id });
@@ -889,4 +871,9 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
   }
 });
 
+// The router stays the default export — server.js does `app.use(..., require(...))`,
+// and an Express router is a function, so attaching a property to it keeps every
+// existing mount working unchanged. ensureAuthFastScans is attached so it can be
+// driven directly in tests, i.e. proven to work without an HTTP status poll.
 module.exports = router;
+module.exports.ensureAuthFastScans = ensureAuthFastScans;
