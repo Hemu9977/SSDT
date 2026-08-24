@@ -632,9 +632,19 @@ const Hero = ({ historicalScan }) => {
     wsListeningRef.current = false;
 
     let attempts = 0;
-    // Increased from 60 to 450 attempts (15 minutes at 2-second intervals)
-    // ZAP scans can take 5-10+ minutes, so we need longer polling
-    const maxAttempts = 450;
+    // 3600 attempts at 2-second intervals = 2 hours.
+    //
+    // This is the WebSocket fallback, used only when no scan:update arrives within
+    // 15s. The previous 450 (15 min) was wrong against the backend's own bounds: the
+    // vulnerability scan alone has a 12-hour deadline and its spider and AJAX phases
+    // are each capped at an hour. Hitting the cap here abandons a healthy scan and
+    // renders partial results as if it had finished.
+    //
+    // 2 hours rather than the full 12: this path only matters when the socket is down,
+    // and a browser tab polling every 2s for half a day is its own problem. The scan
+    // itself is unaffected — it completes server-side and the result is available on
+    // reload either way.
+    const maxAttempts = 3600;
 
     const poll = async () => {
       // Check if polling was stopped (user clicked Stop Scan)
