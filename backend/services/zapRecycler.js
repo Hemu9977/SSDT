@@ -19,10 +19,23 @@
  * thing we borrow is waitForZapApi.
  *
  * CAPACITY CONSTRAINT
- * ASG fortexa-ecs-asg-xlarge is pinned min=max=2 and each t3.xlarge has ~1,455MiB free
- * against the 14,336MiB a ZAP task reserves. Old and new tasks cannot coexist, so the old
- * task must reach STOPPED before ECS can place the replacement. That is why step 3 below
- * is mandatory rather than an optimization.
+ * Each t3.xlarge in ASG fortexa-ecs-asg-xlarge registers 15,791MiB and a ZAP task
+ * reserves 14,336MiB, leaving ~1,455MiB free (verified live 2026-08-23 via
+ * ecs:DescribeContainerInstances). Old and new tasks cannot coexist on one instance, so
+ * the old task must reach STOPPED before ECS can place the replacement. That is why
+ * step 3 below is mandatory rather than an optimization.
+ *
+ * SCALE TO ZERO
+ * The ASG was pinned min=max=2. Under services/zapCapacityManager.js it can reach 0:
+ * the capacity manager drives ecs:UpdateService desiredCount 0<->1 and the ECS capacity
+ * provider follows with the instances. Two consequences for this module:
+ *   - withZapInstance calls ensureZapCapacity BEFORE recycling. Recycling a service
+ *     scaled to zero would find no tasks to stop and then wait out NEW_TASK_WAIT_MS for
+ *     a replacement nothing has asked ECS to place.
+ *   - A task the capacity manager just cold-started is fresh by construction, so its
+ *     recycle is skipped. That decision is ARN-scoped and is NOT made by widening
+ *     FRESH_MAX_AGE_MS, which would weaken the guard for genuinely warm scans.
+ * All of it is inert unless ZAP_CAPACITY_MANAGED=true.
  */
 
 const os = require('os');
@@ -31,6 +44,10 @@ const axios = require('axios');
 
 const { getPublisher } = require('../config/redis');
 const { waitForZapApi } = require('./zapContainerManager');
+// Per-instance config (service names, base URLs, probe headers, Redis key names) lives
+// in config/zapInstances.js so zapCapacityManager can share it without a circular
+// require — this module needs ensureZapCapacity, and that module needs the same config.
+const { INSTANCES, getInstance } = require('../config/zapInstances');
 
 const CLUSTER = () => process.env.ECS_CLUSTER_NAME || 'fortexa-cluster';
 
@@ -39,7 +56,22 @@ const LOCK_WAIT_MS       = () => Number(process.env.ZAP_LOCK_WAIT_MS) || 1800000
 const LOCK_TTL_MS        = 120000; // short on purpose — see acquireZapLock
 const LOCK_HEARTBEAT_MS  = 20000;
 const POLL_MS            = 5000;
-const NEW_TASK_WAIT_MS   = 150000; // beyond this, surface the ECS placement events
+/**
+ * Budget for "the service scheduler places a replacement", beyond which the ECS
+ * placement events are surfaced and the recycle fails.
+ *
+ * Deliberately still 150s by default even though a cold start takes 4–8 minutes.
+ * This constant only ever governs a *warm* recycle — one where an instance is
+ * already registered and the ZAP image is already in its Docker cache, so 150s is
+ * generous. The cold-start path never reaches step 4 at all: withZapInstance skips
+ * the recycle entirely for a task the capacity manager just started, and the
+ * scale-from-zero wait is governed by ZAP_CAPACITY_WAIT_MS instead. Raising this
+ * would only delay the detection of a genuine warm-placement fault.
+ *
+ * Made configurable so that can be revisited from a task-definition change rather
+ * than a deploy.
+ */
+const NEW_TASK_WAIT_MS   = () => Number(process.env.ZAP_NEW_TASK_WAIT_MS) || 150000;
 
 // A task younger than this is treated as already fresh and is never stopped. This is the
 // guard that stops a late or duplicate recycle request from killing a replacement that a
@@ -52,45 +84,7 @@ const FRESH_MAX_AGE_MS   = () => Number(process.env.ZAP_FRESH_MAX_AGE_MS) || 120
 // one. Lock ordering is always scan -> recycle, so the two cannot deadlock.
 const RECYCLE_LOCK_TTL_MS = () => RECYCLE_TIMEOUT_MS() + 60000;
 
-/**
- * Per-instance configuration. Read lazily so a task-definition env change takes effect
- * without a code change, and so tests can override process.env.
- */
-const INSTANCES = {
-  normal: {
-    label: 'normal',
-    lockKey: 'zap:lock:normal',
-    recycleLockKey: 'zap:recycle:normal',
-    service: () => process.env.ECS_ZAP_SERVICE || 'zap-scan-ec2',
-    baseUrl: () => process.env.ZAP_API_URL || 'http://127.0.0.1:8080',
-    // Mirrors createZapClient in zapService.js — no special headers.
-    probeConfig: () => ({})
-  },
-  auth: {
-    label: 'auth',
-    lockKey: 'zap:lock:auth',
-    recycleLockKey: 'zap:recycle:auth',
-    service: () => process.env.ECS_ZAP_AUTH_SERVICE || 'zap-auth-task-ec2',
-    baseUrl: () => process.env.ZAP_AUTH_API_URL || 'http://127.0.0.1:8081',
-    // Mirrors createZapAuthClient in zapAuthService.js: ZAP's API validation is
-    // Host-header-sensitive and it always listens on 8080 internally.
-    probeConfig: () => ({
-      headers: {
-        Host: 'localhost:8080',
-        ...(process.env.ZAP_AUTH_API_KEY ? { 'X-Zap-Api-Key': process.env.ZAP_AUTH_API_KEY } : {})
-      },
-      ...(process.env.ZAP_AUTH_API_KEY ? { params: { apikey: process.env.ZAP_AUTH_API_KEY } } : {})
-    })
-  }
-};
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function getInstance(key) {
-  const inst = INSTANCES[key];
-  if (!inst) throw new Error(`Unknown ZAP instance key: ${key}`);
-  return inst;
-}
 
 // ============================================================================
 // ERRORS
@@ -422,7 +416,7 @@ async function recycleZapInstance(key, { scanId = 'n/a', reason = 'pre-scan', lo
 
   // 4. Wait for the scheduler to place a replacement.
   const oldSet = new Set(oldArns);
-  const newTaskDeadline = Math.min(deadline, Date.now() + NEW_TASK_WAIT_MS);
+  const newTaskDeadline = Math.min(deadline, Date.now() + NEW_TASK_WAIT_MS());
   let newArn = null;
   while (!newArn) {
     assertTime(deadline, 'waiting for replacement task');
@@ -457,7 +451,7 @@ async function recycleZapInstance(key, { scanId = 'n/a', reason = 'pre-scan', lo
         console.warn(`[ZapRecycle] service events unavailable (ecs:DescribeServices not granted?): ${err.message}`);
       }
       events.forEach(m => console.error(`[ZapRecycle] service event: ${m}`));
-      throw new ZapRecycleError('PLACEMENT_FAILED', `No replacement task placed within ${NEW_TASK_WAIT_MS}ms`, { events });
+      throw new ZapRecycleError('PLACEMENT_FAILED', `No replacement task placed within ${NEW_TASK_WAIT_MS()}ms`, { events });
     }
     await sleep(POLL_MS);
   }
@@ -505,8 +499,44 @@ async function recycleZapInstance(key, { scanId = 'n/a', reason = 'pre-scan', lo
 // ============================================================================
 
 /**
- * Hold the instance lock, recycle, then run `fn`. The recycle always lands before the
- * caller's newSession/context setup, which is required — newSession discards contexts.
+ * Decide whether the task currently behind this instance was cold-started by the
+ * capacity manager, in which case recycling it is pure cost.
+ *
+ * Two ways a scan can arrive at an already-fresh cold-started task:
+ *   1. This very call scaled it out (`capacity.coldStarted`), or
+ *   2. a fire-and-forget warm-up at scan acceptance did, minutes earlier, while the
+ *      fast scanners ran. That result is gone by now, so the capacity manager leaves
+ *      an ARN-scoped marker in Redis and this consumes it.
+ *
+ * The ARN scoping is what makes this safe: a stale marker naming a task that is no
+ * longer running can never cause a *different* task's recycle to be skipped. The
+ * marker is also only ever written after the ZAP API has answered, so "cold started"
+ * already implies "was ready".
+ */
+async function resolveColdStart(key, capacity) {
+  const { peekColdStartMarker, consumeColdStartMarker } = require('./zapCapacityManager');
+
+  if (capacity && capacity.coldStarted && capacity.taskArn) {
+    await consumeColdStartMarker(key, capacity.taskArn);
+    return { skip: true, reason: 'cold-start', taskArn: capacity.taskArn };
+  }
+
+  const marker = await peekColdStartMarker(key);
+  if (!marker) return { skip: false };
+
+  const arns = await listRunningTaskArns(getInstance(key));
+  // Always consume: whether it matched or not, this marker has had its chance.
+  await consumeColdStartMarker(key, marker);
+  if (arns.includes(marker)) {
+    return { skip: true, reason: 'cold-start-warmup', taskArn: marker };
+  }
+  return { skip: false };
+}
+
+/**
+ * Hold the instance lock, ensure capacity, recycle, then run `fn`. The recycle always
+ * lands before the caller's newSession/context setup, which is required — newSession
+ * discards contexts.
  *
  * @param {'normal'|'auth'} key
  * @param {string} scanId
@@ -516,9 +546,51 @@ async function recycleZapInstance(key, { scanId = 'n/a', reason = 'pre-scan', lo
 async function withZapInstance(key, scanId, fn, { recycle = true } = {}) {
   const lock = await acquireZapLock(key, scanId);
   try {
+    // Capacity before recycle, and inside the lock. Before, because there is nothing
+    // to recycle on a service scaled to zero — the recycler's ListTasks would return
+    // empty and its step 4 would wait out NEW_TASK_WAIT_MS for a replacement that
+    // nothing has asked ECS to place. Inside, because the scan lock already
+    // serialises this instance, so two scans cannot both drive a scale-out from here.
+    //
+    // A no-op (and no ECS call at all) unless ZAP_CAPACITY_MANAGED=true and this key
+    // is listed in ZAP_CAPACITY_KEYS.
+    let capacity = { managed: false, coldStarted: false };
+    try {
+      const { ensureZapCapacity } = require('./zapCapacityManager');
+      capacity = await ensureZapCapacity(key, { scanId });
+    } catch (err) {
+      const code = err.code || 'INTERNAL';
+      console.error(`[ZapCapacity] instance=${key} scanId=${scanId} result=fail code=${code} — ${err.message}`);
+      // Same fail-mode contract as the recycle below: FAIL_MODE=proceed means "try the
+      // scan anyway", which is the right call if the service was in fact already up and
+      // only our reads failed.
+      if (process.env.ZAP_RECYCLE_FAIL_MODE === 'proceed') {
+        console.warn('[ZapCapacity] FAIL_MODE=proceed — continuing without confirmed capacity');
+      } else {
+        throw err;
+      }
+    }
+
+    let skippedForColdStart = false;
     if (recycle && process.env.ZAP_RECYCLE_ENABLED !== 'false') {
       try {
-        const result = await recycleZapInstance(key, { scanId, lock });
+        const cold = await resolveColdStart(key, capacity);
+        if (cold.skip) {
+          const inst = getInstance(key);
+          console.log(`[ZapRecycle] instance=${key} scanId=${scanId} result=skip reason=${cold.reason} ` +
+                      `task=${cold.taskArn} — a cold-started task is already fresh`);
+          // Re-verify at the point of use rather than trusting a readiness check that
+          // happened minutes ago during the warm-up. One HTTP GET on the happy path.
+          // Note this stays inside the try: a readiness failure here is a startup
+          // failure and belongs to the fail-mode contract below, whereas fn()'s own
+          // errors must NOT be — hence the flag rather than an early return.
+          await waitForZapApi(inst.baseUrl(), RECYCLE_TIMEOUT_MS(), inst.probeConfig());
+          skippedForColdStart = true;
+        }
+
+        const result = skippedForColdStart
+          ? null
+          : await recycleZapInstance(key, { scanId, lock });
         // A skipped recycle ('already-fresh' or 'recycle-in-progress') never reached the
         // readiness poll inside recycleZapInstance, so the container may be seconds old
         // and not yet listening — ECS sets startedAt when the container starts, but ZAP
@@ -530,7 +602,9 @@ async function withZapInstance(key, scanId, fn, { recycle = true } = {}) {
           await waitForZapApi(inst.baseUrl(), RECYCLE_TIMEOUT_MS(), inst.probeConfig());
         }
       } catch (err) {
-        const code = err instanceof ZapRecycleError ? err.code : 'INTERNAL';
+        // err.code covers ZapCapacityError too — resolveColdStart reads Redis and ECS
+        // through the capacity manager, so its typed failures surface here as well.
+        const code = err.code || 'INTERNAL';
         console.error(`[ZapRecycle] instance=${key} scanId=${scanId} result=fail code=${code} — ${err.message}`);
         if (process.env.ZAP_RECYCLE_FAIL_MODE === 'proceed') {
           console.warn(`[ZapRecycle] FAIL_MODE=proceed — continuing on the existing instance`);

@@ -17,8 +17,20 @@ const CLEANUP_INTERVAL = 60 * 60 * 1000;
 // re-triggers Gemini for scans that are ready but stuck — cheap DB read.
 const FAST_RESCUE_INTERVAL = 5 * 60 * 1000;
 
+// Capacity idle check: every 2 minutes. Cheap (Redis + one countDocuments + one
+// DescribeServices) and frequent enough that the ASG comes down promptly after the
+// idle window elapses, without being so frequent that it churns the ECS API.
+const CAPACITY_CHECK_INTERVAL = 2 * 60 * 1000;
+
 // Stuck-scan watchdog thresholds
-const QUEUED_STALE_MS  = 30 * 60 * 1000;         // 30 min — job never picked up
+//
+// 45 min, raised from 30. A scan can now legitimately sit in 'queued' for a
+// scale-from-zero (up to ZAP_CAPACITY_WAIT_MS = 10 min) on top of the existing
+// ZAP_LOCK_WAIT_MS (30 min) wait behind another scan. At 30 min the watchdog would
+// fail scans that are merely waiting. This is the only watchdog threshold the
+// capacity work changes — ZAP_STALE_MS (24 h) and WEBCHK_STALE_MS (6 h) already
+// dwarf any cold start, and COMBINING_STUCK_MS applies after ZAP is done.
+const QUEUED_STALE_MS  = 45 * 60 * 1000;         // 45 min — job never picked up
 const ZAP_STALE_MS     = 24 * 60 * 60 * 1000;    // 24 h
 const WEBCHK_STALE_MS  =  6 * 60 * 60 * 1000;    // 6 h
 // If both background scans are done but refinedReport is still null after this
@@ -29,6 +41,8 @@ const COMBINING_STUCK_MS = 15 * 60 * 1000;        // 15 min
 let isCleanupRunning = false;
 let cleanupIntervalId = null;
 let fastRescueIntervalId = null;
+let capacityIntervalId = null;
+let isCapacityCheckRunning = false;
 
 /**
  * Run the cleanup tasks
@@ -274,6 +288,36 @@ async function runFastRescue() {
 /**
  * Start the cleanup job scheduler
  */
+/**
+ * Scale idle ZAP capacity back to zero.
+ *
+ * Lives here rather than in schedulerService because schedulerService.startScheduler()
+ * is exported but never called anywhere in the codebase — its cron jobs do not run in
+ * the current deployment. startCleanupJob IS called (server.js), so this is the only
+ * reliable timer in the process.
+ *
+ * Every guard inside releaseZapCapacityIfIdle is a veto and any error means "leave
+ * capacity up", so the worst case here is spending a few more cents, never killing a
+ * scan. A no-op unless ZAP_CAPACITY_MANAGED=true.
+ */
+async function runCapacityCheck() {
+    if (isCapacityCheckRunning) return;
+    isCapacityCheckRunning = true;
+    try {
+        const { releaseIdleCapacity } = require('../services/zapCapacityManager');
+        const results = await releaseIdleCapacity();
+        for (const r of results) {
+            if (r.scaledDown) {
+                console.log(`[CleanupJob] ZAP capacity scaled down: instance=${r.key}`);
+            }
+        }
+    } catch (err) {
+        console.error('[CleanupJob] Capacity check error:', err.message);
+    } finally {
+        isCapacityCheckRunning = false;
+    }
+}
+
 function startCleanupJob() {
     console.log(`[CleanupJob] Starting cleanup scheduler (interval: ${CLEANUP_INTERVAL / 1000 / 60} minutes)`);
 
@@ -289,6 +333,9 @@ function startCleanupJob() {
     // Fast rescue: poll every 5 min for stuck-combining scans
     fastRescueIntervalId = setInterval(runFastRescue, FAST_RESCUE_INTERVAL);
 
+    // Idle ZAP capacity scale-in: poll every 2 min
+    capacityIntervalId = setInterval(runCapacityCheck, CAPACITY_CHECK_INTERVAL);
+
     console.log('[CleanupJob] Cleanup job scheduled');
 }
 
@@ -301,6 +348,11 @@ function stopCleanupJob() {
         cleanupIntervalId = null;
         console.log('[CleanupJob] Cleanup job stopped');
     }
+    if (capacityIntervalId) {
+        clearInterval(capacityIntervalId);
+        capacityIntervalId = null;
+        console.log('[CleanupJob] Capacity check stopped');
+    }
     if (fastRescueIntervalId) {
         clearInterval(fastRescueIntervalId);
         fastRescueIntervalId = null;
@@ -311,5 +363,6 @@ function stopCleanupJob() {
 module.exports = {
     startCleanupJob,
     stopCleanupJob,
-    runCleanup
+    runCleanup,
+    runCapacityCheck
 };

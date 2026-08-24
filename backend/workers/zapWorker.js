@@ -54,12 +54,15 @@ async function processZapJob(job) {
   // Hold the instance lock and recycle the container before scanning. Wrapping here
   // rather than inside zapService keeps lock scope exactly equal to job scope, and lets
   // the existing 'failed' handler below own terminal-failure bookkeeping.
-  const { withZapInstance, ZapRecycleError } = require('../services/zapRecycler');
+  const { withZapInstance } = require('../services/zapRecycler');
   try {
     await withZapInstance('normal', scanId, () => runAsyncZapScanBackground(targetUrl, scanId, userId));
   } catch (err) {
     // Retrying an IAM misconfiguration just burns 3.5 min of backoff to fail identically.
-    if (err instanceof ZapRecycleError && err.code === 'ECS_ACCESS_DENIED') {
+    // Matched on err.code rather than the error class: the capacity manager raises
+    // ZapCapacityError with the same code when ecs:UpdateService is denied, and that is
+    // exactly as unrecoverable as a denied ecs:StopTask.
+    if (err.code === 'ECS_ACCESS_DENIED' || err.code === 'SERVICE_NOT_FOUND') {
       throw new UnrecoverableError(err.message);
     }
     throw err;
@@ -118,10 +121,19 @@ function createZapWorker(publisherClient) {
       // errorCode / failureReason are machine-readable so the UI can render a localized
       // explanation. zapResult.error stays English and is for server logs only — it must
       // never be rendered (CLAUDE.md).
+      // Capacity codes join the existing recycle codes rather than introducing new ones.
+      // The user-facing text comes from `failureReason: 'vulnerability_scan_failed'`
+      // (Hero.jsx:1008, AuthenticatedScanPanel.jsx:566) — `errorCode` is diagnostic and
+      // is not currently mapped in the UI, so reusing these values keeps the persisted
+      // vocabulary small and needs no en.js/ja.js additions.
       const recycleCodes = ['ECS_ACCESS_DENIED', 'PLACEMENT_FAILED', 'REPLACEMENT_DIED',
-                            'API_NOT_READY', 'NOT_FRESH', 'LOCK_TIMEOUT'];
+                            'API_NOT_READY', 'NOT_FRESH', 'LOCK_TIMEOUT',
+                            'CAPACITY_TASK_DIED', 'CAPACITY_API_NOT_READY',
+                            'CAPACITY_SCALE_OUT_FAILED', 'SERVICE_NOT_FOUND'];
       let errorCode = 'zap_scan_failed';
-      if (err.code === 'TIMEOUT') errorCode = 'zap_recycle_timeout';
+      // CAPACITY_TIMEOUT is a timeout in the same sense TIMEOUT is — capacity never
+      // arrived within the budget — so it maps to the same key.
+      if (err.code === 'TIMEOUT' || err.code === 'CAPACITY_TIMEOUT') errorCode = 'zap_recycle_timeout';
       else if (recycleCodes.includes(err.code)) errorCode = 'zap_recycle_failed';
 
       await ScanResult.updateOne(

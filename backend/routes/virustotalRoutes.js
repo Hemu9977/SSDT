@@ -542,6 +542,23 @@ router.post('/combined-url-scan', auth, planCheck, scanLimiter, combinedScanLimi
     await addScanJob(analysisId, url, req.user.id);
     console.log(`📬 Scan job enqueued for ${analysisId}`);
 
+    // Warm ZAP capacity up at acceptance, not when the ZAP job is dequeued. scanWorker
+    // runs PageSpeed, Observatory, urlscan and WebCheck before it enqueues the ZAP job,
+    // so a scale-from-zero started here (4–8 min) overlaps those rather than being added
+    // to the end of them — which is what keeps the cold start invisible to the user.
+    //
+    // Deliberately not awaited and never fatal: the authoritative capacity wait happens
+    // inside withZapInstance, under the ZAP lock. This is an optimisation, so a failure
+    // here must not fail a scan that would otherwise succeed. No-ops entirely unless
+    // ZAP_CAPACITY_MANAGED=true and 'normal' is in ZAP_CAPACITY_KEYS.
+    {
+      const { markZapDemand, ensureZapCapacity } = require('../services/zapCapacityManager');
+      markZapDemand('normal').catch(() => {});
+      ensureZapCapacity('normal', { scanId: analysisId }).catch(err =>
+        console.warn(`[ZapCapacity] warm-up failed for ${analysisId}: ${err.message}`)
+      );
+    }
+
     res.json({
       success: true,
       message: 'Scan queued — you will receive real-time updates via WebSocket',
