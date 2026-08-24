@@ -33,6 +33,18 @@
           "ecs:cluster": "arn:aws:ecs:ap-northeast-1:459181228792:cluster/fortexa-cluster"
         }
       }
+    },
+    {
+      "Sid": "ReadAndScaleZAPServices",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeServices",
+        "ecs:UpdateService"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ap-northeast-1:459181228792:service/fortexa-cluster/zap-scan-ec2",
+        "arn:aws:ecs:ap-northeast-1:459181228792:service/fortexa-cluster/zap-auth-task-ec2"
+      ]
     }
   ]
 }
