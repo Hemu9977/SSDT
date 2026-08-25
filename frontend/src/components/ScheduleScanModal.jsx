@@ -7,7 +7,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useUser } from '../contexts/UserContext';
 import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScheduleScanModal.scss';
 import { API_BASE } from '../config/api';
@@ -240,7 +239,6 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const { isPro } = useUser();
   const { t } = useTranslation();
 
   const resetForm = React.useCallback(() => {
@@ -422,7 +420,10 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
         onClick={onClose}
       >
         <motion.div
-          className={`schedule-modal ${isPro ? 'pro-theme' : ''}`}
+          // No `pro-theme` here: that class repaints --accent purple, forces
+          // min-height:100vh (which pushed the modal under the sticky header)
+          // and blanks the background. The modal follows the app's orange accent.
+          className="schedule-modal"
           initial={{ opacity: 0, scale: 0.9, y: 30 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.9, y: 30 }}

@@ -31,7 +31,13 @@ body.light {
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 20px;
+  // The app header is `position: sticky; z-index: 1000` and paints over this
+  // overlay, so the modal is laid out in the space *below* it rather than
+  // being centred on the whole viewport and clipped at the top.
+  padding: calc(var(--header-height) + 20px) 20px 20px;
+  // Last resort on very short viewports (landscape phones): scroll the
+  // overlay rather than let the modal spill off-screen.
+  overflow-y: auto;
 }
 
 .schedule-modal {
@@ -40,6 +46,9 @@ body.light {
   border-radius: var(--card-border-radius);
   width: 100%;
   max-width: 720px;
+  // Fills at most the padded overlay box, so the header/body/actions always
+  // fit on screen and only the body scrolls.
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   box-shadow: var(--card-shadow);
@@ -89,8 +98,10 @@ body.light {
   &__form {
     padding: 24px;
     overflow-y: auto;
-    max-height: 80vh;
-    flex: 1;
+    // Shrinks to whatever the modal has left after the header and the action
+    // bar; `min-height: 0` is what lets a flex item scroll instead of grow.
+    flex: 1 1 auto;
+    min-height: 0;
 
     // Custom scrollbar for internal form
     &::-webkit-scrollbar {
@@ -278,6 +289,7 @@ body.light {
   display: flex;
   gap: 24px;
   flex-wrap: wrap;
+  align-items: flex-start;
   margin-bottom: 1.5rem;
 }
 
@@ -478,10 +490,13 @@ body.light {
   transition: margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 
   &.picker-open {
-    margin-bottom: 360px; // Reserve space to prevent clipping and overlap
+    // The dropdown is absolutely positioned inside the scrolling form body, so
+    // the wrapper has to reserve its full height (~385px) or the last calendar
+    // row and the "today" button fall outside the scrollable area.
+    margin-bottom: 400px;
 
     @media (max-width: 640px) {
-      margin-bottom: 380px;
+      margin-bottom: 420px;
     }
   }
 
@@ -516,7 +531,9 @@ body.light {
     top: calc(100% + 8px);
     left: 0;
     width: 100%;
-    min-width: 280px;
+    // Plain `min-width: 280px` overflowed the modal on narrow phones, where the
+    // column is narrower than that.
+    min-width: min(280px, 100%);
     max-width: 320px;
     background: rgba(10, 15, 20, 0.98);
     border: 2px solid var(--accent);
@@ -720,7 +737,6 @@ body.light {
 
     &__form {
       padding: 16px;
-      max-height: 70vh;
     }
 
     &__header { padding: 16px; }
