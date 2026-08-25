@@ -355,21 +355,38 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
   console.log(`[Scheduler] 🔐 Performing background login for ${targetUrl}`);
   
   let cookies = [];
+  let authState = null;
+  let loginOutcome = 'not_configured';
+
   if (authConfig && authConfig.loginUrl && authConfig.credentials && authConfig.credentials.length > 0) {
     try {
       const loginResult = await testLogin({
         loginUrl: authConfig.loginUrl,
         credentials: authConfig.credentials,
-        submitButton: authConfig.submitButton ? { selector: authConfig.submitButton } : null
+        submitButton: authConfig.submitButton ? { selector: authConfig.submitButton } : null,
+        expectedMarker: authConfig.signedInMarker || null
       });
 
       if (loginResult && loginResult.authenticated) {
         cookies = loginResult.cookies || [];
-        console.log(`[Scheduler] ✅ Background login successful for ${targetUrl} (${cookies.length} cookies obtained)`);
+        loginOutcome = loginResult.authConfirmed || 'unconfirmed';
+        authState = {
+          marker: loginResult.marker || null,
+          markerCheckableInBody: Boolean(loginResult.markerCheckableInBody),
+          recipe: {
+            loginUrl: authConfig.loginUrl,
+            credentials: authConfig.credentials,
+            submitButton: authConfig.submitButton ? { selector: authConfig.submitButton } : null
+          },
+          reloginAttempts: 0
+        };
+        console.log(`[Scheduler] ✅ Background login ${loginOutcome} for ${targetUrl} (${cookies.length} cookies)`);
       } else {
-        console.warn(`[Scheduler] ⚠️ Background login failed for ${targetUrl}: ${loginResult?.errorMessage || 'Unknown error'}`);
+        loginOutcome = 'failed';
+        console.warn(`[Scheduler] ⚠️ Background login failed for ${targetUrl}: ${loginResult?.errorCode || 'unknown'}`);
       }
     } catch (loginErr) {
+      loginOutcome = 'failed';
       console.error(`[Scheduler] ❌ Background login exception for ${targetUrl}:`, loginErr.message);
     }
   }
@@ -385,7 +402,21 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     userId: userId,
     organizationId: organizationId || null,
     triggerSource: 'scheduled',
-    languagePreference: 'en'
+    languagePreference: 'en',
+    // Record the login outcome on the scan itself. Previously a failed
+    // background login left `cookies` empty and the scan ran anyway, producing a
+    // report of the publicly visible pages that was indistinguishable from a
+    // successful authenticated scan. The scan still runs — a public scan is
+    // better than no scan — but it is now labelled as one.
+    authScanResult: {
+      status: 'provisioning',
+      phase: 'provisioning',
+      progress: 0,
+      loginOutcome,
+      authVerified: loginOutcome === 'confirmed' ? true : (loginOutcome === 'failed' ? false : null),
+      authDegraded: loginOutcome === 'failed',
+      authDegradedReason: loginOutcome === 'failed' ? 'scheduled_login_failed' : null
+    }
   });
   await skeletonScan.save();
 
@@ -403,7 +434,10 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     authConfig?.loginUrl || targetUrl,
     cookies,
     scanId,
-    userId
+    userId,
+    undefined,   // zapUrl — resolved by the service in scheduled runs
+    undefined,   // onComplete — scheduled runs do not hold a container lock here
+    authState
   );
 
   return result;

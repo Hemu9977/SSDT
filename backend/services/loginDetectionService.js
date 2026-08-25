@@ -5,6 +5,8 @@
  */
 
 const puppeteer = require('puppeteer');
+const { revealLoginPanel } = require('../utils/revealLoginPanel');
+const { rankSubmitButtons, autoRetryCandidates } = require('../utils/loginFormRanking');
 
 // Field name/id patterns for classification
 const USERNAME_PATTERNS = /user|email|login|account|name|identifier|uid|uname/i;
@@ -87,6 +89,16 @@ async function detectLoginFields(loginUrl) {
     // Wait a bit for any dynamic content to render
     await new Promise(resolve => setTimeout(resolve, 2000));
 
+    // Some sites have no login page at all — the form is behind a header
+    // dropdown or a "Get Started" call to action, and the URL never changes.
+    // Detection used to give up here, before the login test (which did know how
+    // to open such panels) ever got a chance to run.
+    const reveal = await revealLoginPanel(page);
+    if (reveal.clicked) {
+      console.log(`[LoginDetection] Opened a hidden login panel via ${reveal.clicked}`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
     // Get page title
     const pageTitle = await page.title();
 
@@ -166,6 +178,14 @@ async function detectLoginFields(loginUrl) {
           required: input.required || false,
           ariaLabel: input.getAttribute('aria-label') || '',
           autocomplete: input.getAttribute('autocomplete') || '',
+          // Carried out of the page so button ranking can run in Node, where it
+          // is testable without a browser.
+          className: typeof input.className === 'string' ? input.className : '',
+          buttonText: tagName === 'BUTTON' ? (input.textContent || '').replace(/\s+/g, ' ').trim() : '',
+          // Whether this field belongs to the login box itself. Fields inside a
+          // real <form> always do; the no-form branch overrides this. Only
+          // affects what is pre-selected, never what is offered.
+          inLoginScope: true,
           formIndex
         };
       };
@@ -213,6 +233,7 @@ async function detectLoginFields(loginUrl) {
                 required: false,
                 ariaLabel: btn.getAttribute('aria-label') || '',
                 autocomplete: '',
+                className: typeof btn.className === 'string' ? btn.className : '',
                 formIndex,
                 buttonText: btn.textContent.trim()
               });
@@ -232,13 +253,39 @@ async function detectLoginFields(loginUrl) {
 
       // If no forms found, look for standalone inputs (SPA pattern)
       if (results.length === 0) {
+        // Work out which container holds the login box, but do NOT narrow the
+        // collection to it. Every input and button on the page is still
+        // returned, because the manual override in the UI is the escape hatch
+        // when our guess is wrong — dropping candidates here would leave a
+        // customer with no way to correct us. The container is only used to
+        // decide what gets *pre-selected*.
+        const password = document.querySelector('input[type="password"]');
+        let scope = null;
+        if (password) {
+          let node = password.parentElement;
+          while (node && node !== document.body) {
+            const inputCount = node.querySelectorAll('input:not([type="hidden"])').length;
+            const buttonCount = node.querySelectorAll('button').length;
+            if (inputCount >= 2 && buttonCount >= 1) break;
+            node = node.parentElement;
+          }
+          scope = node && node !== document.body ? node : null;
+        }
+
         const allInputs = document.querySelectorAll('input:not([type="hidden"]), button');
         const standaloneFields = [];
 
         allInputs.forEach(input => {
           if (input.closest('form')) return; // Skip inputs already in forms
           const data = extractFieldData(input, -1);
-          if (data) standaloneFields.push(data);
+          if (data) {
+            // Drives auto-selection only. A field outside the login box (a
+            // header search box, a newsletter signup) is still listed and can
+            // be ticked by hand; it just is not treated as a credential the
+            // customer must fill in before they can continue.
+            data.inLoginScope = scope ? scope.contains(input) : true;
+            standaloneFields.push(data);
+          }
         });
 
         if (standaloneFields.length > 0) {
@@ -264,7 +311,16 @@ async function detectLoginFields(loginUrl) {
       // Find best-guess fields
       let usernameField = classifiedFields.find(f => f.classification === 'username') || null;
       let passwordField = classifiedFields.find(f => f.classification === 'password') || null;
-      let submitButton = classifiedFields.find(f => f.classification === 'submit') || null;
+
+      // Rank rather than take the first in document order. On a page with no
+      // <form> element the fallback collects the whole document, so the first
+      // button is a header control — the sidebar toggle, the language picker,
+      // the account menu — and never the login button. Ranking scores proximity
+      // to the password field and drops navigation controls, with document
+      // order as the tie-break so pages that already resolved correctly are
+      // unaffected.
+      const rankedButtons = rankSubmitButtons(classifiedFields);
+      const submitButton = rankedButtons[0] || null;
 
       // If no username field found but there's a text/tel input before the password, assume it's username
       if (!usernameField && passwordField) {
@@ -284,7 +340,12 @@ async function detectLoginFields(loginUrl) {
         fields: classifiedFields,
         usernameField,
         passwordField,
-        submitButton
+        submitButton,
+        // Runners-up the login test may click automatically if the first choice
+        // turns out not to submit anything. Third-party sign-in buttons are
+        // excluded here — clicking one would navigate off the site — but they
+        // stay in `fields`, so the manual override still offers them.
+        submitAlternates: autoRetryCandidates(rankedButtons)
       };
     });
 

@@ -17,6 +17,7 @@
       "secrets": [
         { "name": "MONGO_URI",         "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:MONGO_URI::" },
         { "name": "JWT_SECRET",        "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:JWT_SECRET::" },
+        { "name": "CREDENTIAL_ENCRYPTION_KEY", "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:CREDENTIAL_ENCRYPTION_KEY::" },
         { "name": "PSI_API_KEY",       "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:PSI_API_KEY::" },
         { "name": "URLSCAN_API_KEY",   "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:URLSCAN_API_KEY::" },
         { "name": "REDIS_URL",         "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:REDIS_URL::" },

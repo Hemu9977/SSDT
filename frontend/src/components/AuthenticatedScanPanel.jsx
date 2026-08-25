@@ -26,7 +26,11 @@ const LOGIN_ERROR_MESSAGE_KEYS = {
   FIELD_NOT_FOUND: 'loginFieldNotFound',
   FIELD_FILL_FAILED: 'loginFieldFillFailed',
   LOGIN_ANALYSIS_FAILED: 'loginAnalysisFailed',
-  UNEXPECTED_ERROR: 'loginUnexpectedError'
+  UNEXPECTED_ERROR: 'loginUnexpectedError',
+  LOGIN_PANEL_NOT_FOUND: 'loginPanelNotFound',
+  SUBMIT_NO_EFFECT: 'loginSubmitNoEffect',
+  AUTH_UNCONFIRMED: 'loginAuthUnconfirmed',
+  NO_SESSION_COOKIES: 'loginNoSessionCookies'
 };
 
 const errorCodeToMessageKey = (errorCode) =>
@@ -64,6 +68,9 @@ const AuthenticatedScanPanel = () => {
   const [credentials, setCredentials] = useState({}); // Map: { [selector]: value }
   const [showPasswords, setShowPasswords] = useState({}); // Map: { [selector]: boolean }
   const [selectedSubmitButton, setSelectedSubmitButton] = useState(null);
+  // Optional text the customer says appears only when signed in. Asked for only
+  // after we fail to work it out ourselves, and worded purely about their site.
+  const [signedInMarker, setSignedInMarker] = useState('');
 
   // Step 2-3: Login test
   const [testing, setTesting] = useState(false);
@@ -280,14 +287,19 @@ const AuthenticatedScanPanel = () => {
       if (data.forms && data.forms.length > 0) {
         const form = data.forms[0];
 
-        // Auto-select input fields (not buttons)
+        // Auto-select input fields (not buttons). On a page with no <form>,
+        // detection returns every input on the page so the manual list stays
+        // complete — but only the ones inside the login box are pre-selected.
+        // Otherwise a header search box or newsletter field becomes a
+        // credential the customer is forced to fill in before continuing.
         const inputFields = form.fields.filter(f =>
           f.tagName === 'INPUT' &&
           f.inputType !== 'submit' &&
           f.inputType !== 'button'
         );
+        const scopedFields = inputFields.filter(f => f.inLoginScope !== false);
 
-        setSelectedFields(inputFields);
+        setSelectedFields(scopedFields.length > 0 ? scopedFields : inputFields);
 
         // Initialize credentials object
         const initialCreds = {};
@@ -369,7 +381,11 @@ const AuthenticatedScanPanel = () => {
             value: credentials[field.selector],
             inputType: field.inputType
           })),
-          submitButton: selectedSubmitButton
+          submitButton: selectedSubmitButton,
+          // Runners-up from detection, so the test can retry with the next best
+          // candidate when the chosen button turns out not to submit anything.
+          submitAlternates: (detectedFields?.forms?.[0]?.submitAlternates) || [],
+          expectedMarker: signedInMarker.trim() || null
         })
       });
 
@@ -390,7 +406,13 @@ const AuthenticatedScanPanel = () => {
           clearedCreds[key] = '';
         });
         setCredentials(clearedCreds);
-        setStep(3);
+
+        // Only advance automatically when we could actually confirm the
+        // sign-in. Otherwise stay put so the caution is read rather than
+        // skipped past — continuing is then a deliberate choice.
+        if (data.authConfirmed === 'confirmed') {
+          setStep(3);
+        }
       }
     } catch {
       setTestResult({ authenticated: false, errorCode: 'UNEXPECTED_ERROR' });
@@ -417,7 +439,15 @@ const AuthenticatedScanPanel = () => {
         value: credentials[field.selector],
         inputType: field.inputType
       })),
-      submitButton: selectedSubmitButton
+      // A selector string, not the whole field object. ScheduledScan declares
+      // `submitButton` as a String and the scheduler reads it as one
+      // (`{ selector: authConfig.submitButton }`); sending the object made
+      // Mongoose reject the save, so scheduled authenticated scans could never
+      // store a working submit button.
+      submitButton: selectedSubmitButton?.selector || null,
+      // Carried so a scheduled run can confirm it is signed in without having
+      // to re-derive the marker from scratch.
+      signedInMarker: signedInMarker.trim() || null
     };
 
     try {
@@ -1058,8 +1088,16 @@ const AuthenticatedScanPanel = () => {
 
             {/* Test Result */}
             {testResult && (
-              <div className={`test-result ${testResult.authenticated ? 'test-success' : 'test-fail'}`}>
-                {testResult.authenticated ? (
+              <div
+                className={`test-result ${
+                  testResult.authConfirmed === 'confirmed'
+                    ? 'test-success'
+                    : testResult.authConfirmed === 'unconfirmed'
+                      ? 'test-caution'
+                      : 'test-fail'
+                }`}
+              >
+                {testResult.authConfirmed === 'confirmed' && (
                   <>
                     <strong>{'✅'} {t('loginSuccessful')}</strong>
                     <p>{t('credentialsVerified')}</p>
@@ -1069,11 +1107,46 @@ const AuthenticatedScanPanel = () => {
                       </p>
                     )}
                   </>
-                ) : (
+                )}
+
+                {testResult.authConfirmed === 'unconfirmed' && (
+                  <>
+                    <strong>{'⚠️'} {t('loginUnconfirmed')}</strong>
+                    <p>{t('loginUnconfirmedExplain')}</p>
+                    <button
+                      className="primary-btn"
+                      onClick={() => setStep(3)}
+                      disabled={!tempSessionId}
+                    >
+                      {t('continueAnyway')}
+                    </button>
+                  </>
+                )}
+
+                {testResult.authConfirmed !== 'confirmed' && testResult.authConfirmed !== 'unconfirmed' && (
                   <>
                     <strong>❌ {t('loginFailed')}</strong>
                     <p>{t(errorCodeToMessageKey(testResult.errorCode))}</p>
                   </>
+                )}
+
+                {/* Offered only once we could not work it out ourselves. The
+                    question is about the customer's own site and reveals
+                    nothing about how the check is performed. */}
+                {testResult.markerFound === false && (
+                  <div className="form-group signed-in-marker">
+                    <label htmlFor="signed-in-marker">{t('signedInMarkerLabel')}</label>
+                    <input
+                      id="signed-in-marker"
+                      type="text"
+                      className="url-input"
+                      value={signedInMarker}
+                      onChange={(e) => setSignedInMarker(e.target.value)}
+                      placeholder={t('signedInMarkerPlaceholder')}
+                      autoComplete="off"
+                    />
+                    <p className="field-hint">{t('signedInMarkerHint')}</p>
+                  </div>
                 )}
               </div>
             )}
@@ -1137,6 +1210,18 @@ const AuthenticatedScanPanel = () => {
                 ? t('securityScanCompletedReviewBelow')
                 : t('runningAuthenticatedWebsiteScan')}
             </p>
+
+            {/* What this scan actually covered. Derived from the structured
+                `authCoverage` field, never from backend prose. */}
+            {step === 5 && report?.authCoverage && (
+              <div className={`test-result ${report.authCoverage === 'confirmed' ? 'test-success' : 'test-caution'}`}>
+                <p>
+                  {report.authCoverage === 'confirmed'
+                    ? t('authCoverageConfirmed')
+                    : t('authCoverageUnconfirmed')}
+                </p>
+              </div>
+            )}
 
             {/* Progress Bar (only during scanning) */}
             {step === 4 && (

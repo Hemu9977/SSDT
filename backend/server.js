@@ -43,6 +43,15 @@ if (missingVars.length > 0) {
   process.exit(1);
 }
 
+// Scheduled authenticated scans store customer login details, which are
+// encrypted at rest. Without the key those schedules cannot be saved at all —
+// the model refuses rather than falling back to writing plaintext. Everything
+// else in the product works fine, so this warns instead of exiting.
+if (!require('./utils/credentialCrypto').isConfigured()) {
+  console.warn('⚠️  CREDENTIAL_ENCRYPTION_KEY is not set.');
+  console.warn('   Scheduled authenticated scans cannot be created or updated until it is.');
+}
+
 const app = express();
 
 app.use(helmet({

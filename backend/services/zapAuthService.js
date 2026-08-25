@@ -10,6 +10,7 @@ const axios = require('axios');
 const http = require('http');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('./gridfsService');
+const { markerPresentInBody } = require('../utils/loginSignals');
 
 // ============================================================================
 // ZAP AUTH API CONFIGURATION
@@ -21,6 +22,27 @@ const ZAP_AUTH_API_KEY = process.env.ZAP_AUTH_API_KEY; // Optional when ZAP runs
 // Mirrors AJAX_SPIDER_BROWSERS in zapService.js — headless Firefox processes count
 // against the ZAP container's memory limit, not the JVM heap.
 const AJAX_SPIDER_BROWSERS = Number(process.env.ZAP_AJAX_BROWSERS) || 1;
+
+// How many times a scan may log itself back in before we accept the session is
+// not recoverable and label the remaining coverage as public-pages-only. Capped
+// so a site that rejects the credentials outright cannot cause a login storm.
+const MAX_RELOGIN_ATTEMPTS = 3;
+
+// Everything recorded about whether the scan was actually signed in. The final
+// write replaces `authScanResult` wholesale, so these are re-read and carried
+// across; listing them in one place keeps that from rotting as fields are added.
+const AUTH_HEALTH_KEYS = [
+  'loginOutcome',
+  'authVerified',
+  'authVerifiedReason',
+  'authVerifiedAt',
+  'authVerifiedPhase',
+  'authLostAt',
+  'reloginAttempts',
+  'authRepaired',
+  'authDegraded',
+  'authDegradedReason'
+];
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -152,6 +174,37 @@ function groupAlertsByUrl(alerts) {
   });
 
   return Object.values(grouped);
+}
+
+/**
+ * Fetch the most recent response body the proxy saw for a URL.
+ *
+ * Used to answer "are we still signed in?" during a scan. Best-effort: returns
+ * null on any failure, and callers must treat null as "cannot tell" rather than
+ * as "signed out" — wrongly reporting a lost session is as bad as missing one.
+ *
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} baseurl
+ * @returns {Promise<string|null>}
+ */
+async function fetchLatestResponseBody(client, baseurl) {
+  if (!client || !baseurl) return null;
+  try {
+    const res = await client.get('/JSON/core/view/messages/', {
+      params: { baseurl, start: 0, count: 50 }
+    });
+    const messages = (res && res.data && res.data.messages) || [];
+    if (!Array.isArray(messages) || messages.length === 0) return null;
+    // Most recent last.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const body = messages[i] && messages[i].responseBody;
+      if (typeof body === 'string' && body.length > 0) return body;
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[ZAP-AUTH] Could not read response body for ${baseurl}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -294,6 +347,182 @@ async function checkZapAuthHealth() {
  * Configure ZAP authentication context with session cookies.
  * Uses the Replacer API to inject Cookie headers into all requests.
  */
+/**
+ * Is the scan still signed in?
+ *
+ * Nothing in this file used to ask. A session that expired twenty minutes into a
+ * four-hour scan produced a full report of the publicly visible pages, labelled
+ * as authenticated, with no indication anything had gone wrong.
+ *
+ * Three-valued on purpose:
+ *   true  — the signed-in marker is in the response body
+ *   false — the marker should be there and is not
+ *   null  — we cannot tell, and must not guess
+ *
+ * `null` is the honest answer for a single-page app: it serves the same shell
+ * HTML to everyone and fills it in with JavaScript, so the marker never appears
+ * in a response body even when the session is perfectly healthy. That is what
+ * `markerCheckableInBody` records at login time.
+ *
+ * @returns {Promise<{verified:boolean|null, reason:string}>}
+ */
+async function verifySignedIn({ zapClient, targetUrl, authState }) {
+  if (!authState || !authState.marker) {
+    return { verified: null, reason: 'no_marker' };
+  }
+  if (!authState.markerCheckableInBody) {
+    return { verified: null, reason: 'marker_not_in_body' };
+  }
+
+  const body = await fetchLatestResponseBody(zapClient, targetUrl);
+  if (body === null) {
+    return { verified: null, reason: 'no_response_captured' };
+  }
+
+  return markerPresentInBody(body, authState.marker)
+    ? { verified: true, reason: 'marker_present' }
+    : { verified: false, reason: 'marker_absent' };
+}
+
+/**
+ * Log in again and repoint the proxy at the fresh cookies.
+ *
+ * The login recipe is held only for the life of the scan. For a manual scan it
+ * lives in memory and is never written to disk; for a scheduled scan it comes
+ * from the stored schedule, where the credential values are encrypted at rest.
+ *
+ * @returns {Promise<{ok:boolean, cookies:Array, reason:string}>}
+ */
+async function reAuthenticate({ zapClient, authState, scanId }) {
+  if (!authState || !authState.recipe || !authState.recipe.loginUrl) {
+    return { ok: false, cookies: [], reason: 'no_recipe' };
+  }
+  if (authState.reloginAttempts >= MAX_RELOGIN_ATTEMPTS) {
+    return { ok: false, cookies: [], reason: 'attempts_exhausted' };
+  }
+
+  authState.reloginAttempts = (authState.reloginAttempts || 0) + 1;
+  console.log(`[ZAP-AUTH] Session lost for ${scanId} — re-login attempt ${authState.reloginAttempts}`);
+
+  try {
+    const { testLogin } = require('./loginTestService');
+    const result = await testLogin({
+      loginUrl: authState.recipe.loginUrl,
+      credentials: authState.recipe.credentials,
+      submitButton: authState.recipe.submitButton,
+      submitAlternates: authState.recipe.submitAlternates,
+      expectedMarker: authState.marker
+    });
+
+    if (!result.authenticated || !result.cookies || result.cookies.length === 0) {
+      return { ok: false, cookies: [], reason: 'login_failed' };
+    }
+
+    await applyCookieReplacerRule(zapClient, result.cookies);
+    console.log(`[ZAP-AUTH] Re-login succeeded for ${scanId} (${result.cookies.length} cookies)`);
+    return { ok: true, cookies: result.cookies, reason: 'relogin_ok' };
+  } catch (err) {
+    console.error(`[ZAP-AUTH] Re-login threw for ${scanId}: ${err.message}`);
+    return { ok: false, cookies: [], reason: 'relogin_error' };
+  }
+}
+
+/**
+ * Check the session and repair it if it has died. Records what happened on the
+ * scan document so the report can tell the truth about coverage.
+ *
+ * Never throws and never fails the scan: a scan of the public pages is still
+ * worth delivering, as long as it is labelled as one.
+ *
+ * @param {string} phase where in the scan this check ran, for the audit trail
+ */
+async function checkAndRepairSession({ zapClient, targetUrl, authState, scanId, phase }) {
+  if (!authState) return {};
+
+  try {
+    return await runSessionCheck({ zapClient, targetUrl, authState, scanId, phase });
+  } catch (err) {
+    // A problem checking the session must never take down the scan itself.
+    console.warn(`[ZAP-AUTH] Session check failed at ${phase} for ${scanId}: ${err.message}`);
+    return {};
+  }
+}
+
+async function runSessionCheck({ zapClient, targetUrl, authState, scanId, phase }) {
+  const { verified, reason } = await verifySignedIn({ zapClient, targetUrl, authState });
+
+  const update = {
+    'authScanResult.authVerified': verified,
+    'authScanResult.authVerifiedReason': reason,
+    'authScanResult.authVerifiedAt': new Date(),
+    'authScanResult.authVerifiedPhase': phase,
+    updatedAt: new Date()
+  };
+
+  if (verified === false) {
+    update['authScanResult.authLostAt'] = new Date();
+    const repair = await reAuthenticate({ zapClient, authState, scanId });
+    update['authScanResult.reloginAttempts'] = authState.reloginAttempts || 0;
+    update['authScanResult.authRepaired'] = repair.ok;
+    if (!repair.ok) {
+      // The rest of the scan will cover the publicly visible pages only.
+      update['authScanResult.authDegraded'] = true;
+      update['authScanResult.authDegradedReason'] = repair.reason;
+    }
+  }
+
+  await ScanResult.updateOne({ analysisId: scanId }, { $set: update }).catch(() => {});
+
+  // Returned undotted so the caller can carry these into the final write, which
+  // replaces `authScanResult` wholesale and would otherwise discard them at the
+  // exact moment the report needs them.
+  const carried = {};
+  for (const [key, value] of Object.entries(update)) {
+    if (key.startsWith('authScanResult.')) carried[key.slice('authScanResult.'.length)] = value;
+  }
+  return carried;
+}
+
+/**
+ * Point the proxy's Cookie header at a specific set of cookies.
+ *
+ * Extracted from `configureAuthContext` so the same path can be reused to
+ * refresh the session mid-scan. The rule is removed and re-added rather than
+ * edited, which is also how a refresh replaces a stale value.
+ *
+ * @param {import('axios').AxiosInstance} zapClient
+ * @param {Array<{name:string,value:string}>} cookies
+ */
+async function applyCookieReplacerRule(zapClient, cookies) {
+  const cookieString = (cookies || [])
+    .map(c => `${c.name}=${c.value}`)
+    .join('; ');
+
+  // Remove any existing rule first; it may not exist yet.
+  try {
+    await zapClient.get('/JSON/replacer/action/removeRule/', {
+      params: { description: 'auth_cookie' }
+    });
+  } catch (_) {
+    // Nothing to remove.
+  }
+
+  await zapAuthApiWithRetry(
+    () => zapClient.get('/JSON/replacer/action/addRule/', {
+      params: {
+        description: 'auth_cookie',
+        enabled: 'true',
+        matchType: 'REQ_HEADER',
+        matchRegex: 'false',
+        matchString: 'Cookie',
+        replacement: cookieString,
+        initiators: ''
+      }
+    }),
+    3, 1000, 'Add cookie replacer rule'
+  );
+}
+
 async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
   const contextName = `auth_scan_${scanId}`;
   const targetUrlObj = new URL(targetUrl);
@@ -357,38 +586,10 @@ async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
 
   // Inject cookies via Replacer API
   if (cookies && cookies.length > 0) {
-    const cookieString = cookies
-      .map(c => `${c.name}=${c.value}`)
-      .join('; ');
-
     console.log(`[ZAP-AUTH] Injecting ${cookies.length} cookies via Replacer API`);
 
     try {
-      // Remove any existing cookie replacer rule
-      try {
-        await zapClient.get('/JSON/replacer/action/removeRule/', {
-          params: { description: 'auth_cookie' }
-        });
-      } catch (_) {
-        // Rule may not exist yet
-      }
-
-      // Add Cookie header replacement rule
-      await zapAuthApiWithRetry(
-        () => zapClient.get('/JSON/replacer/action/addRule/', {
-          params: {
-            description: 'auth_cookie',
-            enabled: 'true',
-            matchType: 'REQ_HEADER',
-            matchRegex: 'false',
-            matchString: 'Cookie',
-            replacement: cookieString,
-            initiators: ''
-          }
-        }),
-        3, 1000, 'Add cookie replacer rule'
-      );
-
+      await applyCookieReplacerRule(zapClient, cookies);
       console.log(`[ZAP-AUTH] Cookie injection configured successfully`);
     } catch (cookieError) {
       console.error(`[ZAP-AUTH] Failed to configure cookie injection: ${cookieError.message}`);
@@ -429,7 +630,7 @@ async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
  * Run a full authenticated ZAP scan in the background.
  * Updates ScanResult.authScanResult as it progresses.
  */
-async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl) {
+async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl, authState = null) {
   // Per-scan client pointing at this scan's dedicated container.
   // All zapAuthApi.get() calls inside this function reference this local variable.
   const zapAuthApi = createZapAuthClient(zapUrl || ZAP_AUTH_URL);
@@ -439,6 +640,10 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
   console.log(`[ZAP-AUTH] Login URL: ${loginUrl}`);
 
   let contextName = null;
+
+  // Accumulated sign-in health across the scan. Carried into the final write
+  // below, which replaces `authScanResult` wholesale.
+  const authHealth = {};
 
   const updateProgress = async (phase, progress, additionalData = {}) => {
     try {
@@ -544,6 +749,17 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     } catch (_) {
       // Non-critical
     }
+
+    // Before crawling anything, confirm the injected session is actually being
+    // honoured by the site. Crawling first and asking later is how an entire
+    // scan ends up covering the logged-out view of the application.
+    Object.assign(authHealth, await checkAndRepairSession({
+      zapClient: zapAuthApi,
+      targetUrl,
+      authState,
+      scanId,
+      phase: 'before_spider'
+    }));
 
     // Phase 2: Traditional Spider
     await updateProgress('spidering', 15, { message: 'Crawling authenticated pages...' });
@@ -723,6 +939,17 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
 
     console.log(`[ZAP-AUTH] Passive scan complete`);
 
+    // Crawling is the phase most likely to have ended the session — it follows
+    // every link it finds, and sites expire or rotate sessions under that load.
+    // Check again before the long active-scan phase commits to it.
+    Object.assign(authHealth, await checkAndRepairSession({
+      zapClient: zapAuthApi,
+      targetUrl,
+      authState,
+      scanId,
+      phase: 'before_active_scan'
+    }));
+
     // Phase 4: Active Scan
     await updateProgress('active_scan', 45, { message: 'Starting vulnerability testing...', urlsFound });
     console.log(`[ZAP-AUTH] Starting active scan`);
@@ -871,11 +1098,29 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
 
     console.log(`[ZAP-AUTH] Reports stored in GridFS`);
 
+    // This write replaces `authScanResult` wholesale, so everything recorded
+    // about the sign-in has to be carried across explicitly or it is lost at
+    // the exact moment the report needs it. Re-read the whole set rather than
+    // naming one field, so adding a new one later cannot silently drop it.
+    const priorAuth = await ScanResult.findOne({ analysisId: scanId })
+      .select('authScanResult')
+      .lean()
+      .catch(() => null);
+
+    const prior = (priorAuth && priorAuth.authScanResult) || {};
+    const carriedAuth = {};
+    for (const key of AUTH_HEALTH_KEYS) {
+      if (prior[key] !== undefined) carriedAuth[key] = prior[key];
+    }
+
     const authScanResultObj = {
       status: 'completed',
       phase: 'completed',
       progress: 100,
       authenticated: true,
+      // Recorded when the scan was created, then refined while it ran.
+      ...carriedAuth,
+      ...authHealth,
       loginUrl,
       urlsFound,
       alerts: summaryAlerts,
@@ -1031,7 +1276,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
  * Start an authenticated scan asynchronously. Returns immediately.
  * The actual scan runs in the background.
  */
-async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, zapUrl, onComplete) {
+async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, zapUrl, onComplete, authState = null) {
   console.log(`[ZAP-AUTH] Starting async auth scan for: ${targetUrl}`);
 
   // Check if a scan already exists for this ID
@@ -1047,21 +1292,23 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, 
 
   // Create or update the scan result in database
   if (existing) {
+    // Dotted paths, not a wholesale replacement. Both callers write the login
+    // outcome into the skeleton record immediately before calling this, and
+    // replacing the whole object erased it every time — leaving the report
+    // unable to say whether the sign-in had been confirmed.
     await ScanResult.updateOne(
       { analysisId: scanId },
       {
         $set: {
           status: 'pending',
-          authScanResult: {
-            status: 'running',
-            phase: 'queued',
-            progress: 0,
-            authenticated: true,
-            loginUrl,
-            urlsFound: 0,
-            alerts: [],
-            startedAt: new Date()
-          },
+          'authScanResult.status': 'running',
+          'authScanResult.phase': 'queued',
+          'authScanResult.progress': 0,
+          'authScanResult.authenticated': true,
+          'authScanResult.loginUrl': loginUrl,
+          'authScanResult.urlsFound': 0,
+          'authScanResult.alerts': [],
+          'authScanResult.startedAt': new Date(),
           updatedAt: new Date()
         }
       }
@@ -1077,6 +1324,8 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, 
         phase: 'queued',
         progress: 0,
         authenticated: true,
+        // No skeleton existed, so record the login outcome here instead.
+        loginOutcome: authState && authState.marker ? 'confirmed' : 'unconfirmed',
         loginUrl,
         urlsFound: 0,
         alerts: [],
@@ -1089,7 +1338,7 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, 
   console.log(`[ZAP-AUTH] Scan record created: ${scanId}`);
 
   // Fire and forget — run scan in background
-  runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl)
+  runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scanId, userId, zapUrl, authState)
     .catch(error => {
       console.error(`[ZAP-AUTH] Background scan error for ${scanId}:`, error.message);
     })
@@ -1201,6 +1450,9 @@ async function stopAuthScan(scanId, userId) {
 module.exports = {
   checkZapAuthHealth,
   configureAuthContext,
+  applyCookieReplacerRule,
+  verifySignedIn,
+  checkAndRepairSession,
   startAsyncAuthScan,
   getAuthScanStatus,
   stopAuthScan,

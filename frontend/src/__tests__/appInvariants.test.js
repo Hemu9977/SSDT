@@ -267,6 +267,124 @@ describe('API error code mapping', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Authenticated scan: sign-in verification
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('sign-in verification', () => {
+  const panel = read('components/AuthenticatedScanPanel.jsx');
+  const loginCodeKeys = Object.fromEntries(
+    [...panel.slice(panel.indexOf('const LOGIN_ERROR_MESSAGE_KEYS'), panel.indexOf('};', panel.indexOf('const LOGIN_ERROR_MESSAGE_KEYS')))
+      .matchAll(/([A-Z_]+):\s*'([A-Za-z0-9_]+)'/g)].map((m) => [m[1], m[2]])
+  );
+
+  it('maps every login error code to a key present in both locales', () => {
+    const missing = [];
+    for (const [code, key] of Object.entries(loginCodeKeys)) {
+      if (!(key in en) || !(key in ja)) missing.push(`${code} -> ${key}`);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it.each(['SUBMIT_NO_EFFECT', 'AUTH_UNCONFIRMED', 'LOGIN_PANEL_NOT_FOUND'])(
+    '%s resolves to a specific message rather than the generic fallback',
+    (code) => {
+      expect(loginCodeKeys[code]).toBeDefined();
+    }
+  );
+
+  it('has a third outcome between success and failure', () => {
+    // "Could not confirm" must be distinguishable from a green tick: the scan
+    // may proceed, but coverage may be limited to publicly visible pages.
+    expect(panel).toMatch(/authConfirmed === 'unconfirmed'/);
+    expect(panel).toMatch(/test-caution/);
+  });
+
+  it('does not auto-advance past an unconfirmed sign-in', () => {
+    // Advancing automatically would scroll the caution out of view unread.
+    expect(panel).toMatch(/if \(data\.authConfirmed === 'confirmed'\) \{\s*setStep\(3\);/);
+    expect(panel).toMatch(/t\('continueAnyway'\)/);
+  });
+
+  it('states the coverage of a finished scan from a structured field', () => {
+    // Never derived in the browser from authScanResult, which carries English
+    // operator strings that must not be rendered.
+    expect(panel).toMatch(/report\?\.authCoverage/);
+    for (const key of ['authCoverageConfirmed', 'authCoverageUnconfirmed']) {
+      expect(en[key]).toBeDefined();
+      expect(ja[key]).toBeDefined();
+    }
+  });
+
+  it('always offers every detected button, not just the ranked ones', () => {
+    // Automatic detection will sometimes pick the wrong button. The manual
+    // override is the only way a customer can correct that, so the dropdown
+    // must be built from the complete field list — never from the ranked
+    // shortlist, and never from a list narrowed to the login box. Narrowing it
+    // strands anyone whose page we guessed wrong about.
+    expect(panel).toMatch(
+      /detectedFields\.forms\[0\]\.fields\.filter\(f =>\s*f\.tagName === 'BUTTON' \|\| f\.inputType === 'submit'/
+    );
+  });
+
+  it('pre-selects only login-box fields but still lists the rest', () => {
+    // The checkbox list is rendered from the full `fields` array, while only
+    // in-scope inputs are ticked by default. A field outside the login box is
+    // therefore visible and addable, not silently dropped.
+    expect(panel).toMatch(/f\.inLoginScope !== false/);
+    expect(panel).toMatch(/scopedFields\.length > 0 \? scopedFields : inputFields/);
+  });
+
+  it('sends a schedule authConfig the model can actually store', () => {
+    // The bug: the panel sent `submitButton` as the whole detected-field object
+    // while ScheduledScan declares it `String` and schedulerService reads it as
+    // one (`{ selector: authConfig.submitButton }`). Mongoose refuses to cast a
+    // plain object to String, so scheduled authenticated scans could never
+    // store a usable submit button — the feature was dead end to end.
+    const MODEL = path.join(SRC, '..', '..', 'backend', 'models', 'ScheduledScan.js');
+    if (!fs.existsSync(MODEL)) return; // Backend not checked out alongside.
+    const model = fs.readFileSync(MODEL, 'utf8');
+
+    const schema = model.slice(model.indexOf('authConfig: {'));
+    const scalarStringPaths = [...schema.slice(0, schema.indexOf('createdAt'))
+      .matchAll(/^\s{4}(\w+):\s*\{\s*type:\s*String/gm)].map((m) => m[1]);
+    expect(scalarStringPaths).toContain('submitButton');
+
+    const objStart = panel.indexOf('const authConfigObj = {');
+    const authConfigObj = panel.slice(objStart, panel.indexOf('\n    };', objStart));
+    expect(objStart).toBeGreaterThan(-1);
+
+    // Every key sent must exist on the schema, or it is silently dropped.
+    const sentKeys = [...authConfigObj.matchAll(/^\s{6}(\w+):/gm)].map((m) => m[1]);
+    const declared = [...schema.slice(0, schema.indexOf('createdAt'))
+      .matchAll(/^\s{4}(\w+):/gm)].map((m) => m[1]);
+    expect(sentKeys.filter((k) => !declared.includes(k))).toEqual([]);
+
+    // A path declared String must not be handed a whole object. Reading a
+    // property off one (`?.selector`) is the shape that satisfies this.
+    for (const key of scalarStringPaths) {
+      const line = authConfigObj.split('\n').find((l) => new RegExp(`^\\s{6}${key}:`).test(l));
+      if (!line) continue;
+      const value = line.slice(line.indexOf(':') + 1).trim().replace(/,$/, '');
+      const looksScalar =
+        /^'.*'$/.test(value) || value.includes('.') || /^\w+$/.test(value);
+      expect(looksScalar).toBe(true);
+      // The specific regression: the bare detected-field object.
+      expect(value).not.toBe('selectedSubmitButton');
+    }
+  });
+
+  it('asks for the signed-in marker without naming any tooling', () => {
+    // The product is resold; the customer must not learn how the check works.
+    for (const key of ['signedInMarkerLabel', 'signedInMarkerHint', 'loginUnconfirmedExplain']) {
+      for (const locale of [en, ja]) {
+        expect(locale[key]).toBeDefined();
+        expect(locale[key]).not.toMatch(/ZAP|Puppeteer|browser|Chrome|crawler|spider|WebCheck|urlscan|Gemini/i);
+      }
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Admin role management
 // ─────────────────────────────────────────────────────────────────────────────
 

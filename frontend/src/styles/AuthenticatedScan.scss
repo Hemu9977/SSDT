@@ -501,3 +501,59 @@
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Login test outcome
+//
+// Three states, not two. "Could not confirm" is neither success nor failure:
+// the scan may proceed, but the customer is told the coverage may be limited to
+// publicly visible pages. It must not look like a green tick.
+// ---------------------------------------------------------------------------
+
+.auth-scan-panel {
+  .test-result {
+    margin-top: 1rem;
+    padding: 0.9rem 1rem;
+    border-radius: 8px;
+    border-left: 4px solid transparent;
+
+    strong { display: block; margin-bottom: 0.35rem; }
+    p { margin: 0.25rem 0; font-size: 0.9rem; line-height: 1.5; }
+
+    &.test-success {
+      border-left-color: #00d084;
+      background: rgba(0, 208, 132, 0.08);
+    }
+
+    &.test-caution {
+      border-left-color: #ffb900;
+      background: rgba(255, 185, 0, 0.1);
+
+      .primary-btn { margin-top: 0.75rem; }
+    }
+
+    &.test-fail {
+      border-left-color: #e81123;
+      background: rgba(232, 17, 35, 0.08);
+    }
+
+    .signed-in-marker {
+      margin-top: 1rem;
+      padding-top: 0.9rem;
+      border-top: 1px solid rgba(128, 128, 128, 0.25);
+
+      label {
+        display: block;
+        margin-bottom: 0.35rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+      }
+
+      .field-hint {
+        margin-top: 0.4rem;
+        font-size: 0.8rem;
+        opacity: 0.75;
+      }
+    }
+  }
+}

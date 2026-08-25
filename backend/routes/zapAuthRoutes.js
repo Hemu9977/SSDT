@@ -130,7 +130,7 @@ router.post('/detect-login-fields', auth, async (req, res) => {
  */
 router.post('/test-login', auth, async (req, res) => {
   try {
-    const { loginUrl, credentials, submitButton } = req.body;
+    const { loginUrl, credentials, submitButton, submitAlternates, expectedMarker } = req.body;
 
     if (!loginUrl || !credentials || !Array.isArray(credentials) || credentials.length === 0) {
       return res.status(400).json({ error: 'loginUrl and credentials array are required' });
@@ -155,7 +155,9 @@ router.post('/test-login', auth, async (req, res) => {
     const result = await testLogin({
       loginUrl,
       credentials,
-      submitButton: submitButton || null
+      submitButton: submitButton || null,
+      submitAlternates: submitAlternates || [],
+      expectedMarker: expectedMarker || null
     });
 
     if (result.authenticated && result.cookies && result.cookies.length > 0) {
@@ -164,28 +166,65 @@ router.post('/test-login', auth, async (req, res) => {
       authSessions.set(tempSessionId, {
         cookies: result.cookies,
         loginUrl,
+        // The signed-in marker lets the scan check later whether it is still
+        // logged in, and the recipe lets it log back in if it is not. Both live
+        // in memory for the life of the scan and are never written to disk.
+        marker: result.marker,
+        markerCheckableInBody: result.markerCheckableInBody,
+        // The verdict, not the mere presence of a marker: a weak marker is
+        // returned for change-detection but does not prove the sign-in.
+        authConfirmed: result.authConfirmed,
+        recipe: {
+          loginUrl,
+          credentials,
+          submitButton: submitButton || null,
+          submitAlternates: submitAlternates || []
+        },
         createdAt: Date.now()
       });
 
-      console.log(`[ZAP-AUTH] Login successful. Session stored: ${tempSessionId}`);
+      console.log(
+        `[ZAP-AUTH] Login ${result.authConfirmed}. Session stored: ${tempSessionId} ` +
+        `(marker=${result.marker ? 'yes' : 'no'}, strategy=${result.submitStrategy})`
+      );
 
-      // Return result WITHOUT cookies — only the tempSessionId
+      // Return result WITHOUT cookies or the marker — only the tempSessionId.
+      // The marker is text from the customer's own page and has no business
+      // making a round trip through the browser.
       res.json({
         success: true,
         authenticated: true,
+        authConfirmed: result.authConfirmed,
         postLoginUrl: result.postLoginUrl,
         evidence: result.evidence,
         cookieCount: result.cookies.length,
+        // Tells the UI whether to offer the optional "what shows when you are
+        // signed in?" field, without explaining why.
+        markerFound: Boolean(result.marker),
+        errorCode: result.errorCode,
         tempSessionId
       });
     } else {
-      // Login failed — no cookies to store
+      // Cannot proceed — there is no session for the scan to carry.
+      //
+      // This branch is also reached when the login itself worked but the site
+      // issued no cookies at all, which happens on apps that keep their session
+      // entirely in the browser. Reporting that as "confirmed" would show a
+      // green tick on a flow that then refuses to advance, so the outcome here
+      // is always a failure; only the reason differs.
+      const loggedInButNoCookies =
+        result.authenticated && (!result.cookies || result.cookies.length === 0);
+
       res.json({
         success: true,
         authenticated: false,
+        authConfirmed: 'failed',
         postLoginUrl: result.postLoginUrl,
         evidence: result.evidence,
-        errorCode: result.errorCode,
+        markerFound: false,
+        errorCode: loggedInButNoCookies
+          ? 'NO_SESSION_COOKIES'
+          : (result.errorCode || 'LOGIN_ANALYSIS_FAILED'),
         errorMessage: result.errorMessage
       });
     }
@@ -239,6 +278,17 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     const cookies = session.cookies;
     const resolvedLoginUrl = loginUrl || session.loginUrl;
 
+    // Captured before the session entry is deleted below. Held only in this
+    // request's closure for the duration of the scan — never persisted, and
+    // never sent to the browser.
+    const authState = {
+      marker: session.marker || null,
+      markerCheckableInBody: Boolean(session.markerCheckableInBody),
+      recipe: session.recipe || null,
+      authConfirmed: session.authConfirmed || 'unconfirmed',
+      reloginAttempts: 0
+    };
+
     // Generate scan ID
     const scanId = `zap-auth-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
@@ -256,7 +306,17 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
           organizationId: req.organization?._id || null,
           triggerSource: triggerSource || 'manual',
           languagePreference: lang || 'en',
-          authScanResult: { status: 'provisioning', phase: 'provisioning', progress: 0 },
+          authScanResult: {
+            status: 'provisioning',
+            phase: 'provisioning',
+            progress: 0,
+            // Whether the login itself could be confirmed. The scan re-checks
+            // as it runs; this is the starting point the report falls back to
+            // when in-scan verification cannot apply (a single-page app serves
+            // the same HTML signed in or out, so a response body proves
+            // nothing either way).
+            loginOutcome: authState.authConfirmed === 'confirmed' ? 'confirmed' : 'unconfirmed'
+          },
           createdAt: new Date(),
           updatedAt: new Date()
         }
@@ -318,7 +378,8 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
             scanId,
             req.user.id,
             zapUrl,
-            (id) => { releaseContainer(id); resolve(); }
+            (id) => { releaseContainer(id); resolve(); },
+            authState
           )
             .then((r) => { if (r?.status === 'already_running') resolve(); })
             .catch((err) => {
@@ -683,6 +744,18 @@ router.get('/status/:scanId', auth, async (req, res) => {
     const phase = scan.authScanResult?.phase || '';
     const progress = scan.authScanResult?.progress || 0;
 
+    // One structured field the report can turn into a sentence. Deliberately
+    // not derived in the browser from `authScanResult`, which carries English
+    // operator strings that must never be rendered.
+    const authVerified = scan.authScanResult?.authVerified;
+    const authCoverage =
+      authVerified === true ||
+      (authVerified !== false &&
+        !scan.authScanResult?.authDegraded &&
+        scan.authScanResult?.loginOutcome === 'confirmed')
+        ? 'confirmed'
+        : 'unconfirmed';
+
     return res.json({
       success: true,
       scanId: scan.analysisId,
@@ -691,6 +764,7 @@ router.get('/status/:scanId', auth, async (req, res) => {
       // Auth ZAP progress (for step 4 scanning UI)
       phase,
       progress,
+      authCoverage,
       message: scan.authScanResult?.message || '',
       // Partial data indicators (same as combined-analysis)
       hasPsiResult: !!scan.pagespeedResult && !scan.pagespeedResult.error,

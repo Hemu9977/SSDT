@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { encrypt, decrypt } = require('../utils/credentialCrypto');
 
 const scheduledScanSchema = new mongoose.Schema({
   userId: {
@@ -80,10 +81,22 @@ const scheduledScanSchema = new mongoose.Schema({
     loginUrl: { type: String, default: null },
     credentials: [{
       selector: { type: String, required: true },
-      value: { type: String, required: true },
+      // Encrypted at rest (AES-256-GCM). The getter/setter pair means every
+      // existing call site keeps reading and writing plaintext and never has to
+      // know. Values written before this existed are returned unchanged and
+      // re-encrypted on the next save.
+      value: {
+        type: String,
+        required: true,
+        set: encrypt,
+        get: decrypt
+      },
       inputType: { type: String, default: 'text' }
     }],
-    submitButton: { type: String, default: null }
+    submitButton: { type: String, default: null },
+    // Optional customer-supplied text that only appears once signed in. Used to
+    // confirm the scan is actually authenticated. Not a secret.
+    signedInMarker: { type: String, default: null }
   },
   createdAt: {
     type: Date,
