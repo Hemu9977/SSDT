@@ -63,12 +63,20 @@ function wholesaleAuthWrites(source, file) {
     const literal = body.slice(body.indexOf('{'), body.indexOf('}') + 1);
     if (/\$(ne|eq|exists|in|nin|gt|lt)\b/.test(literal)) continue;
 
+    // `authScanResult: null` is a query predicate, never a write.
+    if (m[2] === 'null') continue;
+
     const before = source.slice(0, m.index);
     const markers = {
       setOnInsert: before.lastIndexOf('$setOnInsert'),
       create: before.lastIndexOf('new ScanResult('),
       set: before.lastIndexOf('$set:')
     };
+    // No enclosing update or create at all means this is not a write. Falling
+    // through to the reduce below would silently label it a creation and exempt
+    // it — an exemption that would be accidental rather than reasoned.
+    if (Math.max(...Object.values(markers)) < 0) continue;
+
     const nearest = Object.keys(markers).reduce((a, b) => (markers[b] > markers[a] ? b : a));
 
     hits.push({
