@@ -1,6 +1,6 @@
 {
   "_verified_against_live": "fortexa-backend:63, ap-northeast-1, checked 2026-08-13. Service Connect (webcheck/zap-scanner discovery) is configured on the ECS *service*, not in this task def — not represented here.",
-  "family": "fortexa-backend-task",
+  "family": "fortexa-backend",
   "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
   "cpu": "1024",
@@ -10,7 +10,7 @@
   "containerDefinitions": [
     {
       "name": "backend",
-      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/fortexa-backend:v40",
+      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/fortexa-backend:v48",
       "essential": true,
       "portMappings": [
         { "containerPort": 3000, "protocol": "tcp" }
@@ -85,6 +85,12 @@
         { "name": "ZAP_RECYCLE_TIMEOUT_MS",          "value": "480000" },
         { "name": "ZAP_RECYCLE_FAIL_MODE",           "value": "abort" },
         { "name": "ZAP_LOCK_WAIT_MS",                "value": "1800000" },
+        { "name": "ZAP_NEW_TASK_WAIT_MS",            "value": "150000" },
+        { "name": "ZAP_CAPACITY_MANAGED",            "value": "true" },
+        { "name": "ZAP_CAPACITY_KEYS",               "value": "normal,auth" },
+        { "name": "ZAP_CAPACITY_WAIT_MS",            "value": "600000" },
+        { "name": "ZAP_IDLE_SCALEIN_MS",             "value": "1200000" },
+        { "name": "ZAP_COLDSTART_TTL_MS",            "value": "900000" },
         { "name": "DNS_CACHE_TTL_SECONDS",           "value": "30" },
         { "name": "HTTP_KEEPALIVE",                  "value": "true" },
         { "name": "HTTP_KEEPALIVE_MSECS",            "value": "30000" },

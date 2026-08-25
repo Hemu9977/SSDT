@@ -15,6 +15,7 @@ const { apiLimiter, authLimiter, pollLimiter } = require('./middleware/rateLimit
 const { identifyUser } = require('./middleware/auth');
 const gridfsService = require('./services/gridfsService'); // GridFS for ZAP reports
 const { startCleanupJob } = require('./jobs/cleanupJob'); // Scheduled cleanup
+const { startScheduler } = require('./services/schedulerService'); // Scheduled scan runner
 const {
   initializeSocket,
   initializeScanProgressSubscriber,
@@ -399,6 +400,26 @@ async function startServer() {
       console.error('⚠️  Cleanup job initialization failed:', error.message);
     }
 
+    // Scheduled scan runner (due-schedule trigger every 15s, finalizer every 2m).
+    //
+    // Restored here. The call was removed in 5cf8030 together with the
+    // /api/schedules mount; later commits re-added the routes but not this line, so
+    // for months users could create a schedule, see it listed, and have it never
+    // fire. POST /api/schedules/:id/run-now kept working, which masked it.
+    //
+    // Gated so it can be turned off from the task definition without rebuilding an
+    // image — the same pattern as ZAP_RECYCLE_ENABLED. Defaults to on.
+    if (process.env.SCHEDULER_ENABLED !== 'false') {
+      try {
+        startScheduler();
+        console.log('✅ Scheduled scan runner started');
+      } catch (error) {
+        console.error('⚠️  Scheduled scan runner initialization failed:', error.message);
+      }
+    } else {
+      console.log('ℹ️  SCHEDULER_ENABLED=false — scheduled scans will not be triggered');
+    }
+
     // ── Redis + real-time scan progress ──────────────────────────────────
     if (process.env.REDIS_URL) {
       try {
@@ -433,6 +454,17 @@ async function startServer() {
           const { preflightEcsAccess } = require('./services/zapRecycler');
           preflightEcsAccess().catch(err =>
             console.error('[ZapRecycle] preflight threw unexpectedly:', err.message)
+          );
+
+          // Capacity management needs two grants the recycle path does not:
+          // ecs:DescribeServices (probed) and ecs:UpdateService (provable only by
+          // actually scaling, so the first scale-out verifies it). Probed separately
+          // from the recycler's preflight because the two are independently
+          // switchable — ZAP_RECYCLE_ENABLED=false must not hide a broken capacity
+          // configuration. Also not awaited.
+          const { preflightCapacityAccess } = require('./services/zapCapacityManager');
+          preflightCapacityAccess().catch(err =>
+            console.error('[ZapCapacity] preflight threw unexpectedly:', err.message)
           );
         } else {
           console.log('ℹ️  DISABLE_WORKER=true — expecting external worker process');

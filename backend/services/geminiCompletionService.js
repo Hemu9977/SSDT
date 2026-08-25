@@ -49,6 +49,18 @@ const GEMINI_LOCK_TTL_S  = 3600;          // 1 h — long enough to outlive any 
 const GEMINI_DONE_TTL_S  = 24 * 3600;    // 24 h — dedupe window for repeated callbacks
 // Hard cap on the entire checkAndGenerateGemini execution.
 // Prevents the function from hanging if generateContent ever stalls past its own timeout.
+/**
+ * How long the completion service waits for PageSpeed/Observatory to be persisted
+ * before giving up on a scan whose ZAP and WebCheck legs are already done.
+ *
+ * 10 minutes: the fast scanners normally finish in well under a minute, but
+ * PageSpeed against a slow origin can take a few, and urlscan polls its own API.
+ * Generous on purpose — the cost of waiting is a scan sitting in "combining" a
+ * little longer, while the cost of being too strict is a failed scan the customer
+ * should have received.
+ */
+const FAST_SCAN_GRACE_MS = () => Number(process.env.GEMINI_FAST_SCAN_GRACE_MS) || 600000;
+
 const FUNCTION_TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes
 
 // ─── Redis helpers ─────────────────────────────────────────────────────────────
@@ -275,23 +287,13 @@ function _scanTypeLabel(scan) {
   return scan?.authScanResult ? 'Authenticated Scan' : 'Combined Security Scan';
 }
 
-async function _finishWithFallback(scan, scanId, userId, message) {
-  const fallback = message || 'AI analysis could not be generated due to missing scan data.';
-  console.log(`[Gemini][${scanId}] Finishing with fallback message`);
-  await _dbUpdate(
-    { analysisId: scanId, status: { $nin: ['stopped', 'cancelled'] } },
-    { $set: { refinedReport: fallback, status: 'completed', updatedAt: new Date() } },
-    scanId,
-    'fallback-complete'
-  );
-  _markGeminiDone(scanId).catch(() => {});
-  
-  // Deduct scan from user quota only upon successful completion
-  await finalizeSuccessfulScan(scanId).catch(e => console.error(`[Gemini][${scanId}] Failed to finalize scan quota:`, e.message));
-
-  await publishScanProgress(scanId, userId, { status: 'completed', progress: 100, message: 'Scan complete' });
-  handleScanComplete(scanId, userId, _scanTypeLabel(scan), scan.target);
-}
+// _finishWithFallback was removed. It wrote status:'completed' with a placeholder
+// string as the report AND called finalizeSuccessfulScan, i.e. it billed the customer
+// for a scan that had no analysis in it. Its only caller was the missing-fast-scan-data
+// branch below, which now treats that state as "not ready" and retries instead.
+//
+// Deliberately not kept as an unused helper: "complete and bill with a placeholder"
+// is never the right outcome, so the function should not be available to call.
 
 // ─── Main entry point ──────────────────────────────────────────────────────────
 
@@ -395,9 +397,39 @@ async function _doGenerate(scanId, userId) {
     return;
   }
 
+  // ── Fast-scan data: NOT READY, never a reason to finalize ───────────────────
+  //
+  // This used to call _finishWithFallback, which writes status:'completed' AND
+  // charges the customer. In the authenticated flow that fired routinely: the four
+  // fast scanners are started together, but WebCheck runs in the background and
+  // finished in ~10s while urlscan took ~19s, and WebCheck's completion is what
+  // calls this function. So this ran while PageSpeed/Observatory/urlscan were still
+  // in flight and had not been written yet — the customer was billed for a 47-char
+  // placeholder, and the real results landed 9 seconds later with the scan already
+  // terminal (observed in production 2026-08-24, scan zap-auth-1787581094591-ixfe24).
+  //
+  // Missing fast-scan data now means "not ready": return without touching the scan
+  // and let the next trigger retry. Triggers that follow: the auth route persisting
+  // those results, the status poll, and cleanupJob's 5-minute stuck-combining rescue.
+  //
+  // Only once the grace window is exhausted is this terminal, and then it fails
+  // explicitly rather than completing — so it is never billed.
   if (!scan.pagespeedResult && !scan.observatoryResult) {
-    console.warn(`[Gemini][${scanId}] Missing fast-scan data — finishing with fallback`);
-    await _finishWithFallback(scan, scanId, userId, 'Required scan data unavailable for AI analysis.');
+    const since = scan.fastScansStartedAt || scan.createdAt;
+    const waitedMs = since ? Date.now() - new Date(since).getTime() : 0;
+
+    if (waitedMs < FAST_SCAN_GRACE_MS()) {
+      console.log(
+        `[Gemini][${scanId}] Fast-scan data not persisted yet ` +
+        `(waited ${Math.round(waitedMs / 1000)}s of ${Math.round(FAST_SCAN_GRACE_MS() / 1000)}s) — NOT READY, will retry`
+      );
+      return;
+    }
+
+    console.error(
+      `[Gemini][${scanId}] Fast-scan data still missing after ${Math.round(waitedMs / 1000)}s — failing explicitly (not billed)`
+    );
+    await _finishAsFailed(scan, scanId, userId, 'scan_data_unavailable');
     return;
   }
 

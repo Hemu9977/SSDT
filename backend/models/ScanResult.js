@@ -62,6 +62,16 @@ const scanResultSchema = new mongoose.Schema({
     enum: ['vulnerability_scan_failed', 'scan_data_unavailable', 'internal_error', null],
     default: null
   },
+  // Claimed atomically by the authenticated flow before it starts PageSpeed /
+  // Observatory / urlscan / WebCheck, so those four are started exactly once no
+  // matter how many callers race (scan acceptance, a status poll, a retry).
+  // Also the clock the completion service measures its fast-scan grace window
+  // against. Null on a normal-flow scan: scanWorker runs and persists the fast
+  // scanners inline before enqueuing ZAP, so it needs no claim.
+  fastScansStartedAt: {
+    type: Date,
+    default: null
+  },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

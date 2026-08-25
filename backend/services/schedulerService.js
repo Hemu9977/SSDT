@@ -294,9 +294,21 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta, organizationId
     ...(meta || {})
   });
 
+  // Warm ZAP capacity up now rather than when the ZAP job is dequeued. The four
+  // scanners below run first and take minutes of their own, so an EC2 boot and image
+  // pull started here overlaps them instead of being added to the end. No-ops unless
+  // capacity management is enabled for 'normal'.
+  {
+    const { markZapDemand, ensureZapCapacity } = require('./zapCapacityManager');
+    markZapDemand('normal').catch(() => {});
+    ensureZapCapacity('normal', { scanId }).catch(err =>
+      console.warn(`[Scheduler] ZAP capacity warm-up failed for ${scanId}: ${err.message}`)
+    );
+  }
+
   try {
     const hostname = new URL(targetUrl).hostname;
-    
+
     const scanPromises = [
       getPageSpeedReport(targetUrl),
       scanHost(hostname),
@@ -403,11 +415,19 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     organizationId: organizationId || null,
     triggerSource: 'scheduled',
     languagePreference: 'en',
-    // Record the login outcome on the scan itself. Previously a failed
-    // background login left `cookies` empty and the scan ran anyway, producing a
-    // report of the publicly visible pages that was indistinguishable from a
-    // successful authenticated scan. The scan still runs — a public scan is
-    // better than no scan — but it is now labelled as one.
+    // Mirrors the skeleton POST /api/zap-auth/scan writes. Two things depend on it:
+    // the UI can show "queued" instead of an empty panel, and — the reason it was
+    // added — zapCapacityManager.hasActiveZapScans('auth') can see that this scan
+    // owes ZAP work. Without it a scheduled auth scan waiting on zap:lock:auth is
+    // invisible to the idle scale-in guard, which can then take the instance away
+    // from under it. It is also what distinguishes an auth scan from a normal one
+    // before either has produced a result.
+    //
+    // The sign-in fields record what the background login actually achieved. A
+    // failed login used to leave `cookies` empty and let the scan run anyway,
+    // producing a report of the publicly visible pages that was
+    // indistinguishable from an authenticated one. It still runs — a public scan
+    // beats no scan — but it is now labelled as one.
     authScanResult: {
       status: 'provisioning',
       phase: 'provisioning',
@@ -429,18 +449,94 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
     return { scanId, refused: true };
   }
 
-  const result = await startAsyncAuthScan(
-    targetUrl,
-    authConfig?.loginUrl || targetUrl,
-    cookies,
-    scanId,
-    userId,
-    undefined,   // zapUrl — resolved by the service in scheduled runs
-    undefined,   // onComplete — scheduled runs do not hold a container lock here
-    authState
+  // Route the scan through withZapInstance, exactly as POST /api/zap-auth/start does.
+  //
+  // Before this, a scheduled authenticated scan called startAsyncAuthScan directly: no
+  // zap:lock:auth, no pre-scan recycle, no readiness wait. A schedule firing alongside a
+  // route-initiated auth scan therefore ran concurrently against the same ZAP daemon,
+  // where newSession is global and wipes the other scan's sites tree, contexts and
+  // alerts mid-flight. The only guard was the duplicate check in zapAuthService, which
+  // is keyed on analysisId — it catches a repeat of the *same* scan, not a different
+  // concurrent one. Under scale-to-zero the same gap would additionally fire the scan at
+  // a Service Connect alias with no endpoints behind it.
+  //
+  // Detached on purpose. withZapInstance holds the lock until onComplete fires — i.e.
+  // for the whole scan, up to three hours — while triggerAuthenticatedScan is awaited by
+  // the 15-second cron tick behind an isProcessing guard. Awaiting it here would stall
+  // the scheduler for the length of the scan.
+  const { withZapInstance } = require('./zapRecycler');
+  const { markZapDemand, ensureZapCapacity } = require('./zapCapacityManager');
+  const { ensureAuthFastScans } = require('./authFastScanService');
+
+  // Warm up ahead of the lock so the EC2 boot and image pull overlap the login work
+  // and the queue wait rather than adding to them. No-ops unless capacity management
+  // is enabled for 'auth'.
+  markZapDemand('auth').catch(() => {});
+  ensureZapCapacity('auth', { scanId }).catch(err =>
+    console.warn(`[Scheduler] auth capacity warm-up failed for ${scanId}: ${err.message}`)
   );
 
-  return result;
+  // Start the fast scanners now, alongside the ZAP leg.
+  //
+  // A scheduled authenticated scan ran NONE of these before: the four scanners were
+  // driven only from GET /api/zap-auth/status/:scanId, and nothing polls that for a
+  // scan the scheduler started. The scan therefore reached 'combining' with no
+  // PageSpeed, Observatory, urlscan or WebCheck data and could never satisfy the
+  // completion service's readiness gate — it sat there until it was failed as
+  // 'scan_data_unavailable' (and before that gate existed, completed with a
+  // placeholder report and was billed for it).
+  //
+  // Not awaited: these take minutes and must overlap the ZAP scan, not delay the
+  // 15-second scheduler tick. Never fatal — ensureAuthFastScans catches internally
+  // and releases its claim so a later call can retry.
+  ensureAuthFastScans(scanId, String(userId)).catch(e =>
+    console.error(`[Scheduler] fast-scan kick-off failed for ${scanId}: ${e.message}`)
+  );
+
+  withZapInstance('auth', scanId, () => new Promise((resolve) => {
+    startAsyncAuthScan(
+      targetUrl,
+      authConfig?.loginUrl || targetUrl,
+      cookies,
+      scanId,
+      userId,
+      undefined,        // zapUrl — fall back to ZAP_AUTH_API_URL
+      () => resolve(),  // onComplete fires from the background scan's .finally()
+      authState         // marker + login recipe, so the scan can re-check and re-login
+    )
+      // 'already_running' never fires onComplete, so resolve explicitly or the lock
+      // sits until its TTL expires.
+      .then((r) => { if (r?.status === 'already_running') resolve(); })
+      .catch((err) => {
+        console.error(`[Scheduler] startAsyncAuthScan failed for ${scanId}: ${err.message}`);
+        resolve();
+      });
+  })).catch(async (err) => {
+    console.error(`[Scheduler] auth scan could not start for ${scanId}: ${err.message}`);
+    // errorCode is machine-readable so the UI can render a localized explanation;
+    // the English message stays server-side only (CLAUDE.md).
+    const recycleCodes = ['ECS_ACCESS_DENIED', 'PLACEMENT_FAILED', 'REPLACEMENT_DIED',
+                          'API_NOT_READY', 'NOT_FRESH', 'LOCK_TIMEOUT', 'TIMEOUT',
+                          'CAPACITY_TIMEOUT', 'CAPACITY_TASK_DIED', 'CAPACITY_API_NOT_READY',
+                          'CAPACITY_SCALE_OUT_FAILED', 'SERVICE_NOT_FOUND'];
+    await ScanResult.updateOne(
+      { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
+      {
+        $set: {
+          status: 'failed',
+          'authScanResult.status': 'failed',
+          'authScanResult.phase': 'failed',
+          'authScanResult.error': err.message,
+          'authScanResult.errorCode': recycleCodes.includes(err.code) ? 'zap_recycle_failed' : 'zap_scan_failed',
+          'authScanResult.failedAt': new Date(),
+          failureReason: 'vulnerability_scan_failed',
+          updatedAt: new Date()
+        }
+      }
+    ).catch(e => console.error(`[Scheduler] Failed to record auth scan failure for ${scanId}:`, e.message));
+  });
+
+  return { scanId };
 }
 
 /**
