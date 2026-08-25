@@ -83,10 +83,9 @@ conversation — it does not affect this task.)
 `worker-task-def.json`, for whenever that split actually happens). Register it
 and roll the service.
 
-**Confirm the live names first — the checked-in file has drifted.** It says
-`"family": "fortexa-backend-task"`, but its own verification note records the
-live task as `fortexa-backend:63`. Read the truth from the running service rather
-than trusting either:
+**Confirm the live names first.** The `family` drift this note used to warn about
+is fixed — the JSON now says `fortexa-backend`, which matches live. Still read the
+truth from the running service rather than trusting the file:
 
 ```bash
 aws ecs describe-services \
@@ -96,27 +95,45 @@ aws ecs describe-services \
   --query 'services[0].taskDefinition'
 ```
 
-If the family that comes back is not `fortexa-backend-task`, fix the `family`
-field in the JSON to match before registering — otherwise you create a brand new
-task family that no service is pointing at, and nothing appears to happen.
+**Do not register the checked-in JSON blind — check the `image` tag first.** The
+pin in this file is only as fresh as the last person to update it, and a stale pin
+is a silent *rollback*: on 2026-08-25 the file still said `v48` while production
+was already on `v49`. Compare against live before registering.
 
-Then:
+Safer still, derive the new revision from the live one so nothing but the intended
+change moves — this preserves env vars and the named port mapping that the
+checked-in file has historically dropped:
 
 ```bash
-aws ecs register-task-definition \
-  --cli-input-json file://infrastructure/backend-task-def.json \
-  --region ap-northeast-1
-
-aws ecs update-service \
-  --cluster fortexa-cluster \
-  --service fortexa-ec2-backend \
-  --task-definition <family-from-above> \
+aws ecs describe-task-definition --task-definition fortexa-backend:<live-rev> \
+  --region ap-northeast-1 --query 'taskDefinition' > /tmp/td.json
+# strip taskDefinitionArn, revision, status, requiresAttributes, compatibilities,
+# registeredAt, registeredBy, deregisteredAt; set the image; add the secret
+aws ecs register-task-definition --cli-input-json file:///tmp/td.json \
   --region ap-northeast-1
 ```
 
-Also check the `image` tag in the JSON before registering — it is pinned to a
-specific version (`fortexa-backend:v40` as checked in) and you almost certainly
-want the tag you are actually deploying.
+Then roll the service:
+
+```bash
+aws ecs update-service \
+  --cluster fortexa-cluster \
+  --service fortexa-ec2-backend \
+  --task-definition fortexa-backend:<new-rev> \
+  --region ap-northeast-1
+```
+
+---
+
+## Status — done on 2026-08-25
+
+- `CREDENTIAL_ENCRYPTION_KEY` added to `fortexa-backend-secrets` (24 keys total,
+  the 23 existing ones intact). 64 hex chars, distinct from `JWT_SECRET`.
+- Image `v50` built from `main@81598f5` and pushed to ECR. Note `v49` predated the
+  encryption commit by ~19h, so it could not have shipped this feature.
+- Task definition `fortexa-backend:80` registered (derived from live `:79`) and the
+  `fortexa-ec2-backend` service rolled onto it. Task HEALTHY, ALB target healthy,
+  startup log clean and the warning below absent.
 
 ## Step 4 — verify
 

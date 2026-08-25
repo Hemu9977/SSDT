@@ -1,5 +1,5 @@
 {
-  "_verified_against_live": "fortexa-backend:63, ap-northeast-1, checked 2026-08-13. Service Connect (webcheck/zap-scanner discovery) is configured on the ECS *service*, not in this task def — not represented here.",
+  "_verified_against_live": "fortexa-backend:80, ap-northeast-1, checked 2026-08-25. Service Connect (webcheck/zap-scanner discovery) is configured on the ECS *service*, not in this task def — not represented here.",
   "family": "fortexa-backend",
   "requiresCompatibilities": ["EC2"],
   "networkMode": "awsvpc",
@@ -10,10 +10,10 @@
   "containerDefinitions": [
     {
       "name": "backend",
-      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/fortexa-backend:v48",
+      "image": "459181228792.dkr.ecr.ap-northeast-1.amazonaws.com/fortexa-backend:v50",
       "essential": true,
       "portMappings": [
-        { "containerPort": 3000, "protocol": "tcp" }
+        { "containerPort": 3000, "hostPort": 3000, "protocol": "tcp", "name": "backend-3000-tcp" }
       ],
       "secrets": [
         { "name": "MONGO_URI",                "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:MONGO_URI::" },
