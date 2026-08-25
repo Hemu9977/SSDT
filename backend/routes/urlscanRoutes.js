@@ -1,4 +1,5 @@
 const express = require('express');
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const { submitUrlScan, getUrlScanResult } = require('../services/urlscanService');
 const ScanResult = require('../models/ScanResult');
 const auth = require('../middleware/auth');
@@ -17,6 +18,11 @@ router.post('/scan', auth, async (req, res) => {
 
         if (!url) {
             return res.status(400).json({ error: 'URL is required' });
+        }
+
+        const guard = checkScanTarget(url);
+        if (!guard.ok) {
+            return res.status(400).json({ error: guard.error, code: guard.code });
         }
 
         console.log(`🔐 User ${req.user.id} submitted URL to urlscan.io: ${url}`);

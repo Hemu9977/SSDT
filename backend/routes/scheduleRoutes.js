@@ -317,13 +317,26 @@ router.put('/:id', auth, async (req, res) => {
 
     // Update fields if provided
     if (targetUrl !== undefined) {
-      try { new URL(targetUrl); } catch { return res.status(400).json({ success: false, error: 'Invalid URL format' }); }
+      // The create route was guarded and this one was not — an update could put
+      // any host back on a schedule that had passed the check once.
+      const targetGuard = checkScanTarget(targetUrl);
+      if (!targetGuard.ok) {
+        return res.status(400).json({ success: false, error: targetGuard.error, code: targetGuard.code });
+      }
       schedule.targetUrl = targetUrl;
     }
     if (scanType !== undefined) schedule.scanType = scanType;
     if (enabled !== undefined) schedule.enabled = enabled;
     if (timezone !== undefined) schedule.timezone = timezone;
-    if (authConfig !== undefined) schedule.authConfig = authConfig;
+    if (authConfig !== undefined) {
+      if (authConfig && authConfig.loginUrl) {
+        const loginGuard = checkScanTarget(authConfig.loginUrl);
+        if (!loginGuard.ok) {
+          return res.status(400).json({ success: false, error: loginGuard.error, code: loginGuard.code });
+        }
+      }
+      schedule.authConfig = authConfig;
+    }
 
     if (scheduleType !== undefined) {
       schedule.scheduleType = scheduleType;

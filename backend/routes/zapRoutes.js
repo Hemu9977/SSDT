@@ -27,6 +27,7 @@ const {
   runZapScanWithDB,
   getZapScanStatus
 } = require('../services/zapService');
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
@@ -89,14 +90,15 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
       });
     }
 
-    // Validate URL format
-    try {
-      new URL(url);
-    } catch {
+    // ZAP fetches and attacks this from inside the VPC, so a bare `new URL()`
+    // check was not enough — it accepted our own service hostnames.
+    const guard = checkScanTarget(url);
+    if (!guard.ok) {
 
       return res.status(400).json({
         success: false,
-        error: 'Invalid URL format'
+        code: guard.code,
+        error: guard.error
       });
     }
 

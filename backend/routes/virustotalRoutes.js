@@ -41,37 +41,11 @@ const router = express.Router();
 // Expose err.message in dev only — never leak internals to production clients
 const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
 
-// Patterns covering all RFC-1918/loopback/link-local ranges plus cloud metadata
-const BLOCKED_HOST_PATTERNS = [
-  /^localhost$/i,
-  /^127\./,                         // 127.0.0.0/8 loopback
-  /^0\./,                           // 0.0.0.0/8
-  /^10\./,                          // 10.0.0.0/8
-  /^172\.(1[6-9]|2\d|3[01])\./,    // 172.16.0.0/12
-  /^192\.168\./,                    // 192.168.0.0/16
-  /^169\.254\./,                    // 169.254.0.0/16 link-local + AWS metadata
-  /^::1$/,                          // IPv6 loopback
-  /^fc00:/i,                        // IPv6 ULA fc00::/7
-  /^fe[89ab][0-9a-f]:/i,            // IPv6 link-local fe80::/10
-  /\.local$/i,                      // mDNS .local domains
-];
-
-// URL validation helper
-const isValidUrl = (urlString) => {
-  try {
-    const url = new URL(urlString);
-    if (!['http:', 'https:'].includes(url.protocol)) {
-      return { valid: false, error: 'Only HTTP and HTTPS URLs are allowed' };
-    }
-    const hostname = url.hostname.toLowerCase();
-    if (BLOCKED_HOST_PATTERNS.some(p => p.test(hostname))) {
-      return { valid: false, error: 'Localhost and private IPs are not allowed' };
-    }
-    return { valid: true };
-  } catch (e) {
-    return { valid: false, error: 'Invalid URL format' };
-  }
-};
+// URL validation lives in utils/scanTargetGuard.js — one implementation for every
+// route that hands a customer URL to something that fetches it server-side. This
+// file used to carry its own copy; the authenticated-scan routes carried a second,
+// looser one, and neither caught our own service hostnames.
+const { isValidScanUrl: isValidUrl } = require('../utils/scanTargetGuard');
 
 // 1️⃣ Get user's scan history (Protected route)
 router.get('/history', auth, async (req, res) => {

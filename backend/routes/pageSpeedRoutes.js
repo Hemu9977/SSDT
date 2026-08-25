@@ -6,6 +6,7 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const { getPageSpeedReport } = require('../services/pagespeedService');
 const { consumeScan } = require('../services/planService');
 
@@ -18,6 +19,11 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
   if (!url) {
 
     return res.status(400).json({ msg: 'URL is required' });
+  }
+
+  const guard = checkScanTarget(url);
+  if (!guard.ok) {
+    return res.status(400).json({ msg: guard.error, code: guard.code });
   }
 
   try {

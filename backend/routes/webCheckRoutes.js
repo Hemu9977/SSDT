@@ -1,6 +1,7 @@
 //webCheckRoutes.js
 const express = require('express');
 const router = express.Router();
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const webCheckService = require('../services/webCheckService');
 const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
@@ -18,6 +19,12 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     if (!url) {
 
         return res.status(400).json({ error: 'URL is required' });
+    }
+
+    // The WebCheck container fetches this server-side, from inside the VPC.
+    const guard = checkScanTarget(url);
+    if (!guard.ok) {
+        return res.status(400).json({ error: guard.error, code: guard.code });
     }
 
     if (!type) {

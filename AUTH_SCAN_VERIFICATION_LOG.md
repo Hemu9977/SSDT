@@ -435,3 +435,88 @@ deliberately breaking things and generating inputs nobody thought to write down.
 **Still not verified, and it is the one that counts:** none of this proves the
 browser automation reaches these states on a live site. Point it at Altoro with
 a deliberately wrong password.
+
+
+---
+
+# Round 6 — one guard, and the hole both of them had
+
+```
+backend  npm test  265 passed, 0 failed
+frontend jest       50 passed, 0 failed
+frontend build     Compiled successfully
+```
+
+## F22 — Our own service hostnames were reachable  *(critical)*
+
+Two SSRF guards existed with different rules, and **both matched on IP ranges**.
+The internal services are reached by *hostname*:
+
+```
+ZAP_API_URL      = http://zap-scanner:8080
+ZAP_AUTH_API_URL = http://zap-auth-scanner:8080
+WEBCHECK_URI     = http://webcheck:3000
+```
+
+Those match no IP pattern, so neither guard refused them. And ZAP runs with
+`-config api.disablekey=true -config api.addrs.addr.name=.*` bound to `0.0.0.0`
+(`infrastructure/zap-task-def.json:32`) — no API key, any caller.
+
+So any authenticated customer could aim the login test at
+`http://zap-scanner:8080/JSON/...` and reach ZAP's unauthenticated admin API:
+read other scans' captured traffic, or shut the scanner down. Available to
+anyone with an account.
+
+## A correction to my own advice
+
+I recommended keeping private ranges allowed because "customers scan internal
+apps". That was wrong. The scanner runs in ECS, so a private address resolves
+inside **your** VPC, not the customer's — their staging host is not reachable
+from there at all without a VPN or agent, which this product does not have. The
+looser policy bought no capability and only exposed your network.
+
+Resolved by adopting the public scan's stricter rules wholesale as the single
+implementation, so its behaviour is unchanged by construction.
+
+## The rule that matters most
+
+Three rules now, but the third is the one that will keep working:
+
+1. Blocked IP ranges — RFC-1918, loopback, link-local, IPv6 ULA, `.local`.
+2. Service hosts read from the environment, so renaming a service cannot
+   silently open a hole.
+3. **Any single-label hostname is refused.** `zap-scanner`, `webcheck`, `redis`
+   are bare words; no customer site is. This catches the *next* internal service
+   somebody adds without remembering a denylist — rules 1 and 2 only ever catch
+   what someone thought of.
+
+## F23 — Four more unguarded server-side fetches
+
+Surveying every client-supplied URL, rather than the two files already in hand:
+
+| Route | Was |
+|---|---|
+| `webCheckRoutes.js` | no host check at all — the container fetches it |
+| `zapRoutes.js` | `new URL()` only — ZAP then scans it |
+| `urlscanRoutes.js` | no host check at all |
+| `scheduleRoutes.js` PUT | `new URL()` only — **my own gap from the previous round** |
+
+I guarded the schedule *create* route and missed *update*, so a schedule that
+passed the check once could have any host put back on it.
+
+## De-duplicated
+
+`BLOCKED_HOST_PATTERNS` and `isValidUrl` are gone from `virustotalRoutes.js`;
+one implementation now serves 13 call sites across 7 routes. A census test
+asserts no route may define its own host blocklist again — two guards drifting
+apart is what allowed the hostname gap to exist in both.
+
+All five new rules mutation-verified.
+
+## Raised, not fixed — infrastructure
+
+ZAP running `api.disablekey=true` with `api.addrs.addr.name=.*` is a task
+definition, not application code. The guard makes it unreachable from this flow,
+but a real API key is the defence-in-depth fix. `ZAP_AUTH_API_KEY` already exists
+and is documented as "optional when disablekey=true". Worth a conversation with
+whoever owns the infrastructure.
