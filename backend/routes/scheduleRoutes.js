@@ -13,6 +13,7 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const ScanResult = require('../models/ScanResult');
 const { validatePlanLimits } = require('../services/schedulerService');
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const { handleScheduleCreated } = require('../services/notificationService');
 
 /**
@@ -32,11 +33,17 @@ router.post('/', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Schedule type must be "one-time" or "recurring"' });
     }
 
-    // Validate URL format
-    try {
-      new URL(targetUrl);
-    } catch {
-      return res.status(400).json({ success: false, error: 'Invalid URL format' });
+    // Same guard the interactive routes apply. A schedule is just a deferred
+    // scan, so it is a second door to the same server-side fetch.
+    const targetGuard = checkScanTarget(targetUrl);
+    if (!targetGuard.ok) {
+      return res.status(400).json({ success: false, error: 'Invalid or refused URL', code: targetGuard.code });
+    }
+    if (authConfig && authConfig.loginUrl) {
+      const loginGuard = checkScanTarget(authConfig.loginUrl);
+      if (!loginGuard.ok) {
+        return res.status(400).json({ success: false, error: 'Invalid or refused loginUrl', code: loginGuard.code });
+      }
     }
 
     // Validate one-time schedule
@@ -121,6 +128,8 @@ router.post('/', auth, async (req, res) => {
     if (!planValidation.valid) {
       return res.status(403).json({
         success: false,
+        // Machine-readable for the UI; `error` is English and stays for logs.
+        code: planValidation.code,
         error: planValidation.reason
       });
     }
@@ -417,7 +426,7 @@ router.post('/:id/run-now', auth, async (req, res) => {
     user.checkAndResetMonthlyScans();
     const validation = await validatePlanLimits(user, schedule.targetUrl);
     if (!validation.valid) {
-      return res.status(403).json({ success: false, error: validation.reason });
+      return res.status(403).json({ success: false, code: validation.code, error: validation.reason });
     }
 
     // Set next run to now to trigger on next scheduler tick

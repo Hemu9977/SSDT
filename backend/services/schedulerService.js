@@ -551,6 +551,46 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
 }
 
 /**
+ * Can this user schedule (or immediately run) a scan against this target?
+ *
+ * `routes/scheduleRoutes.js` has imported this from here since the scheduled-scan
+ * feature was written, but the migration to organisation-level billing deleted
+ * the function and its export while leaving both call sites in place. The import
+ * has resolved to `undefined` ever since, so POST /api/schedules and
+ * POST /api/schedules/:id/run-now threw a TypeError and answered 500 — schedules
+ * could not be created at all.
+ *
+ * Restored on the same quota path `executeSingleSchedule` uses, rather than as the
+ * `return { valid: true }` stub it was before: that stub was a temporary bypass
+ * and enforced nothing.
+ *
+ * Advisory, exactly like the check in `executeSingleSchedule` — `claimScanSlot`
+ * inside the trigger functions remains the authoritative gate, since capacity can
+ * change between scheduling and firing.
+ *
+ * @param {import('../models/User')} user
+ * @param {string} targetUrl
+ * @returns {Promise<{valid:boolean, reason?:string, code?:string}>}
+ */
+async function validatePlanLimits(user, targetUrl) {
+  const limits = user && user.getAccountLimits ? user.getAccountLimits() : {};
+  const allowed = await checkScanQuota(user.organizationId, {
+    target: targetUrl,
+    scansPerTarget: limits.scansPerTarget,
+    targetsPerMonth: limits.targetsPerMonth
+  });
+
+  if (allowed) return { valid: true };
+
+  return {
+    valid: false,
+    // `code` is what the UI renders through t(); `reason` stays server-side.
+    code: 'PLAN_LIMIT_EXCEEDED',
+    reason: 'Scan limit reached or subscription inactive'
+  };
+}
+
+/**
  * Classify a scan failure into a category
  */
 function classifyFailure(error) {
@@ -633,6 +673,7 @@ async function finalizeRunningScans() {
 
 module.exports = {
   startScheduler,
+  validatePlanLimits,
   stopScheduler,
   processScheduledScans,
   finalizeRunningScans,

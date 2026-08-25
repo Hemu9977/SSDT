@@ -6,7 +6,7 @@ const auth = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
 const planCheck = require('../middleware/planCheck');
 
-const { analyzeUrl } = require('../services/pagespeedService');
+const { getPageSpeedReport } = require('../services/pagespeedService');
 const { consumeScan } = require('../services/planService');
 
 // @route   POST /api/pagespeed/analyze
@@ -23,7 +23,10 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
   try {
     console.log(`⚡ PageSpeed scan by user ${req.user.id} (Org: ${req.organization._id})`);
 
-    const report = await analyzeUrl(url, strategy);
+    // `strategy` is accepted by the API for compatibility but the service does
+    // not take it. This route imported `analyzeUrl`, which the service has never
+    // exported, so every call threw a TypeError and answered 500.
+    const report = await getPageSpeedReport(url);
 
     const limits = req.planUser.getAccountLimits(req.organization);
     await consumeScan(req.organization._id, {

@@ -137,6 +137,35 @@ const authLimiter = isRateLimitEnabled ? rateLimit({
   }
 }) : createBypassMiddleware();
 
+// Login detection and the login test each launch a headless browser and drive it
+// to a customer-supplied URL, and the test types credentials into it. Both ran
+// completely unthrottled while the far cheaper /scan was limited — so one account
+// could spawn unbounded browser processes, and could use this server to try
+// passwords against somebody else's site.
+//
+// Deliberately more permissive than scanLimiter: getting a login form configured
+// legitimately takes several attempts, and throttling someone mid-setup is its own
+// kind of broken.
+const LOGIN_SETUP_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_SETUP_MAX = Number(process.env.LOGIN_SETUP_RATE_LIMIT_MAX) || 20;
+
+const loginSetupLimiter = isRateLimitEnabled ? rateLimit({
+  windowMs: LOGIN_SETUP_WINDOW_MS,
+  max: LOGIN_SETUP_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: limitKey,
+  handler: (req, res) => {
+    const identifier = req.authUserId ? `User ${req.authUserId}` : `IP ${req.ip}`;
+    console.log(`⚠️  Login-setup rate limit exceeded for ${identifier} on ${req.path}`);
+    res.status(429).json({
+      error: 'Too many login setup attempts. Please wait a moment and try again.',
+      code: 'RATE_LIMITED',
+      retryAfter: `${Math.ceil(LOGIN_SETUP_WINDOW_MS / 60000)} minutes`
+    });
+  }
+}) : createBypassMiddleware();
+
 // Moderate rate limiter for scan-STARTING routes (20 requests per 10 minutes by
 // default). Read-only polling must use pollLimiter instead — see below.
 const scanLimiter = isRateLimitEnabled ? rateLimit({
@@ -212,6 +241,7 @@ module.exports = {
   authLimiter,
   emailSendLimiter,
   scanLimiter,
+  loginSetupLimiter,
   combinedScanLimiter,
   pollLimiter
 };

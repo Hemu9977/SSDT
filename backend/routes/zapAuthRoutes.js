@@ -22,6 +22,7 @@ const {
 } = require('../services/zapAuthService');
 const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
+const { checkScanTarget } = require('../utils/scanTargetGuard');
 const gridfsService = require('../services/gridfsService');
 
 // The four fast scanners are no longer started from this file — that moved to
@@ -31,7 +32,7 @@ const { getFullResults } = require('../services/webCheckService');
 const User = require('../models/User');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
 const { lighthouseScores } = require('../utils/scoreFormat');
-const { scanLimiter } = require('../middleware/rateLimiter');
+const { scanLimiter, loginSetupLimiter } = require('../middleware/rateLimiter');
 
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
@@ -112,7 +113,7 @@ router.get('/health', async (req, res) => {
  * Body: { loginUrl: string }
  * Returns: { success, forms[], pageTitle, hasCaptcha, hasOAuth, warnings[] }
  */
-router.post('/detect-login-fields', auth, async (req, res) => {
+router.post('/detect-login-fields', auth, loginSetupLimiter, async (req, res) => {
   try {
     const { loginUrl } = req.body;
 
@@ -120,11 +121,10 @@ router.post('/detect-login-fields', auth, async (req, res) => {
       return res.status(400).json({ error: 'loginUrl is required' });
     }
 
-    // Validate URL format
-    try {
-      new URL(loginUrl);
-    } catch {
-      return res.status(400).json({ error: 'Invalid URL format' });
+    // A headless browser fetches whatever this points at, server-side.
+    const guard = checkScanTarget(loginUrl);
+    if (!guard.ok) {
+      return res.status(400).json({ error: 'Invalid or refused URL', code: guard.code });
     }
 
     console.log(`[ZAP-AUTH] Detecting login fields for: ${loginUrl}`);
@@ -144,7 +144,7 @@ router.post('/detect-login-fields', auth, async (req, res) => {
  * Body: { loginUrl, username, password, usernameField, passwordField, submitButton? }
  * Returns: { success, authenticated, evidence, tempSessionId?, errorMessage? }
  */
-router.post('/test-login', auth, async (req, res) => {
+router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
   try {
     const { loginUrl, credentials, submitButton, submitAlternates, expectedMarker } = req.body;
 
@@ -159,11 +159,9 @@ router.post('/test-login', auth, async (req, res) => {
       }
     }
 
-    // Validate URL
-    try {
-      new URL(loginUrl);
-    } catch {
-      return res.status(400).json({ error: 'Invalid loginUrl format' });
+    const guard = checkScanTarget(loginUrl);
+    if (!guard.ok) {
+      return res.status(400).json({ error: 'Invalid or refused loginUrl', code: guard.code });
     }
 
     console.log(`[ZAP-AUTH] Testing login for: ${loginUrl} with ${credentials.length} credential fields`);
@@ -263,23 +261,30 @@ router.post('/test-login', auth, async (req, res) => {
 // polled every few seconds by the browser and must not share the same budget.
 router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
   try {
-    const { targetUrl, loginUrl, tempSessionId, triggerSource, lang } = req.body;
+    // `triggerSource` is deliberately NOT read from the body. It steers
+    // notification behaviour and the active-scan query, and a caller could
+    // label their own manual scan 'scheduled'. This route is, by definition,
+    // a manual start.
+    const { targetUrl, loginUrl, tempSessionId, lang } = req.body;
+    const triggerSource = 'manual';
 
     if (!targetUrl || !tempSessionId) {
 
       return res.status(400).json({ error: 'targetUrl and tempSessionId are required' });
     }
 
-    // Validate target URL
-    try {
-      const parsed = new URL(targetUrl);
-      if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
-  
-        return res.status(400).json({ error: 'Cannot scan localhost addresses' });
-      }
-    } catch {
+    const targetGuard = checkScanTarget(targetUrl);
+    if (!targetGuard.ok) {
+      return res.status(400).json({ error: 'Invalid or refused targetUrl', code: targetGuard.code });
+    }
 
-      return res.status(400).json({ error: 'Invalid targetUrl format' });
+    // loginUrl was never validated here, yet ZAP fetches it server-side with the
+    // injected session cookies — a second, unguarded door to the same place.
+    if (loginUrl) {
+      const loginGuard = checkScanTarget(loginUrl);
+      if (!loginGuard.ok) {
+        return res.status(400).json({ error: 'Invalid or refused loginUrl', code: loginGuard.code });
+      }
     }
 
     // Retrieve stored session cookies
