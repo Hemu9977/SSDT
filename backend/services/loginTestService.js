@@ -423,6 +423,10 @@ async function testLogin(options) {
       cookies: after.cookies,
       marker: verdict.marker,
       markerCheckableInBody: verdict.markerCheckableInBody,
+      // Whether the marker is strong enough to prove a sign-in, or merely
+      // useful for spotting a change. A re-login must not treat a weak one as
+      // proof by feeding it back in as a supplied marker.
+      markerConfidence: markerResult.confidence || 'low',
       markerAlternates: markerResult.alternates || [],
       evidenceCodes: verdict.evidenceCodes,
       submitStrategy: submitResult.strategy,

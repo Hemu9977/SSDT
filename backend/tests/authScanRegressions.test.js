@@ -240,3 +240,100 @@ test('the login recipe is never persisted or returned to the browser', () => {
     'the marker itself must not be returned to the browser'
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The scheduled path must apply the same rules as the interactive one
+//
+// Two entry points reach the same scan. Anything enforced in the route and not
+// in the scheduler is a rule that silently stops applying the moment a customer
+// schedules the scan instead of clicking it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('a scheduled login with no cookies is refused, exactly as the route refuses it', () => {
+  // A login that "worked" but issued no cookies leaves nothing for the scan to
+  // carry. The route already refuses this; without the same check the scheduler
+  // would run the whole scan anonymously and label it authenticated.
+  const block = scheduler.slice(
+    scheduler.indexOf('let cookies = []'),
+    scheduler.indexOf('const { v4: uuidv4 }')
+  );
+  assert.ok(block.length > 100, 'could not locate the scheduled login block');
+  assert.match(block, /cookies\.length === 0/);
+  assert.match(block, /loginResult\.authenticated && !noSession/);
+});
+
+test('the scheduled path passes the sign-in state through to the scan', () => {
+  // Without this the marker re-check and the mid-scan re-login simply never run
+  // for a scheduled scan — the feature would look present but be inert.
+  assert.match(scheduler, /authState\s*(\/\/.*)?$/m);
+  assert.match(scheduler, /marker: loginResult\.marker/);
+  assert.match(scheduler, /recipe: \{/);
+});
+
+test('the scheduled path derives its outcome from the verdict, not from a marker', () => {
+  // A weak marker is returned for change-detection only. Reading its presence as
+  // a confirmed sign-in is the bug the confidence gate exists to prevent.
+  assert.match(scheduler, /loginOutcome = loginResult\.authConfirmed \|\| 'unconfirmed'/);
+  assert.ok(
+    !/loginOutcome\s*=\s*loginResult\.marker/.test(scheduler),
+    'outcome must not be derived from marker presence'
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The mid-scan re-login is a third entry point and obeys the same rules
+//
+// This is where the parity blind spot kept biting: rules were enforced where
+// they were first written and quietly skipped everywhere else the same work
+// happens. Three places call testLogin; all three must agree.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('a re-login never feeds a weak marker back in as proof', () => {
+  // `expectedMarker` is the human-vouched path — testLogin treats whatever
+  // arrives there as high confidence. Passing a weak auto-derived marker would
+  // promote it to proof on the retry, confirming a sign-in on evidence that was
+  // explicitly not good enough the first time.
+  assert.match(
+    zapAuthService,
+    /expectedMarker:\s*authState\.markerConfidence === 'high' \? authState\.marker : null/
+  );
+});
+
+test('a re-login is only a repair when the sign-in could be confirmed', () => {
+  // Getting a fresh session back is necessary but not sufficient. Reporting an
+  // unverified re-login as repaired would let the report assert signed-in
+  // coverage it cannot stand behind.
+  assert.match(zapAuthService, /repair\.ok && repair\.confirmed/);
+  assert.match(zapAuthService, /!repair\.ok \|\| !repair\.confirmed/);
+  assert.match(zapAuthService, /relogin_unconfirmed/);
+});
+
+test('every entry point that logs in also requires a usable session', () => {
+  // The gap that started this: the route refused a cookie-less login, the
+  // scheduler did not, and a scheduled scan would have run anonymously while
+  // being labelled authenticated.
+  const entryPoints = [
+    ['zapAuthRoutes.js', zapAuthRoutes],
+    ['schedulerService.js', scheduler],
+    ['zapAuthService.js', zapAuthService]
+  ];
+  for (const [name, source] of entryPoints) {
+    assert.ok(
+      /cookies\.length === 0|cookies\.length > 0/.test(source),
+      `${name} calls testLogin but never checks that a session came back`
+    );
+  }
+});
+
+test('marker confidence reaches every place that stores sign-in state', () => {
+  // If any entry point drops it, `reAuthenticate` reads undefined, the
+  // high-confidence branch is never taken, and the guard above silently becomes
+  // a no-op rather than failing loudly.
+  for (const [name, source] of [
+    ['loginTestService.js', loginTestService],
+    ['zapAuthRoutes.js', zapAuthRoutes],
+    ['schedulerService.js', scheduler]
+  ]) {
+    assert.match(source, /markerConfidence/, `${name} must carry markerConfidence`);
+  }
+});

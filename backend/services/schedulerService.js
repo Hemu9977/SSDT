@@ -379,12 +379,20 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
         expectedMarker: authConfig.signedInMarker || null
       });
 
-      if (loginResult && loginResult.authenticated) {
+      // Mirrors POST /api/zap-auth/scan: a login that "worked" but issued no
+      // cookies leaves nothing for the scan to carry. That happens on apps which
+      // keep the session in the browser rather than in a cookie. Treating it as a
+      // confirmed sign-in would run the whole scan anonymously and label it
+      // authenticated — the exact failure this work exists to prevent.
+      const noSession = !loginResult?.cookies || loginResult.cookies.length === 0;
+
+      if (loginResult && loginResult.authenticated && !noSession) {
         cookies = loginResult.cookies || [];
         loginOutcome = loginResult.authConfirmed || 'unconfirmed';
         authState = {
           marker: loginResult.marker || null,
           markerCheckableInBody: Boolean(loginResult.markerCheckableInBody),
+          markerConfidence: loginResult.markerConfidence || 'low',
           recipe: {
             loginUrl: authConfig.loginUrl,
             credentials: authConfig.credentials,
@@ -395,7 +403,10 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
         console.log(`[Scheduler] ✅ Background login ${loginOutcome} for ${targetUrl} (${cookies.length} cookies)`);
       } else {
         loginOutcome = 'failed';
-        console.warn(`[Scheduler] ⚠️ Background login failed for ${targetUrl}: ${loginResult?.errorCode || 'unknown'}`);
+        const why = loginResult?.authenticated && noSession
+          ? 'no_session_cookies'
+          : (loginResult?.errorCode || 'unknown');
+        console.warn(`[Scheduler] ⚠️ Background login failed for ${targetUrl}: ${why}`);
       }
     } catch (loginErr) {
       loginOutcome = 'failed';

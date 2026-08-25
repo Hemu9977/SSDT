@@ -187,6 +187,7 @@ router.post('/test-login', auth, async (req, res) => {
         // in memory for the life of the scan and are never written to disk.
         marker: result.marker,
         markerCheckableInBody: result.markerCheckableInBody,
+        markerConfidence: result.markerConfidence || 'low',
         // The verdict, not the mere presence of a marker: a weak marker is
         // returned for change-detection but does not prove the sign-in.
         authConfirmed: result.authConfirmed,
@@ -300,6 +301,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     const authState = {
       marker: session.marker || null,
       markerCheckableInBody: Boolean(session.markerCheckableInBody),
+      markerConfidence: session.markerConfidence || 'low',
       recipe: session.recipe || null,
       authConfirmed: session.authConfirmed || 'unconfirmed',
       reloginAttempts: 0

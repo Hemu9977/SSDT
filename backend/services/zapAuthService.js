@@ -411,7 +411,12 @@ async function reAuthenticate({ zapClient, authState, scanId }) {
       credentials: authState.recipe.credentials,
       submitButton: authState.recipe.submitButton,
       submitAlternates: authState.recipe.submitAlternates,
-      expectedMarker: authState.marker
+      // Only hand back a marker we actually trust. `expectedMarker` is the
+      // human-vouched path — testLogin treats whatever arrives there as proof.
+      // Feeding a weak auto-derived marker in would promote it to proof on the
+      // retry, confirming a sign-in on evidence that was not good enough the
+      // first time.
+      expectedMarker: authState.markerConfidence === 'high' ? authState.marker : null
     });
 
     if (!result.authenticated || !result.cookies || result.cookies.length === 0) {
@@ -419,8 +424,21 @@ async function reAuthenticate({ zapClient, authState, scanId }) {
     }
 
     await applyCookieReplacerRule(zapClient, result.cookies);
-    console.log(`[ZAP-AUTH] Re-login succeeded for ${scanId} (${result.cookies.length} cookies)`);
-    return { ok: true, cookies: result.cookies, reason: 'relogin_ok' };
+
+    // A session was re-established, but that is not the same as knowing we are
+    // signed in again. Report the two separately so the scan does not claim a
+    // repair it cannot stand behind.
+    const confirmed = result.authConfirmed === 'confirmed';
+    console.log(
+      `[ZAP-AUTH] Re-login for ${scanId}: session restored (${result.cookies.length} cookies), ` +
+      `sign-in ${confirmed ? 'confirmed' : 'NOT confirmed'}`
+    );
+    return {
+      ok: true,
+      confirmed,
+      cookies: result.cookies,
+      reason: confirmed ? 'relogin_confirmed' : 'relogin_unconfirmed'
+    };
   } catch (err) {
     console.error(`[ZAP-AUTH] Re-login threw for ${scanId}: ${err.message}`);
     return { ok: false, cookies: [], reason: 'relogin_error' };
@@ -463,9 +481,11 @@ async function runSessionCheck({ zapClient, targetUrl, authState, scanId, phase 
     update['authScanResult.authLostAt'] = new Date();
     const repair = await reAuthenticate({ zapClient, authState, scanId });
     update['authScanResult.reloginAttempts'] = authState.reloginAttempts || 0;
-    update['authScanResult.authRepaired'] = repair.ok;
-    if (!repair.ok) {
-      // The rest of the scan will cover the publicly visible pages only.
+    // Only a re-login we could actually verify counts as a repair. Getting a
+    // fresh session back is necessary but not sufficient — claiming otherwise
+    // would let the report assert signed-in coverage it cannot stand behind.
+    update['authScanResult.authRepaired'] = Boolean(repair.ok && repair.confirmed);
+    if (!repair.ok || !repair.confirmed) {
       update['authScanResult.authDegraded'] = true;
       update['authScanResult.authDegradedReason'] = repair.reason;
     }
