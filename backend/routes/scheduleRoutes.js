@@ -15,14 +15,19 @@ const ScanResult = require('../models/ScanResult');
 const { validatePlanLimits } = require('../services/schedulerService');
 const { checkScanTarget } = require('../utils/scanTargetGuard');
 const { handleScheduleCreated } = require('../services/notificationService');
+const { isValidTimeZone, formatInTimeZone, DEFAULT_TIME_ZONE } = require('../utils/timezone');
 
 /**
  * POST /api/schedules
  * Create a new scheduled scan
  */
 router.post('/', auth, async (req, res) => {
+  // Set once the row is committed; the presentation work below the try reads it.
+  let savedSchedule = null;
+  const { targetUrl } = req.body;
+
   try {
-    const { targetUrl, scanType, scheduleType, scheduledAt, recurring, timezone, authConfig } = req.body;
+    const { scanType, scheduleType, scheduledAt, recurring, timezone, authConfig } = req.body;
 
     // Validate required fields
     if (!targetUrl) {
@@ -31,6 +36,12 @@ router.post('/', auth, async (req, res) => {
 
     if (!scheduleType || !['one-time', 'recurring'].includes(scheduleType)) {
       return res.status(400).json({ success: false, error: 'Schedule type must be "one-time" or "recurring"' });
+    }
+
+    // An unrecognised zone would otherwise be stored and then throw RangeError the next
+    // time anything formatted it. Refuse it at the door instead.
+    if (timezone !== undefined && !isValidTimeZone(timezone)) {
+      return res.status(400).json({ success: false, error: 'Invalid timezone', code: 'INVALID_TIMEZONE' });
     }
 
     // Same guard the interactive routes apply. A schedule is just a deferred
@@ -171,46 +182,58 @@ router.post('/', auth, async (req, res) => {
         days: recurring.days,
         time: recurring.time || '10:00'
       } : undefined,
-      timezone: timezone || 'Asia/Kolkata',
+      timezone: timezone || DEFAULT_TIME_ZONE,
       authConfig: scanType === 'authenticated' ? authConfig : undefined
     });
 
     // Compute next run
     schedule.computeNextRun();
 
+    // A recurring schedule with no reachable occurrence would save with nextRun: null,
+    // and getDueSchedules() only matches on nextRun - it would never run, silently.
+    if (schedule.scheduleType === 'recurring' && !schedule.nextRun) {
+      return res.status(400).json({
+        success: false,
+        error: 'No upcoming occurrence for this recurrence',
+        code: 'NO_UPCOMING_OCCURRENCE'
+      });
+    }
+
     await schedule.save();
+    savedSchedule = schedule;
 
     console.log(`📅 Schedule created: ${schedule._id} for ${targetUrl} (user: ${req.user.id})`);
 
-    const displayTime = schedule.nextRun 
-      ? schedule.nextRun.toLocaleString('en-US', {
-          timeZone: schedule.timezone || 'Asia/Kolkata',
-          dateStyle: 'medium',
-          timeStyle: 'short',
-          timeZoneName: 'short'
-        }) 
-      : 'As soon as possible';
-    
-    // Trigger notification asynchronously (don't await so we don't block response)
-    handleScheduleCreated(req.user.id, targetUrl, schedule.scheduleType, displayTime);
-
-    res.status(201).json({
-      success: true,
-      message: 'Scan scheduled successfully',
-      schedule: {
-        id: schedule._id,
-        targetUrl: schedule.targetUrl,
-        scanType: schedule.scanType,
-        scheduleType: schedule.scheduleType,
-        nextRun: schedule.nextRun,
-        status: schedule.status
-      }
-    });
-
   } catch (error) {
     console.error('❌ Schedule creation error:', error);
-    res.status(500).json({ success: false, error: 'Failed to create schedule', details: error.message });
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to create schedule',
+      code: 'SCHEDULE_CREATE_FAILED'
+    });
   }
+
+  // Past this point the row is committed. Nothing below may turn a schedule that exists
+  // into a 500 - that is exactly how a formatting TypeError made every create look like a
+  // failure while the schedule sat in the database.
+  const displayTime = formatInTimeZone(savedSchedule.nextRun, savedSchedule.timezone)
+    || 'As soon as possible';
+
+  // Trigger notification asynchronously (don't await so we don't block response)
+  handleScheduleCreated(req.user.id, targetUrl, savedSchedule.scheduleType, displayTime);
+
+  res.status(201).json({
+    success: true,
+    message: 'Scan scheduled successfully',
+    schedule: {
+      id: savedSchedule._id,
+      targetUrl: savedSchedule.targetUrl,
+      scanType: savedSchedule.scanType,
+      scheduleType: savedSchedule.scheduleType,
+      nextRun: savedSchedule.nextRun,
+      status: savedSchedule.status
+    }
+  });
 });
 
 /**
@@ -327,7 +350,12 @@ router.put('/:id', auth, async (req, res) => {
     }
     if (scanType !== undefined) schedule.scanType = scanType;
     if (enabled !== undefined) schedule.enabled = enabled;
-    if (timezone !== undefined) schedule.timezone = timezone;
+    if (timezone !== undefined) {
+      if (!isValidTimeZone(timezone)) {
+        return res.status(400).json({ success: false, error: 'Invalid timezone', code: 'INVALID_TIMEZONE' });
+      }
+      schedule.timezone = timezone;
+    }
     if (authConfig !== undefined) {
       if (authConfig && authConfig.loginUrl) {
         const loginGuard = checkScanTarget(authConfig.loginUrl);
@@ -398,7 +426,7 @@ router.put('/:id', auth, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Schedule update error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update schedule', details: error.message });
+    res.status(500).json({ success: false, error: 'Failed to update schedule', code: 'SCHEDULE_UPDATE_FAILED' });
   }
 });
 

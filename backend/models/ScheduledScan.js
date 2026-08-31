@@ -1,5 +1,11 @@
 const mongoose = require('mongoose');
 const { encrypt, decrypt } = require('../utils/credentialCrypto');
+const {
+  DEFAULT_TIME_ZONE,
+  isValidTimeZone,
+  zonedTimeToUtc,
+  zonedDateParts
+} = require('../utils/timezone');
 
 const scheduledScanSchema = new mongoose.Schema({
   userId: {
@@ -46,7 +52,13 @@ const scheduledScanSchema = new mongoose.Schema({
   },
   timezone: {
     type: String,
-    default: 'Asia/Kolkata'
+    default: DEFAULT_TIME_ZONE,
+    // An unrecognised zone makes Intl throw RangeError wherever this is later
+    // formatted, so it is refused here regardless of which route wrote it.
+    validate: {
+      validator: isValidTimeZone,
+      message: 'Unrecognised IANA time zone'
+    }
   },
   status: {
     type: String,
@@ -137,23 +149,26 @@ scheduledScanSchema.methods.computeNextRun = function () {
 
   const [hours, minutes] = (this.recurring.time || '10:00').split(':').map(Number);
   const sortedDays = [...this.recurring.days].sort((a, b) => a - b);
+  const zone = this.timezone || DEFAULT_TIME_ZONE;
+
+  // The month to search from is the month the user is currently in, not the month the
+  // server is in - near a month boundary those differ by up to a day.
+  const today = zonedDateParts(now, zone);
 
   // Try to find next run in current month and subsequent months
   for (let monthOffset = 0; monthOffset <= 2; monthOffset++) {
-    const candidateMonth = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+    // Normalise so a December + 1 rolls the year over.
+    const searchYear = today.year + Math.floor((today.month + monthOffset) / 12);
+    const searchMonth = (today.month + monthOffset) % 12;
 
     for (const day of sortedDays) {
-      const candidate = new Date(
-        candidateMonth.getFullYear(),
-        candidateMonth.getMonth(),
-        day,
-        hours,
-        minutes,
-        0
-      );
+      // Skip if day doesn't exist in this month (e.g., Feb 31). Date.UTC overflows
+      // into the following month, which is exactly what we test for.
+      const overflowCheck = new Date(Date.UTC(searchYear, searchMonth, day));
+      if (overflowCheck.getUTCMonth() !== searchMonth) continue;
 
-      // Skip if day doesn't exist in this month (e.g., Feb 31)
-      if (candidate.getMonth() !== candidateMonth.getMonth()) continue;
+      // `hours:minutes` is a wall-clock time in the schedule's zone, not the server's.
+      const candidate = zonedTimeToUtc(searchYear, searchMonth, day, hours, minutes, zone);
 
       // Must be in the future
       if (candidate > now) {

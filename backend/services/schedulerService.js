@@ -322,22 +322,58 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta, organizationId
     const pagespeedResult = psiResult.status === 'fulfilled' ? psiResult.value : { error: psiResult.reason?.message };
     const observatoryResult = obsResult.status === 'fulfilled' ? obsResult.value : { error: obsResult.reason?.message };
     const urlscanData = urlscanResult.status === 'fulfilled' ? urlscanResult.value : { error: urlscanResult.reason?.message };
-    const zapResult = zapInitResult.status === 'fulfilled' ? zapInitResult.value : { status: 'failed', error: zapInitResult.reason?.message };
-    const webCheckResult = webCheckInitResult.status === 'fulfilled' ? webCheckInitResult.value : { status: 'failed', error: webCheckInitResult.reason?.message };
 
+    // Only the three blocking scanners are persisted here.
+    //
+    // ZAP and WebCheck are started non-blocking: what they return is a
+    // {status:'running'} placeholder, and each service writes its own state straight
+    // to this document (zapService.js:722, webCheckService.js:484) and then updates it
+    // with dotted paths as it progresses. This write only lands once the SLOWEST of
+    // PageSpeed/Observatory/urlscan resolves - urlscan alone polls for 20-30s - so by
+    // then WebCheck (~18s) has usually already persisted all 29 sub-scans.
+    //
+    // Persisting the placeholder here therefore overwrote real results and reverted the
+    // status from a terminal completed_with_errors back to 'running', so the scan never
+    // reached the Gemini completion check and sat in 'combining' until the watchdog
+    // failed it. ZAP survived only because it finishes minutes later and rewrote itself.
+    // The orchestrator has no business writing those two legs at all - it owns neither.
     await ScanResult.updateOne(
-      { analysisId: scanId },
+      { analysisId: scanId, status: { $nin: ['stopped', 'cancelled'] } },
       {
         $set: {
           pagespeedResult,
           observatoryResult,
           urlscanResult: urlscanData,
-          zapResult,
-          webCheckResult,
           updatedAt: new Date()
         }
       }
     );
+
+    // The one thing the orchestrator does own: a leg that never started. Nothing else
+    // has written that leg in this case, and these are dotted paths, so a late write
+    // from a leg that did start cannot be clobbered either way.
+    const recordFailedStart = async (leg, settled) => {
+      const value = settled.status === 'fulfilled' ? settled.value : null;
+      const message = settled.status === 'rejected'
+        ? settled.reason?.message
+        : (value && value.status === 'failed' ? value.error : null);
+      if (!message && !(value && value.status === 'failed')) return;
+
+      await ScanResult.updateOne(
+        { analysisId: scanId, [`${leg}.status`]: { $nin: ['completed', 'completed_partial', 'completed_with_errors'] } },
+        {
+          $set: {
+            [`${leg}.status`]: 'failed',
+            [`${leg}.error`]: message || 'failed to start',
+            [`${leg}.completedAt`]: new Date(),
+            updatedAt: new Date()
+          }
+        }
+      ).catch(e => console.error(`[Scheduler] could not record ${leg} start failure for ${scanId}: ${e.message}`));
+    };
+
+    await recordFailedStart('zapResult', zapInitResult);
+    await recordFailedStart('webCheckResult', webCheckInitResult);
 
   } catch (err) {
     console.error('[Scheduler] Error orchestrating public scan:', err.message);
@@ -674,6 +710,9 @@ async function finalizeRunningScans() {
 module.exports = {
   startScheduler,
   validatePlanLimits,
+  // Exported so the scan orchestration can be exercised end-to-end without
+  // going through the shared ScheduledScan table, which other environments poll.
+  triggerPublicScan,
   stopScheduler,
   processScheduledScans,
   finalizeRunningScans,
