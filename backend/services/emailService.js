@@ -2,6 +2,7 @@ const IS_AWS = process.env.NODE_ENV === 'production';
 const FROM_EMAIL = process.env.SES_FROM_EMAIL;
 const SENDER = `FORTEXA <${FROM_EMAIL}>`;
 const { getFrontendBaseUrl } = require('../utils/frontendUrl');
+const { formatInTimeZone } = require('../utils/timezone');
 const FRONTEND_URL = getFrontendBaseUrl();
 
 let sesClient, SendEmailCommand;
@@ -190,25 +191,16 @@ const sendScanCompletionEmail = async (email, userName, scanDetails, lang) => {
     },
   }[l];
   const { scanType, targetUrl, scanId, completedAt, dashboardLink } = scanDetails;
-  const dateObj = new Date(completedAt);
-  const formattedIST = dateObj.toLocaleString('en-US', {
-    timeZone: 'Asia/Kolkata',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
-  const formattedJST = dateObj.toLocaleString('en-US', {
-    timeZone: 'Asia/Tokyo',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
-  const formattedUTC = dateObj.toLocaleString('en-US', {
-    timeZone: 'UTC',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    timeZoneName: 'short',
-  });
-  const formattedTime = `${formattedIST} IST / ${formattedJST} JST (${formattedUTC})`;
   try {
+    // dateStyle/timeStyle may be combined with each other and with timeZone, but never
+    // with a component option such as timeZoneName - Intl throws TypeError if you do.
+    // formatInTimeZone uses component options throughout, so the mix cannot recur.
+    const dateObj = new Date(completedAt);
+    const formattedTime = Number.isNaN(dateObj.getTime())
+      ? ''
+      : `${formatInTimeZone(dateObj, 'Asia/Kolkata', { withZoneName: false })} IST`
+        + ` / ${formatInTimeZone(dateObj, 'Asia/Tokyo', { withZoneName: false })} JST`
+        + ` (${formatInTimeZone(dateObj, 'UTC')})`;
     await sendEmail(email, t.subject, `
       <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 20px auto; background-color: #0a0a0a; padding: 30px; border-radius: 8px; border: 1px solid #3a1a00;">
         <div style="text-align: center; margin-bottom: 20px;">
