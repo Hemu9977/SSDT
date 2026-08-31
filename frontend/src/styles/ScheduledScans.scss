@@ -1,12 +1,46 @@
 ﻿// ScheduledScans Page Styles - SSDT Theme
 
+// Frosted card surface, matching the treatment already used on Profile
+// (.profile-section) and the Pro theme: a translucent ground plus a small
+// backdrop blur, so the particle field still reads through the card but stops
+// competing with the text on top of it.
+//
+// Keep the radius small (3px, same as Profile). The particles are small and
+// sparse, so a wide radius averages them into a flat wash and the card reads as
+// a plain grey panel - the blur has to soften the dots, not erase them.
+//
+// --card-bg was referenced by three rules here and defined nowhere, so every
+// surface on this page rendered fully transparent and the particles came
+// through at full strength. That is what these tokens fix.
 .schedules-page {
+  // White frosted glass, applied in both theme states rather than branching on
+  // body.light (ThemeContext boots every session to 'light', so branching there
+  // is not a reliable signal of what the page actually looks like).
+  //
+  // The alpha has to stay low. At 0.5+ the white stops being a veil and becomes
+  // a solid panel - that is the "completely white cards" failure - so this sits
+  // just high enough to lift the surface off the background.
+  --card-bg: rgba(255, 255, 255, 0.12);
+  --card-surface-blur: blur(3px);
+
   padding: 2rem;
   width: 100%;
   max-width: 1400px;
   margin: 0 auto;
   z-index: 2;
   position: relative;
+
+  // Without backdrop-filter the blur cannot soften anything, so lean on opacity
+  // instead rather than leaving the text over raw particles.
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    --card-bg: rgba(255, 255, 255, 0.2);
+  }
+}
+
+// Knock the particle field back behind this page only. The canvas is shared by
+// every route, so this is scoped to the wrapper ScheduledScans renders.
+.schedules-route canvas.particle-canvas {
+  opacity: 0.65;
 }
 
 // Loading
@@ -114,6 +148,8 @@
   align-items: center;
   gap: 2rem;
   background: var(--card-bg);
+  -webkit-backdrop-filter: var(--card-surface-blur);
+  backdrop-filter: var(--card-surface-blur);
   border: 1px solid var(--input-border);
   border-radius: 12px;
   padding: 1.5rem;
@@ -174,6 +210,8 @@
 
 .schedule-card {
   background: var(--card-bg);
+  -webkit-backdrop-filter: var(--card-surface-blur);
+  backdrop-filter: var(--card-surface-blur);
   border: 1px solid var(--input-border);
   border-radius: 16px;
   padding: 24px;
@@ -430,6 +468,8 @@
   text-align: center;
   padding: 5rem 2rem;
   background: var(--card-bg);
+  -webkit-backdrop-filter: var(--card-surface-blur);
+  backdrop-filter: var(--card-surface-blur);
   border: 2px dashed var(--input-border);
   border-radius: 16px;
   color: var(--foreground-darker);
@@ -459,6 +499,14 @@
 
 // Responsive
 @media (max-width: 768px) {
+  // backdrop-filter is the costly part on mobile GPUs, and the cards are close
+  // to full-width here, so a smaller radius over a slightly firmer ground gives
+  // the same separation for less work.
+  .schedules-page {
+    --card-bg: rgba(255, 255, 255, 0.14);
+    --card-surface-blur: blur(3px);
+  }
+
   .schedules-page {
     padding: 1rem;
   }

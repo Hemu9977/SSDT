@@ -282,6 +282,15 @@ body.light {
     text-align: right;
     font-weight: 700;
     letter-spacing: 0.5px;
+
+    .picker-timezone-note {
+      display: block;
+      margin-top: 4px;
+      font-size: 0.72rem;
+      font-weight: 400;
+      letter-spacing: 0.3px;
+      opacity: 0.65;
+    }
   }
 }
 

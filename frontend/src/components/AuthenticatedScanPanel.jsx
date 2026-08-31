@@ -13,6 +13,7 @@ import { useNotifications } from '../contexts/NotificationContext';
 import { API_BASE } from '../config/api';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
+import { browserTimeZone } from '../utils/timezone';
 
 // Loading placeholder for progressive loading (same as Hero.jsx)
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -460,7 +461,7 @@ const AuthenticatedScanPanel = () => {
           scheduleType: pendingSchedule.scheduleType || (pendingSchedule.recurring ? 'recurring' : 'one-time'),
           scheduledAt: pendingSchedule.scheduledAt,
           recurring: pendingSchedule.recurring,
-          timezone: pendingSchedule.timezone || 'Asia/Kolkata',
+          timezone: pendingSchedule.timezone || browserTimeZone(),
           authConfig: authConfigObj
         })
       });

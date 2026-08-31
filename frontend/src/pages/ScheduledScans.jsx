@@ -135,7 +135,7 @@ const ScheduledScans = () => {
   };
 
   return (
-    <div className="landing-page">
+    <div className="landing-page schedules-route">
       <ParticleBackground />
       <Header />
       <main>

@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from '../contexts/TranslationContext';
 import '../styles/ScheduleScanModal.scss';
 import { API_BASE } from '../config/api';
+import { browserTimeZone } from '../utils/timezone';
 
 const CustomCalendar = ({ value, onChange, label, t }) => {
   const [showPicker, setShowPicker] = useState(false);
@@ -222,6 +223,7 @@ const ScrollingTimePicker = ({ value, onChange, label, t }) => {
       </div>
       <div className="picker-selected-value">
         {t('selectedTime', { time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${period}` })}
+        <span className="picker-timezone-note">{t('timezoneNote', { timezone: browserTimeZone() })}</span>
       </div>
     </div>
   );
@@ -307,6 +309,9 @@ const ScheduleScanModal = ({ isOpen, onClose, onScheduleCreated, editSchedule = 
     const configData = {
       scanType,
       scheduleType: mode,
+      // The times below are wall-clock times the user picked, so the backend needs to
+      // know which clock they read them off.
+      timezone: browserTimeZone(),
     };
 
     if (mode === 'one-time') {

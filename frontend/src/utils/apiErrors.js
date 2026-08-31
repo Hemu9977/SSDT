@@ -74,6 +74,12 @@ const CODE_KEYS = {
   ORG_OTHER_ORG_MEMBER: 'errOrgOtherOrgMember',
   ORG_ACCOUNT_EXISTS: 'errOrgAccountExists',
   ORG_SIGNUP_FIELDS_REQUIRED: 'errOrgSignupFieldsRequired',
+
+  // ── Scheduled scans (routes/scheduleRoutes.js) ─────────────────────────────
+  INVALID_TIMEZONE: 'errInvalidTimezone',
+  NO_UPCOMING_OCCURRENCE: 'errNoUpcomingOccurrence',
+  SCHEDULE_CREATE_FAILED: 'failedSaveSchedule',
+  SCHEDULE_UPDATE_FAILED: 'failedSaveSchedule',
 };
 
 /**

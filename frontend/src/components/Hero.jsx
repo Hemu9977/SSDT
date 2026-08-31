@@ -15,6 +15,7 @@ import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
+import { browserTimeZone } from '../utils/timezone';
 
 // 🔄 Loading Placeholder Component for progressive loading
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -787,20 +788,23 @@ const Hero = ({ historicalScan }) => {
           scheduleType: config.scheduleType || (config.recurring ? 'recurring' : 'one-time'),
           scheduledAt: config.scheduledAt,
           recurring: config.recurring,
-          timezone: config.timezone || 'Asia/Kolkata'
+          timezone: config.timezone || browserTimeZone()
         })
       });
 
-      // The response body is deliberately not read: it only carried an English
-      // error string, and the catch below resolves the message through t().
-      if (!res.ok) throw Object.assign(new Error('save schedule failed'), { messageKey: 'failedSaveSchedule' });
+      // Only the `code` is read - the backend's `error` string is English server-log
+      // text and must never be rendered. getApiErrorLabel resolves the code through t().
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw Object.assign(new Error('save schedule failed'), { code: body.code });
+      }
 
       sessionStorage.removeItem('pendingScheduleConfig');
       setPendingSchedule(null);
       alert(t('scheduleCreatedSuccessfully'));
       navigate('/schedules');
     } catch (err) {
-      setError(t(err.messageKey || 'failedSaveSchedule'));
+      setError(getApiErrorLabel(t, err, 'failedSaveSchedule'));
       setLoading(false);
     }
   };
