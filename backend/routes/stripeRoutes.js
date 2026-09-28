@@ -45,7 +45,7 @@ const CREDIT_VALIDITY_DAYS = 90;
 
 // ─── Japanese consumption tax ─────────────────────────────────────────────────
 // Every STRIPE_PRICE_* above is a TAX-EXCLUSIVE amount (e.g. Light monthly is
-// ¥30,000). The plan cards show that figure plus a tax-inclusive total derived at
+// ¥50,000). The plan cards show that figure plus a tax-inclusive total derived at
 // TAX_RATE in frontend/src/pages/Profile.jsx, so Stripe must actually add the same
 // tax or the customer is charged less than the total they were shown.
 //

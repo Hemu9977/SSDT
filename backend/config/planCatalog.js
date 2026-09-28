@@ -32,7 +32,7 @@ const PLAN_CATALOG = {
     targets: 3,
     vulnerabilityAccessLevel: 'critical-high',
     maxSchedules: 1,
-    price: { monthly: 30000, annual: 300000 }
+    price: { monthly: 50000, annual: 500000 }
   },
   basic: {
     seats: 3,
@@ -40,7 +40,7 @@ const PLAN_CATALOG = {
     targets: 5,
     vulnerabilityAccessLevel: 'all',
     maxSchedules: 3,
-    price: { monthly: 50000, annual: 500000 }
+    price: { monthly: 80000, annual: 800000 }
   },
   pro: {
     seats: 5,
@@ -56,7 +56,7 @@ const PLAN_CATALOG = {
     targets: 1,
     vulnerabilityAccessLevel: 'critical-high',
     maxSchedules: 0,
-    price: { onetime: 20000 }
+    price: { onetime: 30000 }
   },
   trial2: {
     seats: 1,
@@ -64,7 +64,7 @@ const PLAN_CATALOG = {
     targets: 1,
     vulnerabilityAccessLevel: 'all',
     maxSchedules: 0,
-    price: { onetime: 30000 }
+    price: { onetime: 40000 }
   }
 };
 

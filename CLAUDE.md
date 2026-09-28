@@ -219,8 +219,8 @@ Earlier work still worth knowing:
 
 | Feature | Light | Basic | Pro |
 |---------|-------|-------|-----|
-| **Monthly Price** | ¥30,000 | ¥50,000 | ¥100,000 |
-| **Annual Price** | ¥300,000 | ¥500,000 | ¥1,000,000 |
+| **Monthly Price** | ¥50,000 | ¥80,000 | ¥100,000 |
+| **Annual Price** | ¥500,000 | ¥800,000 | ¥1,000,000 |
 | **Accounts** (`seatsAllowed`) | 1 | 3 | 5 |
 | **Scans/month** (`scansPerMonth`) | 3 | 5 | 10 |
 | **Max targets/month** (`targetsPerMonth`) | 3 | 5 | 10 |
@@ -237,8 +237,8 @@ Notes:
   `maxSchedules: 2`. Also the fallback for an org whose paid plan was nulled on cancellation.
 
 ### One-Time Trial Plans
-- **Trial 1** (`trial1_onetime`): ¥20,000 — 1 account, 1 scan, 1 target, `critical-high`, no schedules
-- **Trial 2** (`trial2_onetime`): ¥30,000 — 1 account, 2 scans, 1 target, `all` severities, no schedules
+- **Trial 1** (`trial1_onetime`): ¥30,000 — 1 account, 1 scan, 1 target, `critical-high`, no schedules
+- **Trial 2** (`trial2_onetime`): ¥40,000 — 1 account, 2 scans, 1 target, `all` severities, no schedules
 
 Scan allocations are derived in `ONETIME_SCANS` (`backend/config/planCatalog.js`).
 One-time purchases are **credit batches** (`Organization.scanCredits`), consumed only after

@@ -20,13 +20,13 @@ export const PLAN_CATALOG = {
     seats: 1,
     scans: 3,
     severity: 'critical-high',
-    price: { monthly: 30000, annual: 300000 },
+    price: { monthly: 50000, annual: 500000 },
   },
   basic: {
     seats: 3,
     scans: 5,
     severity: 'all',
-    price: { monthly: 50000, annual: 500000 },
+    price: { monthly: 80000, annual: 800000 },
   },
   pro: {
     seats: 5,
@@ -38,13 +38,13 @@ export const PLAN_CATALOG = {
     seats: 1,
     scans: 1,
     severity: 'critical-high',
-    price: { onetime: 20000 },
+    price: { onetime: 30000 },
   },
   trial2: {
     seats: 1,
     scans: 2,
     severity: 'all',
-    price: { onetime: 30000 },
+    price: { onetime: 40000 },
   },
 };
 
