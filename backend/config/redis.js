@@ -22,11 +22,30 @@ function resilientRetryStrategy(times) {
   return delay;
 }
 
+/**
+ * TLS options for the current REDIS_URL.
+ *
+ * rediss:// = TLS required; redis:// = plain (local dev). The self-managed EC2
+ * Valkey presents a certificate from Fortexa's private CA, which Node does not
+ * trust by default, so REDIS_TLS_CA carries that CA's PEM. Secrets Manager values
+ * are often stored with literal "\n" sequences, hence the unescape.
+ * REDIS_TLS_SERVERNAME overrides the name checked against the certificate; by
+ * default Node checks the URL's hostname. With neither set this is `{ tls: {} }`,
+ * which is what public-CA endpoints (ElastiCache, Redis Cloud) need.
+ */
+function tlsOptions(url = REDIS_URL()) {
+  if (!url.startsWith('rediss://')) return {};
+  const tls = {};
+  const ca = process.env.REDIS_TLS_CA;
+  if (ca && ca.trim()) tls.ca = ca.replace(/\\n/g, '\n');
+  const servername = process.env.REDIS_TLS_SERVERNAME;
+  if (servername && servername.trim()) tls.servername = servername.trim();
+  return { tls };
+}
+
 function buildOptions(overrides = {}) {
-  // rediss:// = TLS required (Redis Cloud); redis:// = plain (local dev)
-  const useTLS = REDIS_URL().startsWith('rediss://');
   return {
-    ...(useTLS ? { tls: {} } : {}),
+    ...tlsOptions(),
     retryStrategy: resilientRetryStrategy,
     maxRetriesPerRequest: 3,
     enableReadyCheck: true,
@@ -156,12 +175,17 @@ function createDedicatedConnection(purpose, overrides = {}) {
 async function checkRedisClientHealth() {
   let tempClient = null;
   try {
-    const useTLS = REDIS_URL().startsWith('rediss://');
+    // Diagnostic only, and it runs before server.listen — so it must give up fast.
+    // ioredis defaults (20 per-command retries, reconnect forever) held startup for
+    // ~2 minutes when the Redis host did not answer, past the ALB health-check grace.
     tempClient = new Redis(REDIS_URL(), {
-      ...(useTLS ? { tls: {} } : {}),
+      ...tlsOptions(),
       connectTimeout: 5000,
-      lazyConnect: false
+      lazyConnect: false,
+      maxRetriesPerRequest: 1,
+      retryStrategy: () => null
     });
+    tempClient.on('error', () => {}); // surfaced once via the catch below
 
     const info = await tempClient.info('clients');
     let connectedClients = 0;
@@ -211,6 +235,7 @@ async function disconnectAll() {
 }
 
 module.exports = {
+  tlsOptions,
   createRedisClient,
   getPublisher,
   getSubscriber,
