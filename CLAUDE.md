@@ -24,6 +24,33 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 - **OWASP ZAP**: Two instances on ports 8080 (normal) and 8081 (authenticated scans).
 - **WebCheck**: Docker container on port 3002, runs 29 scan types via REST API (`/api/{scan-type}?url=`).
 
+### Redis
+- Everything Redis goes through `backend/config/redis.js` (BullMQ `scan-queue`/`zap-queue`,
+  ZAP locks, capacity state, scan progress pub/sub, Gemini dedup, PDF job metadata).
+- **Production Redis: self-managed Valkey 9.0 on EC2** (`i-0ae101f3fba1e6cf5`,
+  `redis.fortexa.internal` / 10.0.128.50, private subnet, TLS-only with Fortexa's private CA,
+  ACL user `fortexa-app`, AOF + RDB, `noeviction`). Production revision:
+  **`fortexa-backend:86`** (image `v55`, pinned by digest); `REDIS_URL`, `REDIS_TLS_CA` and
+  `REDIS_TLS_SERVERNAME` all come from `fortexa-redis/app`. Runbook, scripts and verification:
+  `infrastructure/redis-ec2/README.md`.
+- **Rollback: Redis Cloud via `fortexa-backend:85`** — the same `v55` digest as 86, with
+  `REDIS_URL` from `fortexa-backend-secrets:REDIS_URL` and no `REDIS_TLS_*`. Do not delete
+  Redis Cloud or that key during the rollback window. Revision 83 (image `v54` by mutable tag)
+  is an old, superseded rollback — do not use it.
+- **ElastiCache is retired.** Cluster `fortexa-redis` was deleted on 2026-10-03 (it never
+  served traffic) and is neither a production nor a rollback target. Neither 86 nor 85
+  references `fortexa-backend-secrets:ELASTICACHE_REDIS_URL`; revisions 80–84 still do and
+  cannot start once that key is removed (README, "ElastiCache retirement").
+- A private CA needs `REDIS_TLS_CA` (+ `REDIS_TLS_SERVERNAME`); images older than this
+  change cannot connect to the EC2 Valkey.
+- Do **not** add a blanket `commandTimeout` to the publisher: on timeout,
+  `zapRecycler.tryAcquire` falls back to an in-memory lock while another scan may still
+  hold the Redis lock (ZAP recycled under a running scan). Blocking until Redis returns
+  is the safe behaviour for locks.
+- `cd backend && node scripts/redisMigrationSmoke.js` (and `redisSecurityProbe.js`) check
+  any Redis against everything Fortexa uses; `infrastructure/redis-ec2/vpc-smoke.sh` runs
+  them from inside the VPC.
+
 ## 6 Scanners
 1. **PageSpeed Insights** - Lighthouse performance/accessibility/SEO scores
 2. **Mozilla Observatory** - HTTP security headers grading
@@ -146,6 +173,9 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   `claimScanSlot` against a stubbed model layer: charge-exactly-once under concurrency,
   claim release when a charge is declined, rank/capacity arithmetic, and a census
   asserting quota is charged from exactly one service.
+- `backend/tests/redisConfig.test.js` — Redis TLS option building (private CA, escaped
+  newlines, servername, never `rejectUnauthorized:false`) and that the startup health
+  check gives up fast instead of holding `server.listen`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.
