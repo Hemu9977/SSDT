@@ -1,0 +1,7 @@
+[Unit]
+Description=Publish Fortexa Valkey metrics to CloudWatch
+After=valkey.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fortexa-valkey-metrics

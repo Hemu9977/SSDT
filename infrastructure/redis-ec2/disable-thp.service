@@ -1,0 +1,13 @@
+[Unit]
+Description=Disable Transparent Huge Pages (Valkey latency / fork)
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=valkey.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled; echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+
+[Install]
+WantedBy=basic.target

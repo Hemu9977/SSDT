@@ -1,0 +1,40 @@
+#!/bin/bash
+# Publishes Valkey health to CloudWatch namespace Fortexa/Redis every minute
+# (fortexa-valkey-metrics.timer). ValkeyUp=0 whenever PING over TLS fails, so the
+# alarm on it covers a dead process, a broken TLS setup and a broken ACL alike.
+set -uo pipefail
+source /etc/fortexa/redis.env
+
+INSTANCE_ID=$(cat /var/lib/fortexa/instance-id 2>/dev/null || echo unknown)
+export VALKEYCLI_AUTH="$(cat /etc/valkey/ops-admin.pass 2>/dev/null)"
+CLI=(valkey-cli --no-auth-warning --tls --cacert /etc/valkey/tls/ca.crt --sni redis.fortexa.internal
+     -h 127.0.0.1 -p 6379 --user ops-admin)
+
+up=0
+info=""
+if [ "$("${CLI[@]}" PING 2>/dev/null)" = "PONG" ]; then
+  up=1
+  info=$("${CLI[@]}" INFO 2>/dev/null | tr -d '\r')
+fi
+field() { printf '%s\n' "$info" | awk -F: -v k="$1" '$1==k{print $2; exit}'; }
+
+used=$(field used_memory); used=${used:-0}
+maxm=$(field maxmemory); maxm=${maxm:-0}
+pct=0; [ "$maxm" -gt 0 ] 2>/dev/null && pct=$(awk -v u="$used" -v m="$maxm" 'BEGIN{printf "%.2f", u*100/m}')
+clients=$(field connected_clients); clients=${clients:-0}
+rejected=$(field rejected_connections); rejected=${rejected:-0}
+aof_ok=0; [ "$(field aof_last_write_status)" = "ok" ] && aof_ok=1
+rdb_ok=0; [ "$(field rdb_last_bgsave_status)" = "ok" ] && rdb_ok=1
+end=$(openssl x509 -enddate -noout -in /etc/valkey/tls/server.crt 2>/dev/null | cut -d= -f2)
+days=0; [ -n "$end" ] && days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+
+D="Name=InstanceId,Value=${INSTANCE_ID}"
+aws cloudwatch put-metric-data --region "$REGION" --namespace Fortexa/Redis --metric-data \
+  "MetricName=ValkeyUp,Value=${up},Unit=Count,Dimensions=[{${D}}]" \
+  "MetricName=UsedMemoryBytes,Value=${used},Unit=Bytes,Dimensions=[{${D}}]" \
+  "MetricName=MemoryUsedPercentOfMax,Value=${pct},Unit=Percent,Dimensions=[{${D}}]" \
+  "MetricName=ConnectedClients,Value=${clients},Unit=Count,Dimensions=[{${D}}]" \
+  "MetricName=RejectedConnections,Value=${rejected},Unit=Count,Dimensions=[{${D}}]" \
+  "MetricName=AofLastWriteOk,Value=${aof_ok},Unit=Count,Dimensions=[{${D}}]" \
+  "MetricName=RdbLastBgsaveOk,Value=${rdb_ok},Unit=Count,Dimensions=[{${D}}]" \
+  "MetricName=CertDaysLeft,Value=${days},Unit=Count,Dimensions=[{${D}}]"
