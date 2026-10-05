@@ -24,17 +24,13 @@
   }
 }
 
-/* ── Panels — reduced-opacity background so the particle canvas still shows
-   through behind body copy, same treatment as .scan-type-card / Profile cards ── */
+/* ── Panels — opaque --panel-bg so the particle canvas never shows through
+   body copy, same surface as .scan-type-card / Profile cards ── */
 .about-panel {
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   border: 1px solid rgba(255, 107, 0, 0.25);
   border-radius: var(--card-border-radius);
   padding: 2.5rem;
-}
-
-body.light .about-panel {
-  background: rgba(255, 255, 255, 0.75);
 }
 
 /* ── Hero ── */
@@ -118,7 +114,7 @@ body.light .about-panel {
 }
 
 .about-feature-card {
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   border: 2px solid var(--accent);
   border-radius: var(--card-border-radius);
   padding: 1.75rem;
@@ -129,10 +125,6 @@ body.light .about-panel {
     transform: translateY(-4px);
     box-shadow: 0 8px 24px rgba(255, 107, 0, 0.25);
   }
-}
-
-body.light .about-feature-card {
-  background: rgba(255, 255, 255, 0.75);
 }
 
 .about-feature-title {
@@ -202,7 +194,7 @@ body.light .about-feature-card {
   border: 1px solid var(--accent);
   border-radius: var(--card-border-radius);
   padding: 1.5rem;
-  background: rgba(255, 107, 0, 0.05);
+  background: linear-gradient(rgba(255, 107, 0, 0.05), rgba(255, 107, 0, 0.05)) var(--panel-bg);
 }
 
 .about-format-title {
@@ -250,25 +242,15 @@ body.light .about-feature-card {
   border: 1px solid rgba(255, 107, 0, 0.25);
   border-radius: 1.5rem;
   padding: 2rem 1.5rem;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
 }
 
-body.light .about-plan-card,
-body.light .about-trial-card {
-  background: rgba(255, 255, 255, 0.75);
-}
-
 .about-plan-card--highlight {
   border: 2px solid var(--accent);
-  background: rgba(0, 0, 0, 0.65);
   box-shadow: 0 0 20px rgba(255, 107, 0, 0.15);
-}
-
-body.light .about-plan-card--highlight {
-  background: rgba(255, 255, 255, 0.75);
 }
 
 .about-plan-badge {
@@ -305,11 +287,6 @@ body.light .about-plan-card--highlight {
 .about-plan-period {
   font-size: 0.85rem;
   font-weight: 400;
-  color: var(--foreground-darker);
-}
-
-.about-plan-annual {
-  font-size: 0.8rem;
   color: var(--foreground-darker);
 }
 

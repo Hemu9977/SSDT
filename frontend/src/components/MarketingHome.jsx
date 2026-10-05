@@ -178,7 +178,11 @@ const MarketingHome = () => {
                 {plan.price}
                 <span className="about-plan-period">{t('periodMonth')}</span>
               </div>
-              <div className="about-plan-annual">{t('aboutOrAnnual', { amount: plan.annualPrice })}</div>
+              <div className="about-plan-price">
+                <span className="about-plan-period">{t('aboutAnnualPrefix')}</span>{' '}
+                {plan.annualPrice}
+                <span className="about-plan-period">{t('periodYear')}</span>
+              </div>
               <div className="about-plan-tax-note">{t('priceExcludingTax')}</div>
               <ul className="about-plan-features">
                 <li>{t('planAccounts', { count: plan.accounts, plural: plan.accounts === 1 ? '' : 's' })}</li>

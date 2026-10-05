@@ -958,7 +958,7 @@ export const en = {
   aboutFormatJsonDescription: 'The complete structured scan data, for teams that want to feed results into their own tooling or keep a full technical record.',
   aboutPlansTitle: 'Plans & Pricing',
   aboutPlansSubtitle: 'Three subscription tiers billed monthly or annually, plus one-time trial options.',
-  aboutOrAnnual: 'or {amount}/year',
+  aboutAnnualPrefix: 'or',
   aboutTrialsTitle: 'One-Time Trials',
   aboutPaymentsTitle: 'Secure Payments',
   aboutPaymentsBody: 'Checkout is handled by Stripe, a widely used payment processor. FORTEXA never sees or stores your card details. Both subscription billing and one-time payments are supported, your plan activates automatically once payment is confirmed, and prices shown are tax-exclusive with Japan’s 10% consumption tax added at checkout.',

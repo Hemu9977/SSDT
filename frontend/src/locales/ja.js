@@ -949,7 +949,7 @@ export const ja = {
   aboutFormatJsonDescription: '完全な構造化スキャンデータをエクスポートでき、自社ツールへの取り込みや技術記録の保管に活用できます。',
   aboutPlansTitle: '料金プラン',
   aboutPlansSubtitle: '月額・年額から選べる3つのサブスクリプションプランに加え、1回限りのお試しプランをご用意しています。',
-  aboutOrAnnual: '（年額 {amount}）',
+  aboutAnnualPrefix: 'または',
   aboutTrialsTitle: '一回限りのお試しプラン',
   aboutPaymentsTitle: '安全な決済',
   aboutPaymentsBody: '決済処理は広く利用されている決済代行サービスのStripeが担当しており、FORTEXAがカード情報を取得・保存することはありません。サブスクリプション課金と一回限りの支払いの両方に対応しており、決済確認後はプランが自動的に有効化されます。表示価格は税抜きで、決済時に消費税10%が加算されます。',
