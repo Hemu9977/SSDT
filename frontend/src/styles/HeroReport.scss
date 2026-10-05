@@ -3,13 +3,11 @@
   border: 2px solid var(--accent);
   padding: 2rem;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   color: var(--foreground);
   max-width: 100%;
   overflow-x: auto;
   box-shadow: var(--card-shadow);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
 }
 
 .report-title {
@@ -299,10 +297,6 @@
 
 /* Light Theme Adjustments */
 body.light {
-  .report-container {
-    background: rgba(255, 255, 255, 0.75);
-  }
-
   .report-summary {
     background: rgba(255, 255, 255, 0.5);
   }

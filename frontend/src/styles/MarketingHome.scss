@@ -54,6 +54,7 @@ body.dark .marketing-home::before {
   letter-spacing: 1.5px;
   text-transform: uppercase;
   color: var(--accent);
+  background: var(--panel-bg);
   border: 1px solid rgba(255, 107, 0, 0.4);
   border-radius: 999px;
   padding: 0.35rem 0.9rem;
@@ -339,13 +340,9 @@ body.dark .marketing-home::before {
 .marketing-ai-panel {
   border: 2px solid var(--accent);
   border-radius: var(--card-border-radius);
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   padding: 3rem 2.5rem;
   box-shadow: 0 0 32px rgba(255, 107, 0, 0.18);
-}
-
-body.light .marketing-ai-panel {
-  background: rgba(255, 255, 255, 0.75);
 }
 
 .marketing-ai-title {

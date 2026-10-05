@@ -119,13 +119,12 @@
 }
 
 .profile-section {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--panel-bg);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 2.5rem;
   padding: 2.5rem;
   margin-bottom: 2rem;
   box-shadow: 0 0 10px rgba(255, 107, 0, 0.08), inset 0 0 10px rgba(255, 107, 0, 0.03);
-  backdrop-filter: blur(3px);
   transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
@@ -147,7 +146,6 @@
   }
 
   &:hover {
-    background: rgba(0, 0, 0, 0.2);
     border-color: rgba(255, 107, 0, 0.3);
     box-shadow: 0 0 20px rgba(255, 107, 0, 0.25), inset 0 0 20px rgba(255, 107, 0, 0.08);
     transform: translateY(-2px);
@@ -184,8 +182,7 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 1.25rem;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.02);
-  backdrop-filter: blur(3px);
+  background: var(--panel-bg);
 
   .info-row {
     display: flex;
@@ -277,13 +274,12 @@
   gap: 1.5rem;
 
   .stat-card {
-    background: rgba(0, 0, 0, 0.02);
+    background: var(--panel-bg);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 1.5rem;
     padding: 1.5rem;
     text-align: center;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(3px);
     box-shadow: 0 0 10px rgba(255, 107, 0, 0.08), inset 0 0 10px rgba(255, 107, 0, 0.03);
     position: relative;
     overflow: hidden;
@@ -305,7 +301,6 @@
 
     &:hover {
       transform: translateY(-4px);
-      background: rgba(0, 0, 0, 0.15);
       box-shadow: 0 0 20px rgba(255, 107, 0, 0.25), inset 0 0 15px rgba(255, 107, 0, 0.08);
     }
 
@@ -343,8 +338,7 @@
     border-radius: 1.25rem;
     margin-bottom: 1rem;
     transition: all 0.2s ease;
-    background: rgba(0, 0, 0, 0.02);
-    backdrop-filter: blur(3px);
+    background: var(--panel-bg);
     box-shadow: 0 0 10px rgba(0, 255, 255, 0.06), inset 0 0 10px rgba(0, 255, 255, 0.03);
     position: relative;
     overflow: hidden;
@@ -365,7 +359,6 @@
     }
 
     &:hover {
-      background: rgba(0, 0, 0, 0.15);
       border-color: rgba(0, 176, 198, 0.3);
       transform: translateX(4px);
       box-shadow: 0 0 15px rgba(0, 255, 255, 0.18), inset 0 0 15px rgba(0, 255, 255, 0.06);
@@ -469,7 +462,7 @@
 }
 
 .pro-upgrade-section {
-  background: linear-gradient(135deg, rgba(255, 107, 0, 0.1) 0%, rgba(204, 85, 0, 0.1) 100%);
+  background: linear-gradient(135deg, rgba(255, 107, 0, 0.1) 0%, rgba(204, 85, 0, 0.1) 100%) var(--panel-bg);
   border: 2px solid var(--accent) !important;
   box-shadow: 0 0 30px rgba(255, 107, 0, 0.15) !important;
 
@@ -527,7 +520,7 @@
 }
 
 .pro-info-section {
-  background: linear-gradient(135deg, rgba(255, 107, 0, 0.15) 0%, rgba(204, 85, 0, 0.15) 100%);
+  background: linear-gradient(135deg, rgba(255, 107, 0, 0.15) 0%, rgba(204, 85, 0, 0.15) 100%) var(--panel-bg);
   border: 2px solid var(--accent) !important;
   box-shadow: 0 0 30px rgba(255, 107, 0, 0.2) !important;
 
@@ -652,40 +645,37 @@
 }
 
 /* ========================================
-   LIGHT THEME GLASSMORPHISM ADJUSTMENTS
+   LIGHT THEME ADJUSTMENTS
    ======================================== */
 
 body.light {
   .profile-section {
-    background: rgba(255, 255, 255, 0.02);
     box-shadow: 0 0 10px rgba(0, 95, 115, 0.08), inset 0 0 10px rgba(0, 95, 115, 0.03);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
       box-shadow: 0 0 20px rgba(0, 95, 115, 0.15), inset 0 0 20px rgba(0, 95, 115, 0.06);
     }
   }
 
-  .profile-info {
-    background: rgba(255, 255, 255, 0.02);
+  // The plan sections have always rendered untinted in light mode (a light
+  // .profile-section rule used to outrank their gradient). Keep that.
+  .pro-info-section,
+  .pro-upgrade-section {
+    background: var(--panel-bg);
   }
 
   .stat-card {
-    background: rgba(255, 255, 255, 0.02);
     box-shadow: 0 0 10px rgba(0, 95, 115, 0.08), inset 0 0 10px rgba(0, 95, 115, 0.03);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
       box-shadow: 0 0 20px rgba(0, 95, 115, 0.15), inset 0 0 15px rgba(0, 95, 115, 0.06);
     }
   }
 
   .scan-item {
-    background: rgba(255, 255, 255, 0.02);
     box-shadow: 0 0 10px rgba(0, 95, 115, 0.06), inset 0 0 10px rgba(0, 95, 115, 0.03);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.1);
       box-shadow: 0 0 15px rgba(0, 95, 115, 0.12), inset 0 0 15px rgba(0, 95, 115, 0.06);
     }
   }
@@ -852,17 +842,15 @@ body.light {
 
   .member-item {
     padding: 1rem 1.25rem;
-    background: rgba(0, 0, 0, 0.02);
+    background: var(--panel-bg);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 12px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    backdrop-filter: blur(3px);
     transition: all 0.2s ease;
 
     &:hover {
-      background: rgba(0, 0, 0, 0.15);
       border-color: rgba(255, 107, 0, 0.3);
       box-shadow: 0 0 10px rgba(255, 107, 0, 0.1);
       transform: translateX(2px);

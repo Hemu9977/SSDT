@@ -68,7 +68,7 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
 
   if (!webCheckReport || Object.keys(webCheckReport).length === 0) return null;
 
-  const bg = theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)';
+  const bg = 'var(--panel-bg)';
   const cardStyle = { background: bg, padding: '1rem', borderRadius: '8px', fontFamily: 'inherit', fontSize: '0.9rem', lineHeight: '1.6', overflow: 'hidden', wordBreak: 'break-word' };
   const h5Style = { margin: '0 0 0.5rem 0', color: 'var(--accent)', fontSize: '1rem', fontWeight: 700 };
   const completedCount = Object.keys(webCheckReport).filter(k => !webCheckReport[k]?.error).length;

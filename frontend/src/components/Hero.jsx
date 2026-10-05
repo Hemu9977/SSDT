@@ -1120,7 +1120,7 @@ const Hero = ({ historicalScan }) => {
 
         {/* AI Summary - Shows loading placeholder or content */}
         <div className="ai-report-section markdown-content" style={{
-          background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)',
+          background: 'var(--panel-bg)',
           padding: '1.5rem',
           marginBottom: '2rem',
           borderRadius: '8px',
@@ -1732,13 +1732,13 @@ const Hero = ({ historicalScan }) => {
         {/* 🌐 URLScan.io Detailed Results */}
         {report?.hasUrlscanResult && report?.urlscanData && (
           <details style={{ marginBottom: '2rem' }}>
-            <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', borderRadius: '8px', border: '1px solid #00d084' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 'bold', padding: '1rem', background: 'var(--panel-bg)', borderRadius: '8px', border: '1px solid #00d084' }}>
               {t('viewUrlscanAnalysis')}
             </summary>
             <div style={{ marginTop: '1rem', display: 'grid', gap: '1rem' }}>
 
               {/* Security Verdict */}
-              <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+              <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                 <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>🛡️ {t('urlscanSecurityVerdict')}</h5>
                 <p><b>{t('urlscanOverall')}:</b> <span style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084', fontWeight: 'bold' }}>
                   {report.urlscanData.verdicts?.overall?.malicious ? t('urlscanMalicious') : t('urlscanClean')}
@@ -1757,7 +1757,7 @@ const Hero = ({ historicalScan }) => {
 
               {/* Page Information */}
               {report.urlscanData.page && (
-                <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+                <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                   <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📄 {t('urlscanPageInformation')}</h5>
                   <p><b>{t('urlscanDomain')}:</b> {report.urlscanData.page.domain || 'N/A'}</p>
                   <p><b>{t('urlscanIpAddress')}:</b> {report.urlscanData.page.ip || 'N/A'}</p>
@@ -1774,7 +1774,7 @@ const Hero = ({ historicalScan }) => {
 
               {/* Network Statistics */}
               {report.urlscanData.stats && (
-                <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '1rem', borderRadius: '8px' }}>
+                <div style={{ background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px' }}>
                   <h5 style={{ margin: '0 0 0.5rem 0', color: 'var(--accent)' }}>📊 {t('urlscanNetworkStatistics')}</h5>
                   <p><b>{t('urlscanHttpRequests')}:</b> {report.urlscanData.stats.requests || 0}</p>
                   <p><b>{t('urlscanUniqueIps')}:</b> {report.urlscanData.stats.uniqIPs || 0}</p>
@@ -1784,7 +1784,7 @@ const Hero = ({ historicalScan }) => {
               )}
 
               {/* Scan summary note */}
-              <div style={{ background: theme === 'light' ? 'rgba(255, 255, 255, 0.75)' : 'rgba(0, 0, 0, 0.65)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.82rem', color: '#888', borderLeft: '3px solid var(--accent)' }}>
+              <div style={{ background: 'var(--panel-bg)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.82rem', color: '#888', borderLeft: '3px solid var(--accent)' }}>
                 ✅ {t('urlscanAllDataShown')}
               </div>
             </div>

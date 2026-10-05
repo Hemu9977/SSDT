@@ -16,7 +16,11 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 
 ### Frontend (React 19, CRA, port 3000 dev)
 - **Styling**: SCSS + inline styles with theme support (light/dark via `ThemeContext`).
-- **Theme pattern**: `theme === 'light' ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.65)'` for card backgrounds.
+- **Card/panel backgrounds**: always `var(--panel-bg)` (`index.css`; opaque, theme-aware — no
+  `theme === 'light'` branch needed). For a tinted surface layer the tint over it:
+  `linear-gradient(<tint>, <tint>) var(--panel-bg)`. Never give a text container a translucent
+  `rgba`/`transparent` background or rely on `backdrop-filter`: the particle canvas is
+  `position: fixed; z-index: -1` behind every page, so its dots show through the text.
 - **Color palette**: `--accent` (cyan), `#00d084` (green), `#e81123` (red), `#ffb900` (orange).
 - **No chart libraries** - pure CSS visualizations.
 

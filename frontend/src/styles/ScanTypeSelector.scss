@@ -46,7 +46,7 @@
   }
 
   .scan-type-card {
-    background: rgba(0, 0, 0, 0.65);
+    background: var(--panel-bg);
     border: 2px solid var(--accent);
     border-radius: 12px;
     padding: 2.5rem;
@@ -180,7 +180,7 @@
     justify-content: center;
     gap: 0.75rem;
     padding: 1.5rem;
-    background: rgba(255, 107, 0, 0.05);
+    background: linear-gradient(rgba(255, 107, 0, 0.05), rgba(255, 107, 0, 0.05)) var(--panel-bg);
     border: 1px solid var(--accent);
     border-radius: 8px;
     color: var(--accent-light);
@@ -200,15 +200,6 @@ body.dark {
   .scan-type-title .highlight {
     color: #FFA366;
     text-shadow: 0 0 20px rgba(255, 107, 0, 0.6), 0 0 40px rgba(255, 107, 0, 0.3);
-  }
-}
-
-/* Light mode styling */
-body.light {
-  .scan-type-selector-container {
-    .scan-type-card {
-      background: rgba(255, 255, 255, 0.75);
-    }
   }
 }
 

@@ -19,9 +19,14 @@
   --section-padding: 2rem;
   --max-width: 1200px;
 
-  /* Panel Background – opaque enough to block particle canvas (z-index:-1) */
-  --panel-bg: rgba(240, 240, 240, 0.97);
-  --panel-bg-tinted: rgba(240, 240, 240, 0.95); /* for orange-tinted warning boxes */
+  /* Surface for every card, panel and section that holds text. It MUST stay
+     fully opaque: the particle canvas is position:fixed at z-index:-1, so any
+     alpha here shows the dots through the text, and backdrop-filter blur is
+     too weak to hide them. The value is what the old translucent card pattern
+     (white 0.75 over --background) composited to, so cards look unchanged.
+     For a tinted surface, layer the tint over it:
+       background: linear-gradient(<tint>, <tint>) var(--panel-bg); */
+  --panel-bg: #fbfbfb;
 
   /* Card Styling Variables */
   --card-border: 2px solid var(--accent);
@@ -41,8 +46,7 @@ body.dark {
   --background-lighter: #1d1d1d;
   --foreground: #f8f8f8;
   --foreground-darker: #ffffff;
-  --panel-bg: rgba(10, 10, 10, 0.94);
-  --panel-bg-tinted: rgba(10, 10, 10, 0.92);
+  --panel-bg: #040404; /* black 0.65 over --background, made opaque */
   --outline: #2d2d2d;
   --outline-darker: #222222;
   --accent: #FF6B00;

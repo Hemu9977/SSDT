@@ -52,7 +52,7 @@
     gap: 0.75rem;
     padding: 1rem 1.5rem;
     /* Orange tint layered over opaque base to block canvas particles */
-    background: linear-gradient(rgba(255, 107, 0, 0.12), rgba(255, 107, 0, 0.12)) var(--panel-bg-tinted);
+    background: linear-gradient(rgba(255, 107, 0, 0.12), rgba(255, 107, 0, 0.12)) var(--panel-bg);
     border: 1px solid var(--accent);
     border-radius: 8px;
     color: var(--accent-light);
@@ -190,7 +190,7 @@
 
   // ========== Pre-scan Limitations Note ==========
   .auth-scan-note {
-    background: linear-gradient(rgba(255, 185, 0, 0.1), rgba(255, 185, 0, 0.1)) var(--panel-bg-tinted);
+    background: linear-gradient(rgba(255, 185, 0, 0.1), rgba(255, 185, 0, 0.1)) var(--panel-bg);
     border: 1px solid rgba(255, 185, 0, 0.45);
     border-left: 4px solid #ffb900;
     border-radius: 8px;

@@ -61,7 +61,7 @@
 
   &:hover {
     color: var(--accent);
-    background: rgba(255, 107, 0, 0.06);
+    background: linear-gradient(rgba(255, 107, 0, 0.06), rgba(255, 107, 0, 0.06)) var(--panel-bg);
   }
 
   &:focus-visible {
@@ -72,7 +72,7 @@
   &.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
-    background: rgba(255, 107, 0, 0.08);
+    background: linear-gradient(rgba(255, 107, 0, 0.08), rgba(255, 107, 0, 0.08)) var(--panel-bg);
   }
 }
 
@@ -105,13 +105,13 @@
   vertical-align: middle;
 
   &.superadmin {
-    background: rgba(232, 17, 35, 0.15);
+    background: linear-gradient(rgba(232, 17, 35, 0.15), rgba(232, 17, 35, 0.15)) var(--panel-bg);
     color: #e81123;
     border: 1px solid rgba(232, 17, 35, 0.3);
   }
 
   &.admin-badge {
-    background: rgba(255, 107, 0, 0.15);
+    background: linear-gradient(rgba(255, 107, 0, 0.15), rgba(255, 107, 0, 0.15)) var(--panel-bg);
     color: #FF6B00;
     border: 1px solid rgba(255, 107, 0, 0.3);
   }
@@ -642,11 +642,10 @@ body.light .admin-table td {
 }
 
 .admin-health-card {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--panel-bg);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 1.25rem;
   padding: 1.25rem;
-  backdrop-filter: blur(3px);
   transition: all 0.25s ease;
 
   &--ok {
@@ -858,7 +857,6 @@ body.light {
   }
 
   .admin-health-card {
-    background: rgba(255, 255, 255, 0.05);
     border-color: rgba(0, 0, 0, 0.08);
 
     .admin-health-detail {

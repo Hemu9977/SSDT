@@ -2,13 +2,12 @@
 // File: frontend/src/styles/ZapReportEnhanced.scss
 
 .zap-report-enhanced {
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--panel-bg);
   border: 2px solid var(--accent);
   border-radius: 12px;
   padding: 2rem;
   margin: 2rem 0;
   box-shadow: var(--card-shadow);
-  backdrop-filter: blur(10px);
 
   .report-header {
     display: flex;
@@ -545,8 +544,6 @@
 
 // Dark mode adjustments
 body.dark .zap-report-enhanced {
-  background: rgba(0, 0, 0, 0.65);
-
   .alert-card {
     .alert-header:hover {
       background: rgba(255, 107, 0, 0.03);
@@ -556,8 +553,6 @@ body.dark .zap-report-enhanced {
 
 // Light mode adjustments
 body.light .zap-report-enhanced {
-  background: rgba(255, 255, 255, 0.75);
-
   .alert-card {
     .alert-header:hover {
       background: rgba(255, 107, 0, 0.03);
