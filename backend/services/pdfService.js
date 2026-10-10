@@ -61,18 +61,39 @@ function buildEvidenceText(header, body, lang = 'en') {
   let hdr = String(header || '');
   let bdy = String(body || '');
   let trimmed = false;
+  const binary = isBinaryBody(bdy);
 
   if (hdr.length > EVIDENCE_HEADER_MAX_CHARS) { hdr = hdr.slice(0, EVIDENCE_HEADER_MAX_CHARS); trimmed = true; }
-  if (bdy.length > EVIDENCE_BODY_MAX_CHARS)   { bdy = bdy.slice(0, EVIDENCE_BODY_MAX_CHARS);   trimmed = true; }
+  if (binary) bdy = '';
+  else if (bdy.length > EVIDENCE_BODY_MAX_CHARS) { bdy = bdy.slice(0, EVIDENCE_BODY_MAX_CHARS); trimmed = true; }
 
   let out = hdr;
-  if (bdy) out += (hdr && !hdr.endsWith('\n') ? '\n' : '') + bdy;
+  const append = s => { out += (out && !out.endsWith('\n') ? '\n' : '') + s; };
+  if (bdy) append(bdy);
+  if (binary) {
+    append(lang === 'ja'
+      ? '…(バイナリデータのため本文は表示されません — 全文はJSONエクスポートを参照してください)'
+      : '…(binary body not shown — full body available in the JSON export)');
+  }
   if (trimmed) {
-    out += (lang === 'ja'
-      ? '\n…(本文は省略されました — 全文はJSONエクスポートを参照してください)'
-      : '\n…(body truncated — full body available in the JSON export)');
+    append(lang === 'ja'
+      ? '…(本文は省略されました — 全文はJSONエクスポートを参照してください)'
+      : '…(body truncated — full body available in the JSON export)');
   }
   return out;
+}
+
+/**
+ * True when a body is mostly undecodable bytes — an image, font or compressed
+ * response decoded as UTF-8. It carries no readable evidence and would otherwise
+ * render as a wall of U+FFFD / control characters.
+ */
+function isBinaryBody(body) {
+  const sample = String(body || '').slice(0, 2048);
+  if (!sample) return false;
+  if (sample.includes('\u0000')) return true;
+  const junk = sample.match(/[\uFFFD\u0001-\u0008\u000B\u000C\u000E-\u001F]/g);
+  return !!junk && junk.length / sample.length > 0.1;
 }
 
 const FONTS = {
@@ -1144,6 +1165,183 @@ function writeFlowText(ctx, text, { width, align = 'left', lineGap = 3, fontSize
   }
 }
 
+// ─── Request/Response evidence text ─────────────────────────────────────────────
+// Evidence is verbatim HTTP traffic, not prose, so it bypasses sanitizeTextForPdf
+// (HTML-entity decoding, and for JA backslash-escape decoding + NFKC, all rewrite
+// what the server actually sent) and renderTextWithBold (which eats `**` in
+// scripts and globs). Both languages get identical treatment.
+
+const EVIDENCE_TAB_WIDTH = 4;
+// Invisible format characters (soft hyphen, zero-width, bidi controls, BOM) are
+// shown as escapes: in evidence their presence can be the finding.
+const EVIDENCE_INVISIBLE_RE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+
+// Scripts Noto Sans JP has no glyphs for but real pages carry — e.g. the multilingual
+// notice on IANA's example domains. The regular weight also serves bold evidence text.
+const EVIDENCE_FALLBACK_FONTS = [
+  { name: 'NotoSansArabic',     file: 'NotoSansArabic-Regular.ttf',     rtl: true },
+  { name: 'NotoSansHebrew',     file: 'NotoSansHebrew-Regular.ttf',     rtl: true },
+  { name: 'NotoSansThai',       file: 'NotoSansThai-Regular.ttf' },
+  { name: 'NotoSansDevanagari', file: 'NotoSansDevanagari-Regular.ttf' }
+].map(f => ({ ...f, path: path.join(__dirname, '../fonts', f.file) }));
+const RTL_FONTS = new Set(EVIDENCE_FALLBACK_FONTS.filter(f => f.rtl).map(f => f.name));
+
+function registerPdfFonts(doc) {
+  doc.registerFont('NotoSans',      FONTS.regular);
+  doc.registerFont('NotoSans-Bold', FONTS.bold);
+  EVIDENCE_FALLBACK_FONTS.forEach(f => doc.registerFont(f.name, f.path));
+}
+
+// Parsed font files, for glyph coverage and metrics. Regular and Bold Noto Sans JP
+// cover the same code points with the same ascent, so the regular file serves both.
+const fontkitFonts = new Map();
+function fontkitFor(pdfFontName) {
+  const file = EVIDENCE_FALLBACK_FONTS.find(f => f.name === pdfFontName)?.path || FONTS.regular;
+  if (!fontkitFonts.has(file)) fontkitFonts.set(file, require('@pdf-lib/fontkit').create(fs.readFileSync(file)));
+  return fontkitFonts.get(file);
+}
+
+/** The PDF font that can draw `cp`: `primary`, else a fallback, else null. */
+function evidenceFontFor(cp, primary = 'NotoSans') {
+  if (fontkitFor(primary).hasGlyphForCodePoint(cp)) return primary;
+  return EVIDENCE_FALLBACK_FONTS.find(f => fontkitFor(f.name).hasGlyphForCodePoint(cp))?.name || null;
+}
+
+function escapeCodePoint(cp) {
+  const hex = cp.toString(16).toUpperCase();
+  return cp > 0xFFFF ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`;
+}
+
+/**
+ * Make raw HTTP text drawable without changing what it says: CRLF/CR become line
+ * breaks, tabs expand to spaces, and a character no bundled font can draw (which
+ * PDFKit renders as a square) or a control/invisible character is written as a
+ * \uXXXX escape. Nothing is decoded or normalized; only trailing whitespace and
+ * runs of more than two blank lines are dropped, as for prose.
+ * Pure — exported for tests.
+ */
+function sanitizeEvidenceForPdf(text) {
+  return String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(line => {
+      let out = '';
+      for (const ch of line) {
+        const cp = ch.codePointAt(0);
+        if (ch === '\t') out += ' '.repeat(EVIDENCE_TAB_WIDTH - (out.length % EVIDENCE_TAB_WIDTH));
+        else if (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F) || EVIDENCE_INVISIBLE_RE.test(ch) || !evidenceFontFor(cp)) out += escapeCodePoint(cp);
+        else out += ch;
+      }
+      return out.trimEnd();
+    })
+    .join('\n')
+    .replace(/\n{4,}/g, '\n\n\n') // same blank-line cap as sanitizeTextForPdf
+    .trimEnd();
+}
+
+/**
+ * Split one line into runs of a single font. A space between two characters of
+ * the same fallback font stays in that run, so an Arabic phrase is one run.
+ */
+function splitFontRuns(line, primary) {
+  const chars = Array.from(line, ch => ({ ch, font: ch === ' ' ? null : evidenceFontFor(ch.codePointAt(0), primary) || primary }));
+  const prev = [];
+  chars.forEach((c, i) => { prev[i] = c.font || (i ? prev[i - 1] : null); });
+  let next = null;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    if (chars[i].font) { next = chars[i].font; continue; }
+    chars[i].font = i && prev[i - 1] && prev[i - 1] === next ? next : primary;
+  }
+  const runs = [];
+  for (const { ch, font } of chars) {
+    const last = runs[runs.length - 1];
+    if (last && last.font === font) last.text += ch;
+    else runs.push({ text: ch, font });
+  }
+  return runs;
+}
+
+/**
+ * Wrap font runs into rows no wider than `width`: break at spaces, and split a
+ * token longer than a whole row (cookies, tokens) at the last character that fits.
+ */
+function layoutEvidenceRows(doc, runs, width, fontSize) {
+  const measure = (s, font) => doc.font(font).fontSize(fontSize).widthOfString(s);
+  const rows = [[]];
+  let used = 0;
+  const push = (text, font) => { rows[rows.length - 1].push({ text, font }); used += measure(text, font); };
+  const newRow = () => { rows.push([]); used = 0; };
+
+  for (const { text, font } of runs) {
+    for (const word of text.match(/\S+\s*|\s+/g) || []) {
+      let rest = word;
+      while (rest) {
+        if (used + measure(rest, font) <= width) { push(rest, font); break; }
+        const trimmed = rest.trimEnd();
+        if (!trimmed) { if (used > 0) newRow(); break; }                // spaces at a wrap point
+        if (used + measure(trimmed, font) <= width) { push(trimmed, font); used = width; break; }
+        if (used > 0 && measure(trimmed, font) <= width) { newRow(); continue; }
+        const chars = Array.from(rest);
+        let lo = 0, hi = chars.length;
+        while (lo + 1 < hi) { const mid = (lo + hi) >> 1; used + measure(chars.slice(0, mid).join(''), font) <= width ? lo = mid : hi = mid; }
+        if (lo === 0 && used > 0) { newRow(); continue; }
+        const head = chars.slice(0, Math.max(1, lo)).join('');
+        push(head, font); newRow();
+        rest = rest.slice(head.length);
+      }
+    }
+  }
+  while (rows.length > 1 && !rows[rows.length - 1].length) rows.pop();
+  return rows;
+}
+
+/**
+ * Write already-sanitized evidence inside the content frame, row by row, moving to
+ * a new framed page whenever the next row would cross the bottom margin. Runs in
+ * different fonts share one baseline. fontkit shapes an RTL word on its own, but
+ * PDFKit misplaces spaces in a multi-word RTL run, so those words are placed here.
+ */
+function writeEvidenceText(ctx, text, { font = 'NotoSans', fontSize = 7, lineGap = 1, color = COLORS.text } = {}) {
+  const doc = ctx.doc;
+  const ascent = f => { const fk = fontkitFor(f); return fk.ascent / fk.unitsPerEm * fontSize; };
+  const lineHeight = f => doc.font(f).fontSize(fontSize).currentLineHeight(true);
+  doc.fillColor(color);
+
+  // Every row keeps the primary font's height and baseline, so rows stay evenly
+  // spaced; a fallback's ink sits inside that. Fallback fonts declare much taller
+  // line boxes (Arabic reserves 2.1em for stacked marks), so only the page-break
+  // test accounts for how far below the baseline they can reach.
+  const rowH = lineHeight(font) + lineGap;
+  const fitH = f => ascent(font) - ascent(f) + lineHeight(f);
+
+  for (const line of String(text || '').split('\n')) {
+    for (const row of layoutEvidenceRows(doc, splitFontRuns(line, font), ctx.contentWidth, fontSize)) {
+      const fonts = [font, ...row.map(item => item.font)];
+      if (doc.y + Math.max(rowH, ...fonts.map(fitH)) > ctx.bottomY) { ctx.addFramedPage(); doc.fillColor(color); }
+      const top = doc.y;
+      const baseline = top + ascent(font);
+      let x = ctx.contentX;
+      const merged = [];
+      row.forEach(item => {
+        const last = merged[merged.length - 1];
+        if (last && last.font === item.font) last.text += item.text; else merged.push({ ...item });
+      });
+      for (const item of merged) {
+        doc.font(item.font).fontSize(fontSize);
+        const y = baseline - ascent(item.font);
+        const tokens = RTL_FONTS.has(item.font) ? item.text.match(/\S+|\s+/g).reverse() : [item.text];
+        for (const tok of tokens) {
+          if (tok.trim()) doc.text(tok, x, y, { lineBreak: false });
+          x += doc.widthOfString(tok);
+        }
+      }
+      doc.x = ctx.contentX;
+      doc.y = top + rowH;
+    }
+  }
+  doc.font(font).fontSize(fontSize);
+}
+
 // ─── Cover page ─────────────────────────────────────────────────────────────────
 
 function renderCoverPage(doc, scanData, lang, ts) {
@@ -1306,7 +1504,7 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
     ensureSpace(ctx, 80);
      const vName = sanitizeTextForPdf(v.name || v.alert || '', lang);
      doc.font('NotoSans-Bold').fontSize(11).fillColor(COLORS.text)
-       .text(`${idx + 1}. ${vName}`);
+       .text(`${idx + 1}. ${vName}`, { width: ctx.contentWidth });
     doc.font('NotoSans').fontSize(9).fillColor(COLORS.textLight)
        .text(`${lang === 'ja' ? 'リスク' : 'Risk'}: `, { continued: true })
        .fillColor(getRiskColor(v.risk)).font('NotoSans-Bold')
@@ -1349,35 +1547,39 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
       ? v.occurrences.filter(o => o && (o.request || o.response))
       : [];
     if (occWithRaw.length > 0) {
-      ensureSpace(ctx, 40);
-      doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.primary)
-         .text(lang === 'ja' ? 'リクエスト / レスポンスの証跡:' : 'Request / Response Evidence:');
-      doc.moveDown(0.1);
-
-      occWithRaw.slice(0, 3).forEach((occ, oIdx) => {
-        ensureSpace(ctx, 30);
+      const width = ctx.contentWidth;
+      const lineH = (font, size, gap = 0) => { doc.font(font).fontSize(size); return doc.currentLineHeight(true) + gap; };
+      // Keep each heading/label on the same page as the first lines it introduces.
+      const labelH    = lineH('NotoSans-Bold', 8);
+      const evidenceH = 2 * lineH('NotoSans', 7, 1);
+      const shown = occWithRaw.slice(0, 3).map((occ, oIdx) => {
         const metaBits = [
           occ.method ? String(occ.method) : null,
           occ.url ? String(occ.url) : null,
           occ.param ? `${lang === 'ja' ? 'パラメータ' : 'param'}: ${occ.param}` : null
         ].filter(Boolean).join('  ');
-        doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.text)
-           .text(`#${oIdx + 1}  ${sanitizeTextForPdf(metaBits, lang)}`);
+        const meta = sanitizeEvidenceForPdf(`#${oIdx + 1}  ${metaBits}`);
+        doc.font('NotoSans-Bold').fontSize(8);
+        return { occ, meta, metaH: doc.heightOfString(meta, { width }) };
+      });
 
-        if (occ.request) {
-          ensureSpace(ctx, 16);
-          doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight)
-             .text(lang === 'ja' ? 'リクエスト:' : 'Request:');
-          writeFlowText(ctx, buildEvidenceText(occ.request.header, occ.request.body, lang),
-            { lineGap: 1, fontSize: 7, color: COLORS.text });
-        }
-        if (occ.response) {
-          ensureSpace(ctx, 16);
-          doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight)
-             .text(lang === 'ja' ? 'レスポンス:' : 'Response:');
-          writeFlowText(ctx, buildEvidenceText(occ.response.header, occ.response.body, lang),
-            { lineGap: 1, fontSize: 7, color: COLORS.text });
-        }
+      ensureSpace(ctx, lineH('NotoSans-Bold', 9) + shown[0].metaH + labelH + evidenceH);
+      doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.primary)
+         .text(lang === 'ja' ? 'リクエスト / レスポンスの証跡:' : 'Request / Response Evidence:', { width });
+      doc.moveDown(0.1);
+
+      shown.forEach(({ occ, meta, metaH }) => {
+        ensureSpace(ctx, metaH + labelH + evidenceH);
+        writeEvidenceText(ctx, meta, { font: 'NotoSans-Bold', fontSize: 8, lineGap: 0, color: COLORS.text });
+
+        [[occ.request, lang === 'ja' ? 'リクエスト:' : 'Request:'],
+         [occ.response, lang === 'ja' ? 'レスポンス:' : 'Response:']].forEach(([part, label]) => {
+          if (!part) return;
+          ensureSpace(ctx, labelH + evidenceH);
+          doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight).text(label, { width });
+          writeEvidenceText(ctx, sanitizeEvidenceForPdf(buildEvidenceText(part.header, part.body, lang)),
+            { fontSize: 7, lineGap: 1, color: COLORS.text });
+        });
         doc.moveDown(0.15);
       });
 
@@ -1386,15 +1588,15 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
         doc.font('NotoSans').fontSize(7).fillColor(COLORS.textLight)
            .text(lang === 'ja'
              ? `他 ${occWithRaw.length - 3} 件のリクエスト/レスポンスはJSONエクスポートに含まれます`
-             : `${occWithRaw.length - 3} more request/response pair(s) available in the JSON export`);
+             : `${occWithRaw.length - 3} more request/response pair(s) available in the JSON export`, { width });
       }
       doc.moveDown(0.2);
     }
 
     if (v.reference) {
       ensureSpace(ctx, 16);
-      doc.font('NotoSans').fontSize(8).fillColor(COLORS.textLight)
-          .text(`${lang === 'ja' ? '参考情報' : 'References'}: ${sanitizeTextForPdf(v.reference, lang)}`);
+      writeFlowText(ctx, `${lang === 'ja' ? '参考情報' : 'References'}: ${v.reference}`,
+        { lineGap: 0, fontSize: 8, color: COLORS.textLight });
     }
     doc.moveDown(0.4);
     ensureSpace(ctx, 12);
@@ -1550,8 +1752,7 @@ function makePdfDoc(meta) {
     margins: { top: 0, bottom: 0, left: 0, right: 0 },
     info: { ...meta, CreationDate: new Date() }
   });
-  doc.registerFont('NotoSans',      FONTS.regular);
-  doc.registerFont('NotoSans-Bold', FONTS.bold);
+  registerPdfFonts(doc);
   return doc;
 }
 
@@ -1849,4 +2050,4 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection, buildEvidenceText };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts };

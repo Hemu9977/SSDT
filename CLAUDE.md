@@ -180,6 +180,11 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
 - `backend/tests/redisConfig.test.js` — Redis TLS option building (private CA, escaped
   newlines, servername, never `rejectUnauthorized:false`) and that the startup health
   check gives up fast instead of holding `server.listen`.
+- `backend/tests/pdfEvidence.test.js` — renders the PDF Request/Response evidence (EN and
+  JA) and checks every drawn line: no glyph missing from the font it is drawn with
+  (squares), Arabic/Hebrew/Thai/Devanagari drawn via the Noto fallbacks in `backend/fonts/`
+  (`EVIDENCE_FALLBACK_FONTS`), nothing outside the content frame, no label stranded at a
+  page foot, and evidence shown verbatim (no entity/escape decoding or NFKC) in both languages.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.
