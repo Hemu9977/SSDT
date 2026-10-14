@@ -4,37 +4,67 @@
  * Stripe integration — Checkout sessions + Webhook handler.
  *
  * Routes:
- *   POST /api/stripe/create-checkout-session  (authenticated)
- *   POST /api/stripe/webhook                  (raw body — Stripe signature)
- *   GET  /api/stripe/subscription             (authenticated)
- *   POST /api/stripe/cancel-subscription      (authenticated)
+ *   POST /api/stripe/create-checkout-session  (authenticated, org owner/admin)
+ *   POST /api/stripe/sync-checkout-session    (authenticated)
+ *   POST /api/stripe/cancel-subscription      (authenticated, org owner/admin)
+ *   POST /api/stripe/webhook                  (Stripe-signed; exported as
+ *        `webhookHandler` and mounted by server.js with express.raw(), outside
+ *        the API rate limiter)
  *
- * DB is the source of truth. Stripe is only used to initiate payment and
- * confirm completion. User plan fields are ONLY updated inside the webhook.
+ * Checkout grants the plan or credits (handleCheckoutComplete). Everything that
+ * happens to a subscription afterwards — renewal, past_due, pending cancellation,
+ * the downgrade to Free — is written only by services/subscriptionLifecycle.js.
  */
 
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('../config/stripe');
 const auth = require('../middleware/auth');
-const requireOrg = require('../middleware/requireOrg');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const StripeEvent = require('../models/StripeEvent');
+const {
+  periodEndOf,
+  subscriptionIdOf,
+  isCancellationScheduled,
+  hasLiveSubscription,
+  applySubscription,
+  reconcileById,
+  refreshForPurchase
+} = require('../services/subscriptionLifecycle');
+const { isSubscriptionEntitled } = require('../utils/entitlement');
 
-// ─── Stripe price ID mapping ──────────────────────────────────────────────────
-// Create these products/prices in your Stripe dashboard and set the env vars.
-// Fallback values are placeholders — replace with real price IDs.
-const PRICE_IDS = {
-  light_monthly: process.env.STRIPE_PRICE_LIGHT_MONTHLY || 'price_light_monthly',
-  basic_monthly: process.env.STRIPE_PRICE_BASIC_MONTHLY || 'price_basic_monthly',
-  pro_monthly: process.env.STRIPE_PRICE_PRO_MONTHLY || 'price_pro_monthly',
-  light_annual: process.env.STRIPE_PRICE_LIGHT_ANNUAL || 'price_light_annual',
-  basic_annual: process.env.STRIPE_PRICE_BASIC_ANNUAL || 'price_basic_annual',
-  pro_annual: process.env.STRIPE_PRICE_PRO_ANNUAL || 'price_pro_annual',
-  trial1_onetime: process.env.STRIPE_PRICE_TRIAL1 || 'price_trial1',
-  trial2_onetime: process.env.STRIPE_PRICE_TRIAL2 || 'price_trial2',
+// ─── Stripe price IDs ─────────────────────────────────────────────────────────
+// One env var per purchasable plan key (`${planType}_${billingCycle}`). The keys
+// are the complete list of plans this backend sells; a plan whose env var is
+// unset is refused at checkout (PLAN_NOT_CONFIGURED) instead of being sent to
+// Stripe with a made-up price id.
+const PRICE_ENV = {
+  light_monthly: 'STRIPE_PRICE_LIGHT_MONTHLY',
+  basic_monthly: 'STRIPE_PRICE_BASIC_MONTHLY',
+  pro_monthly: 'STRIPE_PRICE_PRO_MONTHLY',
+  light_annual: 'STRIPE_PRICE_LIGHT_ANNUAL',
+  basic_annual: 'STRIPE_PRICE_BASIC_ANNUAL',
+  pro_annual: 'STRIPE_PRICE_PRO_ANNUAL',
+  trial1_onetime: 'STRIPE_PRICE_TRIAL1',
+  trial2_onetime: 'STRIPE_PRICE_TRIAL2',
 };
+const PRICE_IDS = Object.fromEntries(
+  Object.entries(PRICE_ENV).map(([key, env]) => [key, process.env[env] || null])
+);
+const isPlanKey = (key) => Object.prototype.hasOwnProperty.call(PRICE_ENV, key);
+
+const missingPriceEnv = Object.entries(PRICE_ENV).filter(([key]) => !PRICE_IDS[key]).map(([, env]) => env);
+if (missingPriceEnv.length) {
+  console.warn(`⚠️  [stripe] Price ids not set — these plans cannot be purchased: ${missingPriceEnv.join(', ')}`);
+}
+
+// Stripe sends the customer back here after checkout. Without it the success page
+// would point at localhost, so production must set it.
+const FRONTEND_BASE = process.env.FRONTEND_URL || 'http://localhost:3000';
+if (!process.env.FRONTEND_URL && process.env.NODE_ENV === 'production') {
+  console.error('❌ [stripe] FRONTEND_URL is not set — checkout would return customers to localhost.');
+}
 
 // One-time plan scan allocations and subscription provisioning (seats + monthly
 // scan allowance) both come from the plan catalog — see config/planCatalog.js.
@@ -73,7 +103,7 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     const { planType, billingCycle } = req.body;
 
     if (!planType || !billingCycle) {
-      return res.status(400).json({ error: 'planType and billingCycle are required' });
+      return res.status(400).json({ code: 'INVALID_PLAN', error: 'planType and billingCycle are required' });
     }
 
     // Refuse rather than undercharge. The plan cards quote a tax-inclusive total, so
@@ -88,19 +118,24 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     }
 
     const key = `${planType}_${billingCycle}`;
+    if (!isPlanKey(key)) {
+      return res.status(400).json({ code: 'INVALID_PLAN', error: `Unknown plan: ${key}` });
+    }
     const priceId = PRICE_IDS[key];
-
-    if (!priceId || priceId.startsWith('price_') && priceId.length < 20) {
-      return res.status(400).json({ error: `Unknown plan: ${key}` });
+    if (!priceId) {
+      console.error(`❌ [stripe] Checkout blocked: ${PRICE_ENV[key]} is not configured.`);
+      return res.status(503).json({ code: 'PLAN_NOT_CONFIGURED', error: 'This plan is temporarily unavailable.' });
     }
 
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ code: 'USER_NOT_FOUND', error: 'User not found' });
 
     const isOnetime = billingCycle === 'onetime';
 
     if (user.organizationId) {
-      const orgForGuard = await Organization.findById(user.organizationId);
+      // Re-read from Stripe when the stored state may be stale, so a subscription
+      // that has really ended doesn't block buying a new one.
+      const orgForGuard = await refreshForPurchase(await Organization.findById(user.organizationId));
 
       // Only an org owner/admin may purchase a plan or a top-up.
       if (orgForGuard && !['owner', 'admin'].includes(user.role)) {
@@ -110,11 +145,11 @@ router.post('/create-checkout-session', auth, async (req, res) => {
         });
       }
 
-      // Block a SECOND recurring subscription while one is already active —
-      // that path would overwrite planType/billingCycle/stripeSubscriptionId
-      // on the org (see handleCheckoutComplete). One-time top-ups are always
-      // allowed through regardless of subscription state.
-      if (!isOnetime && orgForGuard && orgForGuard.subscriptionStatus === 'active' && orgForGuard.billingCycle && orgForGuard.billingCycle !== 'onetime') {
+      // Block a SECOND subscription while the org still has one that has not
+      // ended — active, scheduled to cancel, or past_due/unpaid (Stripe is still
+      // charging it). Replacing it would leave the old one billing the customer
+      // with nothing attached to it. One-time top-ups are always allowed.
+      if (!isOnetime && hasLiveSubscription(orgForGuard)) {
         return res.status(409).json({
           code: 'ALREADY_SUBSCRIBED',
           error: 'You already have an active subscription. Cancel it before purchasing a different plan.'
@@ -124,7 +159,6 @@ router.post('/create-checkout-session', auth, async (req, res) => {
 
     // Reuse existing Stripe customer or create a new one
     let customerId = user.stripeCustomerId;
-    const frontendBase = process.env.FRONTEND_URL || 'http://localhost:3000';
 
     // Verify existing customer
     if (customerId) {
@@ -162,8 +196,8 @@ router.post('/create-checkout-session', auth, async (req, res) => {
       // one-time 'payment' modes.
       line_items: [{ price: priceId, quantity: 1, tax_rates: [TAX_RATE_ID] }],
       mode: isOnetime ? 'payment' : 'subscription',
-      success_url: `${frontendBase}/profile?payment=success&plan=${key}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendBase}/profile?payment=cancelled`,
+      success_url: `${FRONTEND_BASE}/profile?payment=success&plan=${key}&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_BASE}/profile?payment=cancelled`,
       metadata: {
         userId: user._id.toString(),
         planType: planType,
@@ -183,51 +217,7 @@ router.post('/create-checkout-session', auth, async (req, res) => {
     res.json({ url: session.url, sessionId: session.id });
   } catch (err) {
     console.error('❌ Stripe checkout error:', err);
-    res.status(500).json({ error: 'Failed to create checkout session' });
-  }
-});
-
-// ─── GET /api/stripe/subscription ─────────────────────────────────────────────
-router.get('/subscription', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select(
-      'planType billingCycle subscriptionStatus stripeSubscriptionId oneTimeRemainingScans proExpiresAt organizationId'
-    );
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    let org = null;
-    if (user.organizationId) {
-      org = await Organization.findById(user.organizationId);
-    }
-
-    const now = new Date();
-    const liveCreditBatches = org
-      ? (org.scanCredits || []).filter(c => c.scansRemaining > 0 && c.expiresAt && c.expiresAt > now)
-      : [];
-    const extraScansRemaining = liveCreditBatches.reduce((sum, c) => sum + c.scansRemaining, 0);
-    const extraScansExpiresAt = liveCreditBatches.length
-      ? liveCreditBatches.reduce((earliest, c) => (c.expiresAt < earliest ? c.expiresAt : earliest), liveCreditBatches[0].expiresAt)
-      : null;
-
-    // Org is the source of truth; User fields are a legacy fallback for
-    // pre-migration accounts that still have plan data on the User document.
-    res.json({
-      success: true,
-      plan: {
-        planType: org ? org.planType : user.planType,
-        billingCycle: org ? org.billingCycle : user.billingCycle,
-        subscriptionStatus: org ? org.subscriptionStatus : user.subscriptionStatus,
-        stripeSubscriptionId: org ? org.stripeSubscriptionId : user.stripeSubscriptionId,
-        oneTimeRemainingScans: org ? (org.oneTimeRemainingScans || 0) : (user.oneTimeRemainingScans || 0),
-        extraScansRemaining,
-        extraScansExpiresAt,
-        monthlyScansUsed: org ? org.scansUsed : 0,
-        proExpiresAt: org ? org.expiresAt : user.proExpiresAt
-      }
-    });
-  } catch (err) {
-    console.error('❌ Subscription fetch error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch subscription' });
+    res.status(500).json({ code: 'CHECKOUT_FAILED', error: 'Failed to create checkout session' });
   }
 });
 
@@ -238,15 +228,15 @@ router.post('/sync-checkout-session', auth, async (req, res) => {
   try {
     const { sessionId } = req.body;
 
-    if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId is required' });
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ code: 'SESSION_ID_REQUIRED', error: 'sessionId is required' });
     }
 
     const session = await stripe.checkout.sessions.retrieve(sessionId);
     const metadataUserId = session.metadata?.userId;
 
     if (!metadataUserId || metadataUserId !== req.user.id) {
-      return res.status(403).json({ error: 'Checkout session does not belong to this user' });
+      return res.status(403).json({ code: 'CHECKOUT_SESSION_FORBIDDEN', error: 'Checkout session does not belong to this user' });
     }
 
     const isComplete = session.status === 'complete';
@@ -254,64 +244,82 @@ router.post('/sync-checkout-session', auth, async (req, res) => {
 
     if (!isComplete || !isPaid) {
       return res.status(409).json({
+        code: 'CHECKOUT_NOT_PAID',
         error: 'Checkout session is not fully paid yet',
         status: session.status,
         paymentStatus: session.payment_status
       });
     }
 
-    await handleCheckoutComplete(session);
+    await applyCheckoutOnce(session);
 
     res.json({ success: true });
   } catch (err) {
+    if (err && err.code === 'CHECKOUT_IN_PROGRESS') {
+      // The webhook is applying this session right now. Non-2xx on purpose: the
+      // profile page then polls until the plan shows up.
+      return res.status(409).json({ code: 'CHECKOUT_PROCESSING', error: 'Checkout is still being applied' });
+    }
     console.error('❌ Checkout session sync error:', err.message);
-    res.status(500).json({ error: 'Failed to sync checkout session' });
+    res.status(500).json({ code: 'CHECKOUT_SYNC_FAILED', error: 'Failed to sync checkout session' });
   }
 });
 
 // ─── POST /api/stripe/cancel-subscription ────────────────────────────────────
+// Turns auto-pay off. The subscription is cancelled at the END of the current
+// billing period: the plan keeps working until then, and when Stripe ends it the
+// org is downgraded to Free (services/subscriptionLifecycle.js). No refund, no
+// proration, and no undo.
 router.post('/cancel-subscription', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ code: 'USER_NOT_FOUND', error: 'User not found' });
 
-    // Plan state (including the subscription ID) lives on the Organization for the
-    // org-based flow. Fall back to the User field only for legacy pre-migration
-    // accounts that still carry stripeSubscriptionId on the user document.
-    let org = null;
-    if (user.organizationId) {
-      org = await Organization.findById(user.organizationId);
-    }
-    const subscriptionId = (org && org.stripeSubscriptionId) || user.stripeSubscriptionId;
-
-    if (!subscriptionId) {
-      return res.status(400).json({ error: 'No active subscription found' });
+    const org = user.organizationId ? await Organization.findById(user.organizationId) : null;
+    if (!org || !org.stripeSubscriptionId) {
+      return res.status(400).json({ code: 'NO_SUBSCRIPTION', error: 'No active subscription found' });
     }
 
-    // Cancel at period end (user keeps access until expiry)
-    const subscription = await stripe.subscriptions.update(subscriptionId, {
+    // Same rule as purchasing: billing decisions belong to the org owner/admin.
+    if (!['owner', 'admin'].includes(user.role)) {
+      return res.status(403).json({
+        code: 'INSUFFICIENT_ROLE',
+        error: 'Only the organization owner or an admin can cancel the subscription.'
+      });
+    }
+
+    // Already scheduled — repeat clicks and retries are a no-op, not an error.
+    if (org.cancelAtPeriodEnd) {
+      return res.json({ success: true, alreadyScheduled: true, cancelAt: org.expiresAt });
+    }
+
+    const subscription = await stripe.subscriptions.update(org.stripeSubscriptionId, {
       cancel_at_period_end: true
     });
 
-    console.log(`🚫 Subscription cancel_at_period_end set for user ${user.id}`);
+    // Record the pending cancellation now rather than waiting for the
+    // customer.subscription.updated webhook, so the page shows it immediately.
+    await applySubscription(org, subscription);
 
-    res.json({
-      success: true,
-      message: 'Subscription will be cancelled at the end of the billing period',
-      cancelAt: new Date(subscription.cancel_at * 1000)
-    });
+    const cancelAt = (isCancellationScheduled(subscription) && subscription.cancel_at)
+      ? new Date(subscription.cancel_at * 1000)
+      : periodEndOf(subscription);
+
+    console.log(`🚫 Subscription ${subscription.id} set to cancel at period end (${cancelAt && cancelAt.toISOString()}) for org ${org._id} by user ${user.id}`);
+
+    res.json({ success: true, cancelAt });
   } catch (err) {
     console.error('❌ Cancel subscription error:', err);
-    res.status(500).json({ error: 'Failed to cancel subscription' });
+    res.status(500).json({ code: 'CANCEL_FAILED', error: 'Failed to cancel subscription' });
   }
 });
 
 // ─── POST /api/stripe/webhook ─────────────────────────────────────────────────
-// IMPORTANT: This route is mounted with express.raw() — not express.json()
-// That mounting happens in server.js BEFORE the global express.json() middleware.
-router.post('/webhook', async (req, res) => {
-  console.log("🔥 Webhook hit");
-  console.log("Is Buffer:", req.body instanceof Buffer);
+// Mounted by server.js (not by this router) with express.raw(), BEFORE the global
+// express.json() — the signature is computed over the raw bytes — and outside
+// the per-IP API rate limiter, which Stripe's delivery bursts (e.g. renewals at
+// the start of a month) would trip. Authenticity comes from the signature.
+async function webhookHandler(req, res) {
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -327,7 +335,7 @@ router.post('/webhook', async (req, res) => {
       // that would let anyone push fake billing events.
       if (process.env.NODE_ENV === 'production') {
         console.error('❌ STRIPE_WEBHOOK_SECRET not set in production — refusing unsigned webhook');
-        return res.status(500).json({ error: 'Webhook misconfigured' });
+        return res.status(500).json({ code: 'WEBHOOK_MISCONFIGURED', error: 'Webhook misconfigured' });
       }
 
       console.warn('⚠️ STRIPE_WEBHOOK_SECRET not set — dev mode');
@@ -340,8 +348,7 @@ router.post('/webhook', async (req, res) => {
     }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
-    // FIX 1: Return 400 so Stripe knows signature verification failed and can retry
-    return res.status(400).json({ error: 'Webhook signature verification failed' });
+    return res.status(400).json({ code: 'WEBHOOK_SIGNATURE_INVALID', error: 'Webhook signature verification failed' });
   }
 
   // ── Idempotency: claim the event BEFORE processing ──────────────────────────
@@ -357,7 +364,7 @@ router.post('/webhook', async (req, res) => {
       return res.json({ received: true });
     }
     console.error('❌ [webhook] Failed to record event for idempotency:', err.message);
-    return res.status(500).json({ error: 'Webhook idempotency store failed' });
+    return res.status(500).json({ code: 'WEBHOOK_FAILED', error: 'Webhook idempotency store failed' });
   }
 
   try {
@@ -367,7 +374,7 @@ router.post('/webhook', async (req, res) => {
       // ── Checkout completed (both subscription and one-time) ──────────────────
       case 'checkout.session.completed': {
         const session = event.data.object;
-        await handleCheckoutComplete(session);
+        await applyCheckoutOnce(session);
         break;
       }
 
@@ -379,31 +386,28 @@ router.post('/webhook', async (req, res) => {
         break;
       }
 
-      // ── Subscription invoice paid (renewal) ──────────────────────────────────
-      case 'invoice.paid': {
-        const invoice = event.data.object;
-        await handleInvoicePaid(invoice);
-        break;
-      }
-
-      // ── Subscription cancelled / expired ─────────────────────────────────────
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object;
-        await handleSubscriptionDeleted(subscription);
-        break;
-      }
-
-      // ── Subscription updated (e.g. plan change, trial end) ───────────────────
-      case 'customer.subscription.updated': {
-        const subscription = event.data.object;
-        await handleSubscriptionUpdated(subscription);
-        break;
-      }
-
-      // ── Payment failed ────────────────────────────────────────────────────────
+      // ── Subscription lifecycle ───────────────────────────────────────────────
+      // updated: renewal, past_due, or a cancellation being scheduled
+      //          (cancel_at_period_end) — the plan keeps working until it ends.
+      // deleted: the subscription has ended → the org is downgraded to Free.
+      // invoice.paid / payment_failed: renewal succeeded / failed.
+      //
+      // All four are handled the same way: take only the subscription id from the
+      // payload and apply Stripe's CURRENT state to the org that owns that id
+      // (services/subscriptionLifecycle.js). Payload contents are never trusted, so
+      // duplicate, late or out-of-order deliveries cannot write stale state.
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted':
+      case 'invoice.paid':
       case 'invoice.payment_failed': {
-        const invoice = event.data.object;
-        await handlePaymentFailed(invoice);
+        const subscriptionId = subscriptionIdOf(event.data.object);
+        if (!subscriptionId) {
+          // One-time (top-up / trial) invoices belong to no subscription.
+          console.log(`ℹ️  [webhook] ${event.type} ${event.data.object.id} has no subscription — ignored.`);
+          break;
+        }
+        const result = await reconcileById(subscriptionId);
+        console.log(`🔄 [webhook] ${event.type} for ${subscriptionId}: ${result.applied ? (result.downgraded ? 'org downgraded to Free' : 'state applied') : `no change (${result.reason || 'not applied'})`}`);
         break;
       }
 
@@ -420,19 +424,79 @@ router.post('/webhook', async (req, res) => {
       console.error('⚠️  [webhook] Failed to release idempotency claim:', cleanupErr.message);
     }
     // Return 500 so Stripe retries delivery — DB update did NOT succeed
-    return res.status(500).json({ error: 'Webhook processing failed' });
+    return res.status(500).json({ code: 'WEBHOOK_FAILED', error: 'Webhook processing failed' });
   }
 
   res.json({ received: true });
-});
+}
 
-// ─── WEBHOOK HANDLERS ─────────────────────────────────────────────────────────
+// ─── CHECKOUT FULFILMENT ──────────────────────────────────────────────────────
+
+// A completed Checkout session reaches handleCheckoutComplete from two places that
+// usually fire within the same second: the webhook, and the profile page's sync
+// call right after Stripe's redirect. Run concurrently, both would see a user
+// without an organization and create two, or grant one credit batch twice. A claim
+// on `checkout:<session id>` in the StripeEvent store lets exactly one apply it.
+const CHECKOUT_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000; // StripeEvent.expiresAt default
+const CHECKOUT_CLAIM_STALE_MS = 5 * 60 * 1000;         // holder presumed crashed
+
+function checkoutInProgress(sessionId) {
+  return Object.assign(
+    new Error(`Checkout session ${sessionId} is being applied by another request`),
+    { code: 'CHECKOUT_IN_PROGRESS' }
+  );
+}
+
+// Whether the session's purchase is already on the buyer's organization.
+async function isCheckoutApplied(session) {
+  const userId = session.metadata && session.metadata.userId;
+  const user = userId ? await User.findById(userId).select('organizationId') : null;
+  const org = user && user.organizationId
+    ? await Organization.findById(user.organizationId).select('stripeCheckoutSessionId scanCredits')
+    : null;
+  if (!org) return false;
+  return org.stripeCheckoutSessionId === session.id
+    || (org.scanCredits || []).some(c => c.stripeCheckoutSessionId === session.id);
+}
+
+async function applyCheckoutOnce(session) {
+  const claimId = `checkout:${session.id}`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await StripeEvent.create({ eventId: claimId });
+    } catch (err) {
+      if (!err || err.code !== 11000) throw err;
+      if (await isCheckoutApplied(session)) return;
+
+      // Claimed but not applied: another request is applying it right now — or
+      // its process died midway, in which case the claim is taken over once it is
+      // old enough. A claim's age is derived from its TTL date.
+      const held = await StripeEvent.findOne({ eventId: claimId });
+      if (held) {
+        const claimedAt = held.expiresAt ? held.expiresAt.getTime() - CHECKOUT_CLAIM_TTL_MS : 0;
+        if (Date.now() - claimedAt < CHECKOUT_CLAIM_STALE_MS) throw checkoutInProgress(session.id);
+        await StripeEvent.deleteOne({ eventId: claimId, expiresAt: held.expiresAt });
+      }
+      continue;
+    }
+
+    try {
+      await handleCheckoutComplete(session);
+      return; // the claim stays: this session is done
+    } catch (err) {
+      await StripeEvent.deleteOne({ eventId: claimId }).catch(() => {});
+      throw err;
+    }
+  }
+  throw checkoutInProgress(session.id);
+}
 
 async function handleCheckoutComplete(session) {
   console.log(`🚀 [webhook] Starting checkout.session.completed for session ${session.id}`);
   const { userId, planType, billingCycle } = session.metadata || {};
 
-  // FIX 3: Validate all required metadata fields up front before touching the DB
+  // Validate all required metadata up front, before touching the DB.
   if (!userId) {
     throw new Error('checkout.session.completed missing userId in metadata');
   }
@@ -440,7 +504,7 @@ async function handleCheckoutComplete(session) {
     throw new Error(`checkout.session.completed missing planType or billingCycle in metadata for session ${session.id}`);
   }
   const key = `${planType}_${billingCycle}`;
-  if (!PRICE_IDS[key]) {
+  if (!isPlanKey(key)) {
     throw new Error(`checkout.session.completed unknown plan key: ${key} for session ${session.id}`);
   }
 
@@ -462,39 +526,46 @@ async function handleCheckoutComplete(session) {
     });
     user.organizationId = org._id;
     user.role = 'owner';
-    // FIX 5: Do NOT save user here — deferred to final Promise.all below
-    // so org is fully configured before anything is written to DB
+    // Not saved here — deferred to the Promise.all below so the org is fully
+    // configured before anything is written.
   }
 
-  // A top-up is a one-time purchase by a user whose org already has a real,
-  // active recurring subscription. It must add a scan credit batch WITHOUT
-  // touching planType/billingCycle/subscriptionStatus/stripeSubscriptionId/
-  // seatsAllowed/scanLimit/expiresAt/scansUsed — otherwise the subscription
-  // would be silently clobbered by the generic plan-assignment logic below.
-  // A legacy pure one-time org (billingCycle already 'onetime', no real
-  // subscription) buying a second trial does NOT take this branch — it falls
-  // through to the existing onetime logic further down, which now stacks
-  // instead of overwriting.
-  const isTopUp =
-    billingCycle === 'onetime' &&
-    org.subscriptionStatus === 'active' &&
-    org.billingCycle && org.billingCycle !== 'onetime' &&
-    !!org.planType;
+  // A top-up is a one-time purchase by an org that still has a subscription that
+  // has not ended — active, scheduled to cancel, or past_due. It must add a scan
+  // credit batch WITHOUT touching planType/billingCycle/subscriptionStatus/
+  // stripeSubscriptionId/seatsAllowed/scanLimit/expiresAt/scansUsed: the generic
+  // path below would detach the org from a subscription Stripe keeps billing.
+  // An org without one (never subscribed, downgraded to Free, or a legacy one-time
+  // org) takes the one-time path below, which stacks credits instead of overwriting.
+  const isTopUp = billingCycle === 'onetime' && hasLiveSubscription(org);
 
   if (isTopUp) {
     return await handleTopUpPurchase(org, user, session, key);
   }
 
-  if (org.stripeCheckoutSessionId === session.id && org.subscriptionStatus === 'active') {
+  if (org.stripeCheckoutSessionId === session.id) {
     user.stripePending = false;
     await user.save();
     console.log(`♻️  [webhook] Checkout session ${session.id} already applied for Org ${org._id}.`);
     return;
   }
 
+  // A subscription's status and real period end come from Stripe, read BEFORE any
+  // write: if Stripe is unreachable this throws, nothing is saved, and the webhook
+  // is retried — instead of saving the plan with a guessed end date and then
+  // skipping the retry as "already applied".
+  let subscription = null;
+  if (billingCycle !== 'onetime') {
+    const subscriptionId = subscriptionIdOf(session);
+    if (!subscriptionId) {
+      throw new Error(`checkout.session.completed for ${key} has no subscription (session ${session.id})`);
+    }
+    subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  }
+
   org.planType = planType || null;
   org.billingCycle = billingCycle || null;
-  org.subscriptionStatus = 'active';
+  org.subscriptionStatus = subscription ? subscription.status : 'active';
   org.stripeCheckoutSessionId = session.id;
 
   if (billingCycle === 'onetime') {
@@ -520,9 +591,12 @@ async function handleCheckoutComplete(session) {
     const config = PLAN_PROVISIONING[planType] || { seatsAllowed: 1, scanLimit: 0 };
     org.seatsAllowed = config.seatsAllowed;
     org.scanLimit = config.scanLimit;
-    org.stripeSubscriptionId = session.subscription || null;
+    org.stripeSubscriptionId = subscription.id;
+    org.cancelAtPeriodEnd = isCancellationScheduled(subscription);
+    // The +months estimate is only a fallback for a subscription object without
+    // period data; utils/entitlement.js enforces this date.
     const months = billingCycle === 'annual' ? 12 : 1;
-    org.expiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
+    org.expiresAt = periodEndOf(subscription) || new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
   }
 
   org.scansUsed = 0;
@@ -537,10 +611,14 @@ async function handleCheckoutComplete(session) {
   }
   user.stripePending = false;
 
-  // FIX 4 + 5: Run both saves in parallel — eliminates sequential write latency
-  // and closes the partial-state window from the early user.save() that was here before
   await Promise.all([org.save(), user.save()]);
   console.log(`✅ [webhook] User ${userId} plan set to ${key} on Org ${org._id}. DB update complete.`);
+
+  // A subscription that had already ended by the time this ran (e.g. cancelled
+  // immediately in the Stripe dashboard) must not leave a paid plan behind.
+  if (subscription && !isSubscriptionEntitled(org)) {
+    await applySubscription(org, subscription);
+  }
 }
 
 // Appends a scan credit batch for a subscriber buying a one-off top-up.
@@ -596,94 +674,5 @@ async function handleCheckoutExpired(session) {
   console.log(`⌛ [webhook] Checkout session ${session.id} expired — cleared stripePending for user ${userId}`);
 }
 
-async function handleInvoicePaid(invoice) {
-  if (!invoice.subscription) return; // one-time payment, skip
-
-  const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-  const customerId = invoice.customer;
-
-  const user = await User.findOne({ stripeCustomerId: customerId });
-  if (!user) { console.warn(`⚠️  [webhook] No user for customer ${customerId}`); return; }
-
-  let org;
-  if (user.organizationId) {
-    org = await Organization.findById(user.organizationId);
-  }
-
-  if (org) {
-    org.subscriptionStatus = 'active';
-    org.stripeSubscriptionId = invoice.subscription;
-    org.scansUsed = 0;
-    org.targetScanCounts = {};
-    org.lastScanReset = new Date();
-    const months = org.billingCycle === 'annual' ? 12 : 1;
-    org.expiresAt = new Date(Date.now() + months * 30 * 24 * 60 * 60 * 1000);
-    await org.save();
-  }
-
-  console.log(`♻️  [webhook] Invoice paid — user ${user.id} plan renewed (org=${org?._id || 'none'})`);
-}
-
-async function handleSubscriptionDeleted(subscription) {
-  const customerId = subscription.customer;
-  const user = await User.findOne({ stripeCustomerId: customerId });
-  if (!user) return;
-
-  let org;
-  if (user.organizationId) {
-    org = await Organization.findById(user.organizationId);
-  }
-  if (org) {
-    org.subscriptionStatus = 'canceled';
-    org.planType = null;
-    org.billingCycle = null;
-    org.stripeSubscriptionId = null;
-    org.expiresAt = null;
-    await org.save();
-  }
-
-  // Keep accountType in sync — isPro() falls back to it when no org is loaded.
-  user.accountType = 'free';
-  await user.save();
-  console.log(`🚫 [webhook] Subscription deleted — user ${user.id} downgraded to free`);
-}
-
-async function handleSubscriptionUpdated(subscription) {
-  const customerId = subscription.customer;
-  const user = await User.findOne({ stripeCustomerId: customerId });
-  if (!user) return;
-
-  let org;
-  if (user.organizationId) {
-    org = await Organization.findById(user.organizationId);
-  }
-  if (org) {
-    org.subscriptionStatus = subscription.status;
-    if (subscription.status === 'active' || subscription.status === 'trialing') {
-      const periodEnd = subscription.current_period_end;
-      if (periodEnd) org.expiresAt = new Date(periodEnd * 1000);
-    }
-    await org.save();
-  }
-
-  console.log(`🔄 [webhook] Subscription updated — user ${user.id} status=${subscription.status}`);
-}
-
-async function handlePaymentFailed(invoice) {
-  const customerId = invoice.customer;
-  const user = await User.findOne({ stripeCustomerId: customerId });
-  if (!user) return;
-
-  let org;
-  if (user.organizationId) {
-    org = await Organization.findById(user.organizationId);
-  }
-  if (org) {
-    org.subscriptionStatus = 'past_due';
-    await org.save();
-  }
-
-  console.warn(`⚠️  [webhook] Payment failed — user ${user.id} marked past_due`);
-}
-
 module.exports = router;
+module.exports.webhookHandler = webhookHandler;

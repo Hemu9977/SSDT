@@ -13,11 +13,18 @@ const OrganizationSchema = new mongoose.Schema({
     enum: ['monthly', 'annual', 'onetime', null],
     default: null
   },
+  // Mirrors Stripe's subscription statuses — written verbatim by
+  // services/subscriptionLifecycle.js, so every value Stripe can return must be
+  // listed. Paid access is NOT this field alone: see utils/entitlement.js.
   subscriptionStatus: {
     type: String,
-    enum: ['active', 'canceled', 'past_due', 'trialing', null],
+    enum: ['active', 'canceled', 'past_due', 'trialing', 'unpaid', 'incomplete', 'incomplete_expired', 'paused', null],
     default: null
   },
+  // True once the subscription is set to end at expiresAt instead of renewing
+  // (customer cancelled; auto-pay is off). Stripe keeps the status 'active' until
+  // the period actually ends, so this is the only signal of a pending cancellation.
+  cancelAtPeriodEnd: { type: Boolean, default: false },
   // Platform-level admin lock — blocks login for all members of this org.
   // Independent from subscriptionStatus (which reflects billing state, not access).
   isDisabled: { type: Boolean, default: false },
@@ -57,6 +64,8 @@ const OrganizationSchema = new mongoose.Schema({
   // Real lifetime scan counter (ScanResult has a 7-day TTL so it cannot serve
   // this purpose). Incremented atomically inside consumeScan().
   totalScansAllTime: { type: Number, default: 0 },
+  // Every subscription webhook locates its org by this id (never via the paying
+  // user), so it is unique (index below).
   stripeSubscriptionId: { type: String, default: null },
   stripeCheckoutSessionId: { type: String, default: null },
   expiresAt: { type: Date, default: null },
@@ -64,5 +73,12 @@ const OrganizationSchema = new mongoose.Schema({
   // Indexed for the admin analytics growth-trend aggregation.
   createdAt: { type: Date, default: Date.now, index: true }
 });
+
+// A partial index rather than `sparse`: sparse still indexes explicit nulls, and
+// every org without a subscription stores stripeSubscriptionId: null.
+OrganizationSchema.index(
+  { stripeSubscriptionId: 1 },
+  { unique: true, partialFilterExpression: { stripeSubscriptionId: { $type: 'string' } } }
+);
 
 module.exports = mongoose.model('Organization', OrganizationSchema);

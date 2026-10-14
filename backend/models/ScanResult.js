@@ -121,6 +121,14 @@ const scanResultSchema = new mongoose.Schema({
     type: String,
     enum: ['subscription', 'credit', 'legacy', null],
     default: null
+  },
+  // Which pool admitted this scan at start (planService.claimScanSlot). Lets a scan
+  // admitted by a subscription that ends before the scan completes be settled
+  // against that subscription instead of spending a purchased credit.
+  admittedBy: {
+    type: String,
+    enum: ['subscription', 'credit', null],
+    default: null
   }
 });
 

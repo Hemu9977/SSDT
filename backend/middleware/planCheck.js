@@ -26,6 +26,7 @@
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { checkScanQuota } = require('../services/planService');
+const { refreshIfExpired } = require('../services/subscriptionLifecycle');
 
 module.exports = async function planCheck(req, res, next) {
   try {
@@ -56,7 +57,9 @@ module.exports = async function planCheck(req, res, next) {
     }
 
     // Resolve plan limits from the org (target caps come from the plan matrix).
-    const org = await Organization.findById(user.organizationId);
+    // If its stored paid period has passed, re-read it from Stripe first (bounded
+    // wait, never throws); either way checkScanQuota enforces the period itself.
+    const org = await refreshIfExpired(await Organization.findById(user.organizationId));
     const limits = user.getAccountLimits(org);
 
     // Scan target — routes use either `url` (normal/zap/webcheck/pagespeed) or

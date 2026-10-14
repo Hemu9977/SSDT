@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const Organization = require('../models/Organization');
+const { isSubscriptionEntitled, entitlementFilter } = require('../utils/entitlement');
 
 /**
  * Normalize a scan target to its lowercase hostname so the same site under
@@ -34,8 +35,10 @@ function mapSize(map) {
   return Object.keys(map).length;
 }
 
-function hasActiveSubscription(org) {
-  return org.subscriptionStatus === 'active' || org.subscriptionStatus === 'trialing';
+// Status AND paid period — a cancelled subscription stops granting scans at the
+// exact end of its period even if Stripe's webhook never arrives.
+function hasActiveSubscription(org, now = new Date()) {
+  return isSubscriptionEntitled(org, now);
 }
 
 function subscriptionHasCapacity(org) {
@@ -139,7 +142,20 @@ async function claimScanSlot(orgId, analysisId) {
       _id: { $lt: scan._id }
     });
 
-    if (rank < capacity) return true;
+    if (rank < capacity) {
+      // Record which pool admitted the scan. Ranks below the remaining monthly
+      // allowance are the subscription's; the rest are funded by credits. The
+      // charge happens at completion, possibly after the subscription has ended
+      // and the org was downgraded — finalizeSuccessfulScan then needs this to
+      // avoid spending a purchased credit on a scan the subscription admitted.
+      const subscriptionRemaining = (hasActiveSubscription(org) && org.scanLimit > 0)
+        ? Math.max(0, org.scanLimit - (org.scansUsed || 0))
+        : 0;
+      const admittedBy = rank < subscriptionRemaining ? 'subscription' : 'credit';
+      await ScanResult.updateOne({ analysisId }, { $set: { admittedBy } })
+        .catch(err => console.warn(`⚠️  [planService] could not record admittedBy for ${analysisId}:`, err.message));
+      return true;
+    }
 
     console.warn(
       `[Billing] Scan ${analysisId} refused: ${rank} scan(s) already in flight ahead of it ` +
@@ -307,7 +323,7 @@ async function consumeScan(orgId, opts = {}) {
     }
 
     const sub = await Organization.findOneAndUpdate(
-      { _id: orgId, subscriptionStatus: { $in: ['active', 'trialing'] }, scansUsed: { $lt: org.scanLimit } },
+      { _id: orgId, ...entitlementFilter(now), scansUsed: { $lt: org.scanLimit } },
       { $inc: inc },
       { new: true }
     );
@@ -447,6 +463,20 @@ async function finalizeSuccessfulScan(scanId) {
     );
     if (!claimed) {
       console.log(`[Billing] Scan ${scanId} already claimed by another finalize call — not charging again.`);
+      return;
+    }
+
+    // The subscription admitted this scan, but its paid period ended (and the org
+    // may already be on Free) before the scan completed. The scan belongs to that
+    // closed period: settle it there. Falling through to consumeScan would spend a
+    // purchased credit on a scan the subscription had already accepted.
+    if (scan.admittedBy === 'subscription' && !hasActiveSubscription(org)) {
+      await Organization.updateOne({ _id: org._id }, { $inc: { totalScansAllTime: 1 } });
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { quotaSource: 'subscription' } }
+      ).catch(() => { /* bookkeeping only */ });
+      console.log(`[Billing] Scan ${scanId} admitted by a subscription that has since ended — settled against that period, no credit spent.`);
       return;
     }
 

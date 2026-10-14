@@ -28,6 +28,18 @@ const { startAsyncZapScan } = require('./zapService');
 const { startAsyncWebCheckScan } = require('./webCheckService');
 
 const { checkScanQuota, claimScanSlot } = require('./planService');
+const Organization = require('../models/Organization');
+
+/**
+ * Plan limits for a schedule's owner, resolved from their ORGANIZATION. Called
+ * without the org, getAccountLimits() falls back to legacy plan fields on the User
+ * document, which could hand a member of a downgraded org paid per-target limits.
+ */
+async function limitsForUser(user) {
+  if (!user || !user.getAccountLimits) return {};
+  const org = user.organizationId ? await Organization.findById(user.organizationId) : null;
+  return user.getAccountLimits(org);
+}
 
 let schedulerTask = null;
 let isProcessing = false;
@@ -145,7 +157,7 @@ async function executeSingleSchedule(schedule) {
 
   // Validate plan limits before execution. Advisory only — the authoritative check
   // is claimScanSlot inside the trigger functions, which can also refuse.
-  const limits = user.getAccountLimits ? user.getAccountLimits() : {};
+  const limits = await limitsForUser(user);
   const result = await checkScanQuota(user.organizationId, {
     target: schedule.targetUrl,
     scansPerTarget: limits.scansPerTarget,
@@ -609,7 +621,7 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
  * @returns {Promise<{valid:boolean, reason?:string, code?:string}>}
  */
 async function validatePlanLimits(user, targetUrl) {
-  const limits = user && user.getAccountLimits ? user.getAccountLimits() : {};
+  const limits = await limitsForUser(user);
   const allowed = await checkScanQuota(user.organizationId, {
     target: targetUrl,
     scansPerTarget: limits.scansPerTarget,

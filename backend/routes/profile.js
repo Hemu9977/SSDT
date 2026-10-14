@@ -7,6 +7,8 @@ const User = require('../models/User');
 const ScanResult = require('../models/ScanResult');
 const Organization = require('../models/Organization');
 const Invite = require('../models/Invite');
+const { refreshIfExpired } = require('../services/subscriptionLifecycle');
+const { isSubscriptionEntitled } = require('../utils/entitlement');
 
 const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : undefined;
 
@@ -51,7 +53,9 @@ router.get('/', auth, async (req, res) => {
     let pendingInvites = [];
 
     if (user.organizationId) {
-      org = await Organization.findById(user.organizationId);
+      // Re-read from Stripe if the stored paid period has passed, so the page
+      // shows Free (or a renewed date) as soon as it is true. Never throws.
+      org = await refreshIfExpired(await Organization.findById(user.organizationId));
       if (org) {
         members = await User.find({ organizationId: org._id }).select('name email role');
         pendingInvites = await Invite.find({ organizationId: org._id, status: 'pending' }).select('email role token createdAt expiresAt');
@@ -102,6 +106,11 @@ router.get('/', auth, async (req, res) => {
           planType: org.planType,
           billingCycle: org.billingCycle,
           subscriptionStatus: org.subscriptionStatus,
+          // Whether the subscription grants paid access right now (status AND paid
+          // period). The page shows a plan only when this is true.
+          entitled: isSubscriptionEntitled(org, now),
+          // Auto-pay is off; the plan ends at expiresAt and the org returns to Free.
+          cancelAtPeriodEnd: !!org.cancelAtPeriodEnd,
           seatsAllowed: org.seatsAllowed,
           seatsUsed: org.seatsUsed,
           scanLimit: org.scanLimit,

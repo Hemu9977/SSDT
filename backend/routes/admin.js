@@ -6,13 +6,14 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('../config/stripe');
 const auth = require('../middleware/auth');
 const { invalidatePrincipal, invalidateAllPrincipals } = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const ScanResult = require('../models/ScanResult');
+const { applySubscription } = require('../services/subscriptionLifecycle');
 
 const devMsg = (err) =>
   process.env.NODE_ENV !== 'production' ? err.message : undefined;
@@ -212,7 +213,7 @@ router.get('/organizations', async (req, res) => {
         .select('name planType billingCycle subscriptionStatus isDisabled ' +
                 'seatsAllowed seatsUsed scanLimit scansUsed targetsUsed ' +
                 'oneTimeRemainingScans expiresAt lastScanReset createdAt ' +
-                'stripeSubscriptionId')
+                'cancelAtPeriodEnd stripeSubscriptionId')
         .lean(),
     ]);
 
@@ -808,9 +809,10 @@ router.patch('/organizations/:id', async (req, res) => {
 // ── POST /api/admin/organizations/:id/cancel-subscription ────────────────────
 // Cancels the organization's Stripe subscription at the end of the current
 // billing period. Mirrors POST /api/stripe/cancel-subscription exactly, just
-// scoped by organization id instead of the caller's own account. DB plan
-// fields are intentionally NOT touched here — per the existing architecture,
-// the Stripe webhook is the only writer of plan/subscription state.
+// scoped by organization id instead of the caller's own account. The plan keeps
+// working until the period ends; only the pending cancellation is recorded here,
+// through services/subscriptionLifecycle.js (the only writer of subscription
+// state). The downgrade to Free happens when Stripe ends the subscription.
 router.post('/organizations/:id/cancel-subscription', async (req, res) => {
   try {
     const { id } = req.params;
@@ -823,10 +825,15 @@ router.post('/organizations/:id/cancel-subscription', async (req, res) => {
     if (!org.stripeSubscriptionId) {
       return res.status(400).json({ success: false, code: 'ADMIN_NO_SUBSCRIPTION', error: 'This organization has no active subscription' });
     }
+    // Already scheduled to end — nothing to do, and no second Stripe call.
+    if (org.cancelAtPeriodEnd) {
+      return res.json({ success: true, cancelAt: org.expiresAt });
+    }
 
     const subscription = await stripe.subscriptions.update(org.stripeSubscriptionId, {
       cancel_at_period_end: true,
     });
+    await applySubscription(org, subscription);
 
     console.log(`🚫 [admin] Subscription cancel_at_period_end set for org ${org._id} by ${req.adminUser.email}`);
 

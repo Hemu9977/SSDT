@@ -123,10 +123,14 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 // ─── STRIPE WEBHOOK — must come BEFORE express.json() ────────────────────────
-// Stripe requires the raw body (Buffer) to verify the webhook signature.
-// Mounting it here with express.raw() ensures json() middleware is NOT applied.
+// Stripe requires the raw body (Buffer) to verify the webhook signature, so it is
+// mounted here with express.raw() and json() is never applied to it. It is also
+// deliberately outside the per-IP apiLimiter that guards /api/stripe: Stripe
+// delivers from a small set of IPs, and a renewal burst must not be answered 429.
+// The signature check inside the handler is what authenticates it.
 if (process.env.STRIPE_SECRET_KEY) {
-  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
+  app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }),
+    require('./routes/stripeRoutes').webhookHandler);
   console.log('✅ Stripe webhook endpoint mounted at /api/stripe/webhook');
 }
 app.use(express.json({ extended: false, limit: '10mb' }));

@@ -4,6 +4,7 @@
  * - Failed/stopped scans that weren't cleaned up immediately
  * - Orphaned GridFS files
  * - Orphaned ZapAlert documents
+ * - Subscriptions whose paid period passed without a Stripe webhook
  */
 
 const cleanupService = require('../services/cleanupService');
@@ -42,6 +43,7 @@ let isCleanupRunning = false;
 let cleanupIntervalId = null;
 let fastRescueIntervalId = null;
 let capacityIntervalId = null;
+let subscriptionSweepIntervalId = null;
 let isCapacityCheckRunning = false;
 
 /**
@@ -318,6 +320,27 @@ async function runCapacityCheck() {
     }
 }
 
+/**
+ * Subscription safety net: re-read from Stripe every subscription whose stored
+ * paid period has passed, and downgrade the org to Free if Stripe says it ended.
+ * Covers a `customer.subscription.deleted` webhook that was lost or never sent.
+ * Access is already cut at the period end by utils/entitlement.js; this only
+ * repairs the stored state, and only on Stripe's word.
+ */
+let isSubscriptionSweepRunning = false;
+async function runSubscriptionSweep() {
+    if (isSubscriptionSweepRunning) return;
+    isSubscriptionSweepRunning = true;
+    try {
+        const { sweepSubscriptions } = require('../services/subscriptionLifecycle');
+        await sweepSubscriptions();
+    } catch (err) {
+        console.error('[SubscriptionSweep] Error:', err.message);
+    } finally {
+        isSubscriptionSweepRunning = false;
+    }
+}
+
 function startCleanupJob() {
     console.log(`[CleanupJob] Starting cleanup scheduler (interval: ${CLEANUP_INTERVAL / 1000 / 60} minutes)`);
 
@@ -335,6 +358,9 @@ function startCleanupJob() {
 
     // Idle ZAP capacity scale-in: poll every 2 min
     capacityIntervalId = setInterval(runCapacityCheck, CAPACITY_CHECK_INTERVAL);
+
+    // Expired-subscription reconciliation: every 5 min
+    subscriptionSweepIntervalId = setInterval(runSubscriptionSweep, FAST_RESCUE_INTERVAL);
 
     console.log('[CleanupJob] Cleanup job scheduled');
 }
@@ -358,11 +384,17 @@ function stopCleanupJob() {
         fastRescueIntervalId = null;
         console.log('[CleanupJob] Fast rescue job stopped');
     }
+    if (subscriptionSweepIntervalId) {
+        clearInterval(subscriptionSweepIntervalId);
+        subscriptionSweepIntervalId = null;
+        console.log('[CleanupJob] Subscription sweep stopped');
+    }
 }
 
 module.exports = {
     startCleanupJob,
     stopCleanupJob,
     runCleanup,
-    runCapacityCheck
+    runCapacityCheck,
+    runSubscriptionSweep
 };

@@ -186,8 +186,9 @@ UserSchema.methods.isPro = function (org = null) {
   // Use organization plan if available, otherwise fallback to user plan
   const source = org || this;
 
-  // Primary check: any paid plan that is currently active
-  if (source.planType && source.subscriptionStatus === 'active') return true;
+  // Primary check: any paid plan that is currently active — status AND paid
+  // period, so a cancelled plan stops counting at the end of its period.
+  if (source.planType && isSubscriptionEntitled(source)) return true;
   // One-time plans: active if remaining scans > 0
   if (source.billingCycle === 'onetime' && source.oneTimeRemainingScans > 0) return true;
   // Legacy check: accountType 'pro' and not expired (only if checking user directly)
@@ -221,6 +222,7 @@ UserSchema.methods.checkAndResetMonthlyScans = function () {
 // per-target cap (the cap is the global scansPerMonth), while ANNUAL plans cap
 // scans per target. That is a billing-cycle behaviour, not a property of the plan.
 const { PLAN_CATALOG, RECURRING_PLANS, ONETIME_PLANS } = require('../config/planCatalog');
+const { isSubscriptionEntitled } = require('../utils/entitlement');
 
 const PLAN_LIMITS = {};
 
@@ -264,10 +266,16 @@ UserSchema.methods.getAccountLimits = function (org = null) {
   // Use organization plan if available, otherwise fallback to user plan
   const source = org || this;
 
-  // Derive key
+  // Derive key. A subscription plan applies only while it is entitled (status AND
+  // paid period, utils/entitlement.js): a past_due, cancelled or expired plan whose
+  // planType is still stored must not keep handing out paid limits to any member.
+  // One-time keys are unchanged — their scans are credit batches with their own expiry.
   let key = 'free';
   if (source.planType && source.billingCycle) {
-    key = `${source.planType}_${source.billingCycle}`;
+    const isSubscriptionKey = source.billingCycle !== 'onetime';
+    if (!isSubscriptionKey || isSubscriptionEntitled(source)) {
+      key = `${source.planType}_${source.billingCycle}`;
+    }
   }
 
   let limits = PLAN_LIMITS[key] || PLAN_LIMITS['free'];
@@ -277,7 +285,7 @@ UserSchema.methods.getAccountLimits = function (org = null) {
   // subscription does a purchased credit's own severity level apply — taken
   // from the soonest-expiring live batch (the one that will fund the next
   // scan), not from PLAN_LIMITS['free'].
-  const hasActiveSub = source && (source.subscriptionStatus === 'active' || source.subscriptionStatus === 'trialing');
+  const hasActiveSub = !!source && isSubscriptionEntitled(source);
   if (!hasActiveSub && org && Array.isArray(org.scanCredits)) {
     const now = new Date();
     const liveBatches = org.scanCredits
