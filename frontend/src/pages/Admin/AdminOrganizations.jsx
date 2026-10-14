@@ -249,7 +249,8 @@ const AdminOrganizations = () => {
                 <tbody>
                   {orgs.map((org) => {
                     const isBusy = actionLoadingId === org._id;
-                    const canCancelSubscription = org.hasSubscription && org.subscriptionStatus === 'active';
+                    // Not offered once a cancellation is already scheduled.
+                    const canCancelSubscription = org.hasSubscription && org.subscriptionStatus === 'active' && !org.cancelAtPeriodEnd;
                     return (
                       <tr key={org._id}>
                         <td className="admin-td-name">

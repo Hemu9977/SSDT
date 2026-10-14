@@ -16,6 +16,7 @@ import { getApiErrorLabel } from '../utils/apiErrors';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
+import { hasScanAccess } from '../utils/planAccess';
 
 // 🔄 Loading Placeholder Component for progressive loading
 const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
@@ -825,10 +826,10 @@ const Hero = ({ historicalScan }) => {
     }
 
     // --- PROACTIVE PLAN GATING (org-based) ---
-    // Check if user has an active organization subscription
-    // Falls back to user.planType for backward compatibility
-    const hasActivePlan = (organization && organization.subscriptionStatus === 'active') ||
-                          (user && user.planType);
+    // A live plan or purchased scan credits (credits outlive a cancelled plan).
+    // user.planType is a legacy fallback for accounts with no organization only.
+    const hasActivePlan = hasScanAccess(organization) ||
+                          (!organization && user && user.planType);
 
     if (!hasActivePlan) {
       console.warn('⚠️ No active plan detected, redirecting to profile');

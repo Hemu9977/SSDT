@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
 import { API_BASE } from '../config/api';
+import { isPlanEntitled } from '../utils/planAccess';
 
 const UserContext = createContext();
 
@@ -86,7 +87,7 @@ export const UserProvider = ({ children }) => {
       // isPro: Strictly true ONLY for the 'pro' plan tier for theming purposes.
       // Light/Basic users will now correctly see the Orange theme.
       const currentPlanType = orgData ? orgData.planType : userData?.planType;
-      const isActive = orgData ? orgData.subscriptionStatus === 'active' : userData?.isPro;
+      const isActive = orgData ? isPlanEntitled(orgData) : userData?.isPro;
       const proStatus = isActive && currentPlanType === 'pro';
 
       console.log('🟣 UserContext: isPro (theme) =', proStatus, '| planType =', currentPlanType);

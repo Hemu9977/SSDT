@@ -9,6 +9,7 @@ import '../styles/Profile.scss';
 
 import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
+import { isPlanEntitled } from '../utils/planAccess';
 
 // Plan definitions live in config/planCatalog.js, shared with MarketingHome and
 // kept in step with the backend catalog by a test — see that file.
@@ -122,10 +123,7 @@ const Profile = () => {
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const isPlanActive = (data) => {
-    const org = data?.user?.organization;
-    return Boolean(org && org.subscriptionStatus === 'active' && org.planType);
-  };
+  const isPlanActive = (data) => isPlanEntitled(data?.user?.organization);
 
   const fetchProfile = async () => {
     const token = localStorage.getItem('token');
@@ -370,7 +368,7 @@ const Profile = () => {
         setPaymentMessage({ type: 'success', text: t('subscriptionCancelled') });
         fetchProfile();
       } else {
-        throw new Error(data.error || t('failedCancelSubscription'));
+        throw new Error(getApiErrorLabel(t, data, 'failedCancelSubscription'));
       }
     } catch (err) {
       setPaymentMessage({ type: 'error', text: err.message });
@@ -456,7 +454,12 @@ const Profile = () => {
 
   const { user, recentScans } = profile;
   const org = user.organization;
-  const hasPlan = org && org.subscriptionStatus === 'active' && org.planType;
+  // The backend's verdict (status AND paid period): a cancelled plan stops showing
+  // at the exact end of its period, after which the page is the same as for an
+  // account that never bought one.
+  const hasPlan = isPlanEntitled(org);
+  const cancellationScheduled = !!(hasPlan && org.cancelAtPeriodEnd);
+  const canManageBilling = !!org && ['owner', 'admin'].includes(org.role);
   const accountTypeClass = hasPlan ? 'paid' : user.accountType;
   // Plan display is derived from the organization's real plan, never from
   // user.accountType. accountType feeds nothing in the quota system (getAccountLimits
@@ -644,9 +647,12 @@ const Profile = () => {
                     </div>
                     <div style={{
                       fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px',
-                      color: org.subscriptionStatus === 'active' ? '#00d084' : org.subscriptionStatus === 'past_due' ? '#ffb900' : '#e81123'
+                      color: cancellationScheduled ? '#ffb900'
+                        : org.subscriptionStatus === 'active' ? '#00d084'
+                        : org.subscriptionStatus === 'past_due' ? '#ffb900' : '#e81123'
                     }}>
-                      {org.subscriptionStatus === 'active' ? t('planStatusActive')
+                      {cancellationScheduled ? t('planStatusCancelling')
+                        : org.subscriptionStatus === 'active' ? t('planStatusActive')
                         : org.subscriptionStatus === 'past_due' ? t('planStatusPastDue')
                         : org.subscriptionStatus}
                     </div>
@@ -685,15 +691,21 @@ const Profile = () => {
                   </p>
                 )}
 
-                {/* Expiry */}
-                {org.expiresAt && (
+                {/* Period end: when a cancelled plan stops, when a subscription renews,
+                    or when a legacy one-time plan's validity runs out. */}
+                {cancellationScheduled ? (
+                  <p className="save-message info" style={{ margin: '1rem 0' }}>
+                    {t('cancellationScheduledNote', { date: formatDate(org.expiresAt) })}
+                  </p>
+                ) : org.expiresAt && (
                   <p className="expiry-date" style={{ fontSize: '1rem', margin: '1rem 0' }}>
-                    {t('planExpiresLabel')}: <strong>{formatDate(org.expiresAt)}</strong>
+                    {org.billingCycle === 'onetime' ? t('planExpiresLabel') : t('nextRenewalLabel')}: <strong>{formatDate(org.expiresAt)}</strong>
                   </p>
                 )}
 
-                {/* Cancel button — only for recurring subscriptions */}
-                {org.billingCycle !== 'onetime' && (
+                {/* Cancel button — recurring subscriptions only, not already cancelled,
+                    and only for the people who may make billing decisions. */}
+                {org.billingCycle !== 'onetime' && !cancellationScheduled && canManageBilling && (
                   <>
                     <button onClick={() => setCancelDialogOpen(true)} className="btn-downgrade">
                       {t('cancelProSubscription')}

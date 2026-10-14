@@ -49,6 +49,9 @@ const CODE_KEYS = {
   INSUFFICIENT_ROLE: 'errInsufficientRole',
   ALREADY_SUBSCRIBED: 'errAlreadySubscribed',
   TAX_NOT_CONFIGURED: 'billingUnavailable',
+  PLAN_NOT_CONFIGURED: 'billingUnavailable',
+  NO_SUBSCRIPTION: 'errNoSubscription',
+  CANCEL_FAILED: 'failedCancelSubscription',
 
   // ── Authenticated scanning (routes/zapAuthRoutes.js) ───────────────────────
   SESSION_EXPIRED: 'sessionExpiredTestAgain',
