@@ -185,6 +185,11 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   (squares), Arabic/Hebrew/Thai/Devanagari drawn via the Noto fallbacks in `backend/fonts/`
   (`EVIDENCE_FALLBACK_FONTS`), nothing outside the content frame, no label stranded at a
   page foot, and evidence shown verbatim (no entity/escape decoding or NFKC) in both languages.
+- `backend/tests/subscriptionLifecycle.test.js` — cancel → paid until period end → Free.
+  Drives the real webhook and cancel handlers against an in-memory store and a stubbed
+  Stripe: the exact expiry boundary, duplicate/out-of-order/stale webhooks, failed Stripe
+  reads, renewals and payment failures, the sweep, both Stripe payload shapes, and a scan
+  that straddles the end of the period (never spends a purchased credit).
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.
@@ -333,6 +338,39 @@ accounts — see `hasLegacyOneTimeBalance` in `planService.js`.
   second billing site is how authenticated scans previously went unbilled. Standalone
   one-shot routes (`pageSpeedRoutes`, `webCheckRoutes`, `zapRoutes`) are the exception:
   they create no `ScanResult`, never enter the pipeline, and call `consumeScan()` inline.
+- **Subscription cancellation lifecycle** (`services/subscriptionLifecycle.js`):
+  - Cancelling (`POST /api/stripe/cancel-subscription`, org owner/admin only) sets Stripe
+    `cancel_at_period_end` — auto-pay stops, the plan keeps working, and
+    `Organization.cancelAtPeriodEnd` + `expiresAt` record when it ends. No undo, no refund.
+  - **Paid access is computed, not stored**: `utils/entitlement.js` `isSubscriptionEntitled`
+    = status `active|trialing` **and** `now < expiresAt` (cancelling: hard stop; renewing:
+    +24h grace for a late renewal webhook). `planService`, `getAccountLimits`, `isPro` and
+    the profile's `entitled` flag all use it, so a plan ends on time even if Stripe's
+    webhook never arrives. Never test `subscriptionStatus === 'active'` alone.
+  - **Stored state changes only on Stripe's word**: webhooks pass just the subscription id;
+    `reconcileById` re-reads the subscription from Stripe and applies it to the org whose
+    `stripeSubscriptionId` matches (conditional write; no customer→user fallback). Also
+    triggered on demand by `planCheck`/profile once `expiresAt` passes, and by a 5-minute
+    sweep in `jobs/cleanupJob.js`.
+  - **Downgrade** (`downgradeOrgToFree`, the only one) makes the org look never-purchased:
+    plan fields null, `scanLimit/scansUsed` 0, `seatsAllowed` 1, members' legacy User plan
+    fields cleared, schedules disabled, pending invites expired. **Purchased credits are kept.**
+  - Stripe API is pinned in `config/stripe.js` (`2026-05-27.dahlia`): billing period is on
+    `subscription.items.data[]`, an invoice's subscription on
+    `invoice.parent.subscription_details`. The helpers read old and new shapes.
+  - Before deploying: `node scripts/backfillSubscriptionIds.js` (dry run; `--apply` writes).
+- **Checkout safety** (`routes/stripeRoutes.js`):
+  - An org with a subscription that has not ended (`hasLiveSubscription` — active, scheduled
+    to cancel, past_due, unpaid) cannot start a second one (`409 ALREADY_SUBSCRIBED`), and a
+    trial it buys is a **top-up** that never detaches the subscription. Otherwise the old
+    subscription would keep billing with nothing attached.
+  - A completed session is applied through `applyCheckoutOnce` (claim `checkout:<id>` in
+    `StripeEvent`): the webhook and the post-redirect sync call race, and without the claim
+    they created two orgs. The loser gets 500 (webhook → Stripe retries) or
+    `409 CHECKOUT_PROCESSING` (sync → the page polls). Abandoned claims are taken over after 5 min.
+  - Price ids come only from `STRIPE_PRICE_*`; an unset one is `503 PLAN_NOT_CONFIGURED`.
+  - The webhook is mounted in `server.js` with `express.raw()` **outside** `apiLimiter`
+    (Stripe's delivery bursts must not be answered 429); the signature authenticates it.
 - `ScanResult` documents carry a **7-day TTL**, so they cannot be used to compute monthly
   usage. `Organization.scansUsed` is authoritative.
 
