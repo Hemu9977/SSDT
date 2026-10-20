@@ -21,13 +21,19 @@ relative to that directory):
 ```bash
 cd backend
 node scripts/backfillSystemRole.js          # existing users have no systemRole
-node scripts/makeAdmin.js you@example.com superadmin
+node scripts/adminRoster.js --check you@example.com                     # read-only
+node scripts/grantSystemRole.js you@example.com superadmin --operator "Your Name" --ticket CHG-123          # dry run
+node scripts/grantSystemRole.js you@example.com superadmin --operator "Your Name" --ticket CHG-123 --apply  # writes
 ```
 
-`makeAdmin.js` defaults to plain `admin` for **any** second argument that isn't
-exactly `superadmin`. Get it right the first time: only a superadmin can grant
-or revoke admin roles, so a plain admin cannot promote anyone — including
-themselves — and recovery means re-running this script on the server.
+Against production, run these as a one-off ECS task with the backend task
+definition, not with the production `MONGO_URI` copied into a local `.env`.
+`grantSystemRole.js` refuses unverified or disabled accounts and the removal of
+the last superadmin, records an audit row before the change, and ends the
+account's existing sessions. (It replaces `makeAdmin.js` and `transferAdmin.js`;
+the latter copied a password hash from one account to another and is gone.)
+Only a superadmin can grant or revoke admin roles in the dashboard, so the
+first superadmin must come from this script.
 
 The backfill matters because the admin API reads users with `.lean()`, which
 bypasses Mongoose's default injection: documents created before `systemRole`

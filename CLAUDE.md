@@ -190,9 +190,19 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   Stripe: the exact expiry boundary, duplicate/out-of-order/stale webhooks, failed Stripe
   reads, renewals and payment failures, the sweep, both Stripe payload shapes, and a scan
   that straddles the end of the period (never spends a purchased credit).
+- `backend/tests/adminRoutes.test.js` — executes the admin route handlers against an
+  in-memory model layer (`tests/support/fakeMongo.js`, sift-based) and a stubbed Stripe:
+  superadmin-only billing/deletion, Stripe failure aborting an org delete, soft delete,
+  audit rows (incl. fail closed), re-auth, KPI sources, projections, health states.
+- `backend/tests/sessionRules.test.js` — writes fail closed when the account check
+  cannot run, admin token lifetime, no OTP bypass for admins, `lastLoginAt` on login.
+- `backend/tests/failedScanRetention.test.js`, `subscriptionState.test.js`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.
+- `frontend/src/__tests__/adminDashboard.test.jsx` — renders the admin tabs with a
+  mocked API: role-dependent controls, computed states, health states, adminService
+  error codes, and every label-map key present in both locales.
 
 The build is clean at `CI=true`; `.github/workflows/frontend-deploy.yml` still
 sets `CI: false`, which can now be removed. **That workflow auto-deploys to S3 +
@@ -305,16 +315,47 @@ accounts — see `hasLegacyOneTimeBalance` in `planService.js`.
 - [x] **Stripe billing** (not originally listed) — `backend/routes/stripeRoutes.js`, `models/StripeEvent.js` for webhook idempotency
 - [x] **TASK 6**: Usage tracking dashboard — the Profile Statistics grid shows the plan
   scan limit, scans this month, and remaining purchased credits with their expiry date
-- [x] **TASK 7**: Admin panel — `backend/routes/admin.js` (12 endpoints),
+- [x] **TASK 7**: Admin panel — `backend/routes/admin.js` (13 endpoints),
   `frontend/src/pages/Admin/*`, guarded by `components/RequireAdmin.jsx` at the
   `/admin` route. Platform role lives on `User.systemRole`
   (`user` | `admin` | `superadmin`), separate from the org-level `role`.
-  **Only a `superadmin` may grant or revoke an admin role, or act on an account
-  that already holds one** (`middleware/adminAuth.js` admits both, so the
-  hierarchy is enforced in `routes/admin.js`).
-  Bootstrap: `cd backend && node scripts/backfillSystemRole.js`, then
-  `node scripts/makeAdmin.js <email> superadmin` — the second argument is
-  load-bearing; anything but `superadmin` yields a plain `admin`.
+  **Only a `superadmin` may grant or revoke an admin role, act on an account
+  that already holds one, disable an organization containing one, cancel an
+  organization's subscription, delete an organization, or read the audit log**
+  (`middleware/adminAuth.js` admits both, so the hierarchy is enforced in
+  `routes/admin.js`).
+  - Every admin mutation writes `AdminAuditLog` via `services/adminAudit.js`: a
+    `pending` row first (if it cannot be written the action is refused), then the
+    outcome; refused attempts are recorded as `denied`.
+  - Destructive actions (delete user/org, cancel billing, change admin rights)
+    need a sign-in within 15 min (`isRecentAuth`, token `iat`); admin tokens live
+    8 h (`utils/sessionPolicy.js`) and admins never get the post-reset OTP bypass.
+  - Organization delete is a **soft delete** (`Organization.deletedAt`): Stripe is
+    set to end first and the delete aborts if Stripe fails; members are detached.
+    Admin listings filter `deletedAt: null`.
+  - Dashboard numbers: all-time scans = sum of `Organization.totalScansAllTime`;
+    active = `entitlementFilter()`; per-org state from `utils/subscriptionState.js`.
+  - Failed/stopped scans keep their record until the 7-day TTL; the hourly
+    cleanup only purges their artifacts (`purgeFailedScanArtifacts`).
+  - **No action may leave zero reachable superadmins** (`ADMIN_LAST_SUPERADMIN`); the
+    last-admin guards count plain admins too, so they are not enough on their own.
+    Nobody may disable their own organization (`ADMIN_SELF_ORG`). Hard-deleting a user
+    is superadmin-only.
+  Bootstrap (run as a one-off ECS task with the backend task definition, not with a
+  production `MONGO_URI` in a laptop `.env`): `node scripts/backfillSystemRole.js`, then
+  `node scripts/adminRoster.js --check <email>` (read-only), then
+  `node scripts/grantSystemRole.js <email> superadmin --operator "<name>" --ticket <id>`
+  (dry run; add `--apply` to write). It refuses unverified/disabled accounts and the last
+  superadmin, writes an `AdminAuditLog` row (`actorType: 'script'`) first, and ends the
+  account's old sessions. `makeAdmin.js` and `transferAdmin.js` (which copied a password
+  hash between accounts) are deleted; never reintroduce either.
+- **Sign-in rules for admins**: every admin sign-in passes the emailed OTP, Google
+  included (`/auth/google` returns `AUTH_OTP_SENT`; the invite page sends admins to the
+  normal login). Google credentials are accepted only if issued to our client id
+  (`GOOGLE_CLIENT_ID`, else `REACT_APP_GOOGLE_CLIENT_ID` — production's task definition
+  only has the latter) with a Google-verified email (`utils/googleAuth.js`).
+- **OTPs** (`utils/otp.js`): only an HMAC is stored (`otpHash`); each code allows 5
+  attempts, reserved atomically before comparing (`AUTH_OTP_LOCKED` after that).
 
 ### Quota Enforcement Notes
 - Quota is checked at scan **start** (`planCheck.js`) but charged only at successful
