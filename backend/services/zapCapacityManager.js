@@ -773,7 +773,20 @@ async function preflightCapacityAccess() {
   return { ok: true };
 }
 
+/**
+ * Read-only snapshot of a managed instance's ECS service (desired/running/pending
+ * task counts), for the admin health page: an unreachable ZAP whose service is
+ * scaled to zero is idle by design, not down. Returns null when the instance is
+ * not under capacity management. Never scales anything.
+ */
+async function describeCapacity(key) {
+  if (!isManagedKey(key)) return null;
+  const { desiredCount, runningCount, pendingCount } = await describeZapService(getInstance(key));
+  return { desiredCount, runningCount, pendingCount };
+}
+
 module.exports = {
+  describeCapacity,
   ensureZapCapacity,
   releaseZapCapacityIfIdle,
   releaseIdleCapacity,

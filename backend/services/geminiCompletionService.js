@@ -23,6 +23,9 @@ const { getPublisher } = require('../config/redis');
 const { getSanitizedZapReport } = require('../utils/vulnFilter');
 const { sanitizeScanForLLM } = require('./geminiSanitizer');
 const { finalizeSuccessfulScan } = require('./planService');
+// AI-report outcomes for the admin System Health page: the fallback below is
+// otherwise invisible anywhere but the logs.
+const { recordOutcome } = require('./healthSignals');
 
 /**
  * resolveVulnAccessLevel — fetches the plan's vulnerabilityAccessLevel for a user.
@@ -502,9 +505,11 @@ async function _doGenerate(scanId, userId) {
         webCheckReport
       );
       console.log(`[Gemini][${scanId}] refineReport succeeded in ${((Date.now() - geminiStart) / 1000).toFixed(1)}s`);
+      recordOutcome('gemini_report', true);
     } catch (geminiErr) {
       const elapsed = ((Date.now() - geminiStart) / 1000).toFixed(1);
       console.error(`[Gemini][${scanId}] refineReport failed after ${elapsed}s:`, geminiErr.message);
+      recordOutcome('gemini_report', false, 'generation_failed');
       // Do NOT re-throw. Generate a structured report from raw scan data so the scan
       // always completes with meaningful content even when Gemini is unavailable.
       aiReport = _buildStructuredFallbackReport(scan, zapReport, webCheckReport);

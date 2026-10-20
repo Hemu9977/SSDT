@@ -23,6 +23,8 @@ const auth = require('../middleware/auth');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const StripeEvent = require('../models/StripeEvent');
+// Webhook outcomes for the admin System Health page (counts and a fixed code only).
+const { recordOutcome } = require('../services/healthSignals');
 const {
   periodEndOf,
   subscriptionIdOf,
@@ -335,6 +337,7 @@ async function webhookHandler(req, res) {
       // that would let anyone push fake billing events.
       if (process.env.NODE_ENV === 'production') {
         console.error('❌ STRIPE_WEBHOOK_SECRET not set in production — refusing unsigned webhook');
+        recordOutcome('stripe_webhook', false, 'misconfigured');
         return res.status(500).json({ code: 'WEBHOOK_MISCONFIGURED', error: 'Webhook misconfigured' });
       }
 
@@ -348,6 +351,7 @@ async function webhookHandler(req, res) {
     }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
+    recordOutcome('stripe_webhook', false, 'signature_invalid');
     return res.status(400).json({ code: 'WEBHOOK_SIGNATURE_INVALID', error: 'Webhook signature verification failed' });
   }
 
@@ -364,6 +368,7 @@ async function webhookHandler(req, res) {
       return res.json({ received: true });
     }
     console.error('❌ [webhook] Failed to record event for idempotency:', err.message);
+    recordOutcome('stripe_webhook', false, 'store_failed');
     return res.status(500).json({ code: 'WEBHOOK_FAILED', error: 'Webhook idempotency store failed' });
   }
 
@@ -424,9 +429,11 @@ async function webhookHandler(req, res) {
       console.error('⚠️  [webhook] Failed to release idempotency claim:', cleanupErr.message);
     }
     // Return 500 so Stripe retries delivery — DB update did NOT succeed
+    recordOutcome('stripe_webhook', false, 'processing_failed');
     return res.status(500).json({ code: 'WEBHOOK_FAILED', error: 'Webhook processing failed' });
   }
 
+  recordOutcome('stripe_webhook', true);
   res.json({ received: true });
 }
 

@@ -97,7 +97,9 @@ const corsOptions = {
     // Allow server-to-server calls (no Origin header) and known origins
     if (!origin || allowedOriginsSet.has(origin)) return callback(null, true);
     console.warn(`[CORS] Blocked request from: ${origin}`);
-    callback(new Error('Not allowed by CORS'));
+    // 403, not the error handler's default 500: a refused origin is the client's
+    // fault, and counting it as a server error pollutes the 5xx metrics.
+    callback(Object.assign(new Error('Not allowed by CORS'), { status: 403 }));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -450,6 +452,10 @@ async function startServer() {
         if (process.env.DISABLE_WORKER !== 'true') {
           inProcessWorker    = createScanWorker(publisher);
           inProcessZapWorker = createZapWorker(publisher);
+          // Lets the admin System Health page see whether this task consumes jobs.
+          const { registerWorker } = require('./services/healthSignals');
+          registerWorker('scan', inProcessWorker);
+          registerWorker('zap', inProcessZapWorker);
           console.log('✅ In-process BullMQ scan + ZAP workers started');
 
           // Confirm the task role can actually reach ECS. Without this check a missing

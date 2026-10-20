@@ -178,9 +178,39 @@ if (!IS_ECS && process.env.GEMINI_API_KEY) {
  * that ai.models.generateContent() uses. It does NOT use GoogleAuth / ADC.
  * On local dev (no _wifAuthClient) it uses GoogleAuth with ambient ADC.
  */
+// Outcome of the startup credential check, exposed read-only to the admin health
+// page (true / false / null = not finished yet). Holds no credential material.
+let credentialStatus = { verified: null, checkedAt: null };
+const setCredentialStatus = (verified) => { credentialStatus = { verified, checkedAt: new Date().toISOString() }; };
+
+// Admin health-page check (services/systemHealth.js). Calls countTokens on every
+// model the scans use, through the same `ai` client and credentials (WIF on ECS),
+// so success proves authentication, project access, the Vertex AI API being
+// enabled, the IAM permission and the model being available in VERTEX_LOCATION —
+// everything a real report needs except generation itself. countTokens generates
+// nothing and is not billed (Google Cloud Vertex AI docs; it has its own quota).
+// Never throws: each model's outcome is returned, errors unformatted, for the
+// caller to classify. Logs nothing, so no token or response text reaches the logs.
+async function probeModelAccess({ timeoutMs = 4000 } = {}) {
+  const models = [...new Set([MODEL_PRO, MODEL_FLASH])];
+  const settled = await Promise.allSettled(models.map((model) => ai.models.countTokens({
+    model,
+    contents: 'health check',
+    config: { httpOptions: { timeout: timeoutMs } },
+  })));
+  return {
+    mode: GEMINI_AUTH_MODE,
+    location: GEMINI_AUTH_MODE === 'AI_STUDIO' ? null : VERTEX_LOCATION,
+    models: models.map((model, i) => (settled[i].status === 'fulfilled'
+      ? { model, ok: true }
+      : { model, ok: false, error: settled[i].reason })),
+  };
+}
+
 async function verifyCredentials() {
   if (GEMINI_AUTH_MODE === 'AI_STUDIO') {
     console.log(`[Gemini] ✅ API Key verification bypassed (AUTH_MODE=AI_STUDIO)`);
+    setCredentialStatus(true);
     return true;
   }
 
@@ -205,12 +235,14 @@ async function verifyCredentials() {
     const hint = tokenResult?.token ? `token starts with ${String(tokenResult.token).slice(0, 12)}…` : 'no token';
     const label = _wifAuthClient ? 'WIF credential verification' : 'ADC credential verification';
     console.log(`[Gemini] ✅ ${label} passed (AUTH_MODE=${GEMINI_AUTH_MODE}) — ${hint}`);
+    setCredentialStatus(true);
     return true;
   } catch (err) {
     const label = _wifAuthClient ? 'WIF credential verification' : 'ADC credential verification';
     console.error(`[Gemini] ❌ ${label} FAILED (AUTH_MODE=${GEMINI_AUTH_MODE}): ${err.message}`);
     console.error('[Gemini]    This will cause all Gemini calls to fail.');
     console.error('[Gemini]    Check: WIF config fields, task IAM role, GCP service account binding, ECS credentials endpoint.');
+    setCredentialStatus(false);
     return false;
   }
 }
@@ -1274,6 +1306,8 @@ function cleanDuplicateSections(parsed) {
 
 module.exports = {
   GEMINI_AUTH_MODE: () => GEMINI_AUTH_MODE, // getter — value is set during init
+  getCredentialStatus: () => ({ ...credentialStatus }),
+  probeModelAccess,
   refineReport,
   translateText,
   formatReportForPdf,
