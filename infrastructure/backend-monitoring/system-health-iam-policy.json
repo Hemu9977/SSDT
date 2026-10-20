@@ -1,0 +1,30 @@
+{
+  "_comment": "NOT APPLIED. Read-only permissions the admin System Health checks need on fortexa-backend-task-role (backend/services/systemHealth.js). Without them those cards show 'Unknown — permission denied'; nothing else breaks. Apply only with approval: aws iam put-role-policy --role-name fortexa-backend-task-role --policy-name FortexaSystemHealthRead --policy-document file://infrastructure/backend-monitoring/system-health-iam-policy.json  (strip this _comment key first). SES GetSendQuota/GetAccountSendingEnabled are already covered by the attached AmazonSESFullAccess.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeBackendService",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeServices",
+      "Resource": "arn:aws:ecs:ap-northeast-1:459181228792:service/fortexa-cluster/fortexa-ec2-backend"
+    },
+    {
+      "Sid": "ReadTargetHealth",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:DescribeTargetHealth",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadAlbMetrics",
+      "Effect": "Allow",
+      "Action": "cloudwatch:GetMetricData",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadFortexaAlarms",
+      "Effect": "Allow",
+      "Action": "cloudwatch:DescribeAlarms",
+      "Resource": "arn:aws:cloudwatch:ap-northeast-1:459181228792:alarm:fortexa-*"
+    }
+  ]
+}
