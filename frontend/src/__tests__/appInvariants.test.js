@@ -211,10 +211,13 @@ describe('translations', () => {
     }
   });
 
-  it('the admin health panel resolves its service names through t()', () => {
+  it('the admin health panel resolves service names, statuses and reasons through the label maps', () => {
     const health = read('pages/Admin/AdminSystemHealth.jsx');
     expect(health.match(/title: '[^']+'/g)).toBeNull();
-    expect(health).toMatch(/title=\{t\(svc\.labelKey\)\}/);
+    expect(health).toMatch(/getHealthServiceLabel\(t, svc\.id\)/);
+    expect(health).toMatch(/getHealthReasonLabel\(t, svc\.reason\)/);
+    // Nothing the server sends as free text is rendered: there is none to render.
+    expect(health).not.toMatch(/\b(svc|data|result|err|check)\.(message|error|details)\b/);
   });
 });
 

@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { FaShieldAlt } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getScanStatusLabel, getAdminErrorLabel } from './adminLabels';
+import { getPlanLabel, getScanStatusLabel, getAdminErrorLabel, getFailureReasonLabel } from './adminLabels';
 import { formatAdminDateTime, formatAdminNumber } from './adminFormat';
 
 const formatDuration = (t, secs) => {
@@ -21,6 +21,7 @@ const ScanStatusBadge = ({ status, t }) => {
     completed: 'completed',
     failed:    'failed',
     stopped:   'failed',
+    cancelled: 'failed',
     pending:   'pending',
     queued:    'queued',
     combining: 'combining',
@@ -29,7 +30,7 @@ const ScanStatusBadge = ({ status, t }) => {
   return <span className={`scan-status ${cls}`}>{status ? getScanStatusLabel(t, status) : '—'}</span>;
 };
 
-const STATUS_OPTIONS = ['', 'queued', 'pending', 'combining', 'completed', 'failed', 'stopped'];
+const STATUS_OPTIONS = ['', 'queued', 'pending', 'combining', 'completed', 'failed', 'stopped', 'cancelled'];
 
 const AdminScans = () => {
   const { t, currentLang } = useTranslation();
@@ -45,6 +46,10 @@ const AdminScans = () => {
     setError(null);
     try {
       const res = await adminService.getScans({ page: currentPage, limit: 20, status: currentStatus });
+      if ((res.scans || []).length === 0 && currentPage > 1) {
+        setPage(currentPage - 1);
+        return;
+      }
       setScans(res.scans || []);
       setPagination(res.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
@@ -73,6 +78,8 @@ const AdminScans = () => {
             <span className="admin-count-badge">{formatAdminNumber(currentLang, pagination.total)}</span>
           </h2>
         </div>
+
+        <p className="admin-explain">{t('adminScansRetentionExplain')}</p>
 
         {/* Status filter */}
         <div className="admin-filter-bar">
@@ -140,9 +147,18 @@ const AdminScans = () => {
                           {getPlanLabel(t, s.user?.plan)}
                         </span>
                       </td>
-                      <td><ScanStatusBadge status={s.status} t={t} /></td>
+                      <td>
+                        <ScanStatusBadge status={s.status} t={t} />
+                        {getFailureReasonLabel(t, s.failureReason) && (
+                          <span className="admin-muted admin-cell-sub">{getFailureReasonLabel(t, s.failureReason)}</span>
+                        )}
+                      </td>
                       <td>{formatAdminDateTime(currentLang, s.createdAt)}</td>
-                      <td>{formatDuration(t, s.duration)}</td>
+                      <td>
+                        {s.inProgress
+                          ? t('adminRunningFor', { time: formatDuration(t, s.elapsed) })
+                          : formatDuration(t, s.duration)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

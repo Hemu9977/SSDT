@@ -15,6 +15,8 @@ export const PLAN_COLOR = {
   trial1: { bg: 'rgba(0,208,132,0.12)',  color: '#00d084', border: 'rgba(0,208,132,0.3)' },
   trial2: { bg: 'rgba(0,208,132,0.12)',  color: '#00d084', border: 'rgba(0,208,132,0.3)' },
   free:   { bg: 'rgba(127,186,0,0.12)',  color: '#7fba00', border: 'rgba(127,186,0,0.3)' },
+  // A stored plan that no longer grants access (expired, past due, canceled).
+  lapsed: { bg: 'rgba(232,17,35,0.12)',  color: '#e81123', border: 'rgba(232,17,35,0.3)' },
   null:   { bg: 'rgba(156,163,175,0.12)',color: '#9ca3af', border: 'rgba(156,163,175,0.3)' },
 };
 
@@ -24,6 +26,12 @@ export const SUBSCRIPTION_STATUS_COLOR = {
   canceled: { bg: 'rgba(232,17,35,0.15)',  color: '#e81123', border: 'rgba(232,17,35,0.3)' },
   past_due: { bg: 'rgba(255,185,0,0.15)',  color: '#ffb900', border: 'rgba(255,185,0,0.3)' },
   trialing: { bg: 'rgba(0,176,198,0.15)',  color: '#00b0c6', border: 'rgba(0,176,198,0.3)' },
+  // Computed states (backend utils/subscriptionState.js)
+  cancelling: { bg: 'rgba(255,185,0,0.15)', color: '#ffb900', border: 'rgba(255,185,0,0.3)' },
+  expired:    { bg: 'rgba(232,17,35,0.15)', color: '#e81123', border: 'rgba(232,17,35,0.3)' },
+  unpaid:     { bg: 'rgba(232,17,35,0.15)', color: '#e81123', border: 'rgba(232,17,35,0.3)' },
+  onetime:    { bg: 'rgba(0,208,132,0.12)', color: '#00d084', border: 'rgba(0,208,132,0.3)' },
+  none:       { bg: 'rgba(156,163,175,0.12)',color: '#9ca3af', border: 'rgba(156,163,175,0.3)' },
   null:     { bg: 'rgba(156,163,175,0.12)',color: '#9ca3af', border: 'rgba(156,163,175,0.3)' },
 };
 

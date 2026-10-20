@@ -45,11 +45,12 @@
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--foreground-darker);
-  font-family: var(--font-sans);
+  // Same face as the header's ADMIN PANEL / PROFILE / LOGOUT buttons.
+  font-family: 'Orbitron', var(--font-sans);
   font-size: 0.9rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.5px;
   white-space: nowrap;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -73,6 +74,20 @@
     color: var(--accent);
     border-bottom-color: var(--accent);
     background: linear-gradient(rgba(255, 107, 0, 0.08), rgba(255, 107, 0, 0.08)) var(--panel-bg);
+  }
+}
+
+// Below this width the six labelled tabs no longer fit on one line; wrap them
+// rather than scroll, so no tab is hidden off the edge with nothing to show it.
+@media (max-width: 1200px) {
+  .admin-tabs {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .admin-tab {
+    flex: 1 1 auto;
+    justify-content: center;
   }
 }
 
@@ -154,6 +169,25 @@
     color: #ffb900;
     border-color: rgba(255, 185, 0, 0.3);
   }
+
+}
+
+// A figure the server could not load (shown as "—", never as 0).
+.admin-stat-unavailable {
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #ffb900;
+}
+
+.admin-partial-data {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.6rem;
+  font-size: 0.8rem;
+  color: #ffb900;
+  background: linear-gradient(rgba(255, 185, 0, 0.08), rgba(255, 185, 0, 0.08)) var(--panel-bg);
+  border: 1px solid rgba(255, 185, 0, 0.3);
 }
 
 // ── KPI Stats grid ────────────────────────────────────────────────────────────
@@ -502,6 +536,15 @@ body.light .admin-table td {
 // Name column is a flex row so a long name truncates with an ellipsis while
 // the role badge (when present) stays fully visible and never gets squeezed
 // or pushed off — fixes names overflowing into neighboring columns.
+// The <td> stays a real table cell (a flex <td> does not stretch to the row
+// height, so the name sat above the rest of the row); the flex layout lives on
+// the inner .admin-td-name wrapper.
+.admin-td-name-cell {
+  vertical-align: middle;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .admin-td-name {
   display: flex;
   align-items: center;
@@ -865,6 +908,9 @@ body.light {
     }
   }
 
+  .admin-partial-data,
+  .admin-stat-unavailable { color: #9a6a00; }
+
   .admin-search-bar {
     background: rgba(255, 255, 255, 0.6);
   }
@@ -913,4 +959,22 @@ body.light {
     border-color: rgba(168, 85, 247, 0.2) !important;
     border-top-color: var(--neon-purple-primary) !important;
   }
+}
+// Secondary line inside a table cell (organization name under the role,
+// subscription end date under the status, failure reason under a scan status).
+.admin-cell-sub {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  // Wraps rather than truncating: a cut-off date ("Ends Oct 17, 20…") is the
+  // one detail an operator needs to read.
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+// "Sign in again" inside an action message (ADMIN_REAUTH_REQUIRED).
+.admin-reauth-btn {
+  margin-left: 0.75rem;
+  vertical-align: middle;
 }

@@ -18,3 +18,15 @@ export const isSystemAdmin = (user) =>
  * landing page, which is where login has always sent them.
  */
 export const postLoginTarget = (user) => (isSystemAdmin(user) ? '/admin' : '/');
+
+/**
+ * End the current session and go to the login page. Used when the server asks
+ * for a fresh sign-in before a destructive admin action (ADMIN_REAUTH_REQUIRED);
+ * an administrator lands back on /admin after signing in (postLoginTarget).
+ */
+export const signInAgain = () => {
+  localStorage.removeItem('token');
+  localStorage.removeItem('user_data');
+  localStorage.removeItem('is_pro_user');
+  window.location.assign('/login');
+};

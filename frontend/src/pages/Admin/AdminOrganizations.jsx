@@ -5,9 +5,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { FaSearch, FaBuilding } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
+import { useUser } from '../../contexts/UserContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getSubscriptionStatusLabel, getAdminErrorLabel } from './adminLabels';
+import { getPlanLabel, getSubscriptionStatusLabel, getAdminErrorLabel, SUBSCRIPTION_STATE_CLASS } from './adminLabels';
 import { formatAdminDate, formatAdminNumber } from './adminFormat';
+import { signInAgain } from '../../utils/authRedirect';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
 const PlanBadge = ({ plan, t }) => {
@@ -15,19 +17,28 @@ const PlanBadge = ({ plan, t }) => {
   return <span className={cls}>{getPlanLabel(t, plan)}</span>;
 };
 
-const SubStatusBadge = ({ org, t }) => {
+// The state is computed server-side with the entitlement rules
+// (backend utils/subscriptionState.js), so an expired period reads as expired
+// even while Stripe's stored status still says 'active'.
+const SubStatusBadge = ({ org, t, currentLang }) => {
   if (org.isDisabled) {
     return <span className="scan-status failed">{t('adminDisabled')}</span>;
   }
-  const statusMap = {
-    active:   'completed',
-    canceled: 'failed',
-    past_due: 'pending',
-    trialing: 'combining',
-  };
-  const cls = statusMap[org.subscriptionStatus] || 'pending';
-  const label = getSubscriptionStatusLabel(t, org.subscriptionStatus);
-  return label ? <span className={`scan-status ${cls}`}>{label}</span> : <span className="admin-muted">—</span>;
+  const state = org.subscriptionState;
+  if (!state || state === 'none') return <span className="admin-muted">{t('adminSubNone')}</span>;
+  const cls = SUBSCRIPTION_STATE_CLASS[state] || 'pending';
+  const label = getSubscriptionStatusLabel(t, state);
+  const showDate = org.expiresAt && ['active', 'trialing', 'cancelling', 'expired'].includes(state);
+  return (
+    <>
+      <span className={`scan-status ${cls}`}>{label || state}</span>
+      {showDate && (
+        <span className="admin-muted admin-cell-sub">
+          {t(state === 'active' || state === 'trialing' ? 'adminRenewsOn' : 'adminEndsOn', { date: formatAdminDate(currentLang, org.expiresAt) })}
+        </span>
+      )}
+    </>
+  );
 };
 
 const buildConfirmConfig = (t, action, org) => {
@@ -61,6 +72,10 @@ const buildConfirmConfig = (t, action, org) => {
 
 const AdminOrganizations = () => {
   const { t, currentLang } = useTranslation();
+  const { user: currentUser } = useUser();
+  // Cancelling billing and deleting organizations are superadmin-only on the
+  // server (routes/admin.js); a plain admin is not shown those controls.
+  const isSuperadmin = currentUser?.systemRole === 'superadmin';
   const [orgs, setOrgs]           = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [search, setSearch]       = useState('');
@@ -83,6 +98,10 @@ const AdminOrganizations = () => {
         search: currentSearch,
         plan: currentPlan,
       });
+      if ((res.organizations || []).length === 0 && currentPage > 1) {
+        setPage(currentPage - 1);
+        return;
+      }
       setOrgs(res.organizations || []);
       setPagination(res.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
@@ -101,11 +120,14 @@ const AdminOrganizations = () => {
 
   useEffect(() => () => clearTimeout(messageTimer.current), []);
 
-  const showMessage = (type, text) => {
-    setActionMessage({ type, text });
+  const showMessage = (type, text, reauth = false) => {
+    setActionMessage({ type, text, reauth });
     clearTimeout(messageTimer.current);
-    messageTimer.current = setTimeout(() => setActionMessage(null), 5000);
+    messageTimer.current = setTimeout(() => setActionMessage(null), reauth ? 20000 : 5000);
   };
+
+  const showError = (err) =>
+    showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'), err && err.code === 'ADMIN_REAUTH_REQUIRED');
 
   const handleSearchChange = (e) => {
     setSearch(e.target.value);
@@ -134,16 +156,19 @@ const AdminOrganizations = () => {
           await adminService.updateOrganization(org._id, { isDisabled: true });
           showMessage('success', t('adminOrgUpdated'));
           break;
-        case 'cancelSubscription':
-          await adminService.cancelOrganizationSubscription(org._id);
-          showMessage('success', t('adminSubscriptionCanceled'));
+        case 'cancelSubscription': {
+          const result = await adminService.cancelOrganizationSubscription(org._id);
+          // Stripe accepted the cancellation; if our copy could not be updated
+          // the webhook reconciles it shortly — say so rather than claim more.
+          showMessage('success', t(result && result.synced === false ? 'adminSubscriptionCanceledPendingSync' : 'adminSubscriptionCanceled'));
           break;
+        }
         default:
           break;
       }
       fetchOrgs(page, search, planFilter);
     } catch (err) {
-      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
+      showError(err);
     } finally {
       setActionLoadingId(null);
       setPendingAction(null);
@@ -157,7 +182,7 @@ const AdminOrganizations = () => {
       showMessage('success', t('adminOrgUpdated'));
       fetchOrgs(page, search, planFilter);
     } catch (err) {
-      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
+      showError(err);
     } finally {
       setActionLoadingId(null);
     }
@@ -177,7 +202,14 @@ const AdminOrganizations = () => {
         </div>
 
         {actionMessage && (
-          <div className={`save-message ${actionMessage.type}`}>{actionMessage.text}</div>
+          <div className={`save-message ${actionMessage.type}`}>
+            {actionMessage.text}
+            {actionMessage.reauth && (
+              <button type="button" className="admin-action-btn admin-reauth-btn" onClick={signInAgain}>
+                {t('adminSignInAgain')}
+              </button>
+            )}
+          </div>
         )}
 
         {/* Search + Filter bar */}
@@ -205,6 +237,7 @@ const AdminOrganizations = () => {
             <option value="light">{t('adminLight')}</option>
             <option value="trial1">{t('adminTrial1')}</option>
             <option value="trial2">{t('adminTrial2')}</option>
+            <option value="free">{t('adminFree')}</option>
           </select>
         </div>
 
@@ -249,15 +282,16 @@ const AdminOrganizations = () => {
                 <tbody>
                   {orgs.map((org) => {
                     const isBusy = actionLoadingId === org._id;
-                    // Not offered once a cancellation is already scheduled.
-                    const canCancelSubscription = org.hasSubscription && org.subscriptionStatus === 'active' && !org.cancelAtPeriodEnd;
+                    // `cancellable` is computed server-side (a live subscription
+                    // that is not already ending); superadmin only.
+                    const canCancelSubscription = isSuperadmin && org.cancellable;
                     return (
                       <tr key={org._id}>
-                        <td className="admin-td-name">
+                        <td className="admin-td-name-cell"><div className="admin-td-name">
                           <span className="admin-td-name-text" title={org.name}>
                             {org.name || <span className="admin-muted">—</span>}
                           </span>
-                        </td>
+                        </div></td>
                         <td className="admin-td-email" title={org.owner ? org.owner.email : undefined}>
                           {org.owner ? (
                             org.owner.email
@@ -273,10 +307,12 @@ const AdminOrganizations = () => {
                         </td>
                         <td>
                           <span className="admin-seats">
-                            {formatAdminNumber(currentLang, org.scansUsed ?? 0)} / {org.scanLimit != null ? formatAdminNumber(currentLang, org.scanLimit) : '∞'}
+                            {/* This UTC billing month (server-computed): the stored
+                                scansUsed is reset only when the org next scans. */}
+                            {formatAdminNumber(currentLang, org.scansUsedThisMonth)} / {org.scanLimit != null ? formatAdminNumber(currentLang, org.scanLimit) : '∞'}
                           </span>
                         </td>
-                        <td><SubStatusBadge org={org} t={t} /></td>
+                        <td><SubStatusBadge org={org} t={t} currentLang={currentLang} /></td>
                         <td>{formatAdminDate(currentLang, org.createdAt)}</td>
                         <td>
                           <div className="admin-row-actions">
@@ -311,14 +347,16 @@ const AdminOrganizations = () => {
                               </button>
                             )}
 
-                            <button
-                              type="button"
-                              className="admin-action-btn admin-action-btn--danger"
-                              disabled={isBusy}
-                              onClick={() => requestAction('delete', org)}
-                            >
-                              {t('delete')}
-                            </button>
+                            {isSuperadmin && (
+                              <button
+                                type="button"
+                                className="admin-action-btn admin-action-btn--danger"
+                                disabled={isBusy}
+                                onClick={() => requestAction('delete', org)}
+                              >
+                                {t('delete')}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

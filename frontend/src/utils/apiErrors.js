@@ -11,6 +11,8 @@ const CODE_KEYS = {
   // ── Session / account ──────────────────────────────────────────────────────
   ACCOUNT_DISABLED: 'errAccountDisabled',
   SESSION_REVOKED: 'errSessionRevoked',
+  // The account check could not run, so a write was refused (middleware/auth.js).
+  AUTH_UNAVAILABLE: 'errAuthUnavailable',
   AUTH_RESET_TOKEN_INVALID: 'errAuthResetTokenInvalid',
   TOO_MANY_REQUESTS: 'errTooManyRequests',
   UNAUTHORIZED: 'errUnauthorized',
@@ -32,6 +34,7 @@ const CODE_KEYS = {
   AUTH_OTP_SENT: 'errAuthOtpSent',
   AUTH_OTP_FORMAT: 'errAuthOtpFormat',
   AUTH_OTP_INVALID: 'errAuthOtpInvalid',
+  AUTH_OTP_LOCKED: 'errAuthOtpLocked',
   AUTH_RESET_EMAIL_SENT: 'errAuthResetEmailSent',
   AUTH_PASSWORD_RESET: 'errAuthPasswordReset',
 

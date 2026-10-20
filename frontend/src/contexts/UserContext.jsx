@@ -122,7 +122,14 @@ export const UserProvider = ({ children }) => {
     };
 
     window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
+    // An API call reported that this session can no longer act (expired token,
+    // disabled account, removed admin role) — re-read the profile so a dead
+    // session is cleared and route guards re-evaluate.
+    window.addEventListener('fortexa:session-invalid', handleStorageChange);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('fortexa:session-invalid', handleStorageChange);
+    };
   }, [fetchUserProfile]);
 
   const refreshUser = useCallback(() => {

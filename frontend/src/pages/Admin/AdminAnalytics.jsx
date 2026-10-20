@@ -12,10 +12,11 @@ import { FaChartLine, FaBuilding, FaCoins, FaShieldAlt } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { adminService } from '../../services/adminService';
 import { getPlanLabel, getSubscriptionStatusLabel, getAdminErrorLabel } from './adminLabels';
-import { formatAdminNumber, formatAdminYen } from './adminFormat';
+import { formatAdminDateTime, formatAdminNumber, formatAdminYen } from './adminFormat';
 import { TrendLine, DistributionBars, PLAN_COLOR, SUBSCRIPTION_STATUS_COLOR } from './adminCharts';
 
-const sum = (series, key = 'count') => series.reduce((acc, d) => acc + (d[key] || 0), 0);
+// null = the server could not load that series (it lists it in `unavailable`).
+const sum = (series, key = 'count') => (series ? series.reduce((acc, d) => acc + (d[key] || 0), 0) : null);
 
 const AdminAnalytics = () => {
   const { t, currentLang } = useTranslation();
@@ -56,24 +57,29 @@ const AdminAnalytics = () => {
     );
   }
 
+  // A section whose query failed arrives as null and says so; it is never
+  // filled in with zeros or an empty chart that would read as "no activity".
   const {
-    userGrowth = [],
-    organizationGrowth = [],
-    subscriptionStatusDistribution = [],
-    estimatedRecurringValue = { total: 0, byPlan: {}, activeOrgCount: 0 },
-    scanActivity = [],
-    topOrgsByUsage = [],
+    userGrowth = null,
+    organizationGrowth = null,
+    subscriptionStatusDistribution = null,
+    estimatedRecurringValue = null,
+    scanActivity = null,
+    topOrgsByUsage = null,
+    unavailable = [],
+    generatedAt,
   } = data || {};
+  const Unavailable = () => <p className="admin-empty">{t('adminMetricUnavailable')}</p>;
 
   const newUsers30d = sum(userGrowth);
   const newOrgs30d = sum(organizationGrowth);
   const scansThisWeek = sum(scanActivity, 'total');
-  const estimatedByPlanRows = Object.entries(estimatedRecurringValue.byPlan || {})
+  const estimatedByPlanRows = Object.entries((estimatedRecurringValue && estimatedRecurringValue.byPlan) || {})
     .map(([planId, value]) => ({ key: planId, count: value, planId, displayValue: formatAdminYen(currentLang, value) }))
     .sort((a, b) => b.count - a.count);
   const estimatedByPlanTotal = estimatedByPlanRows.reduce((acc, r) => acc + r.count, 0);
 
-  const subscriptionRows = subscriptionStatusDistribution.map((s) => ({
+  const subscriptionRows = (subscriptionStatusDistribution || []).map((s) => ({
     key: s._id || 'null',
     count: s.count,
     statusId: s._id,
@@ -83,6 +89,7 @@ const AdminAnalytics = () => {
 
   return (
     <div className="admin-page">
+      {unavailable.length > 0 && <p className="admin-partial-data" role="status">{t('adminPartialData')}</p>}
       {/* ── Estimated Recurring Value ── */}
       <section className="profile-section admin-kpi-section">
         <h2 className="admin-section-title">
@@ -94,12 +101,12 @@ const AdminAnalytics = () => {
         <div className="stats-grid admin-stats-grid">
           <div className="stat-card admin-stat-card admin-stat-card--yellow">
             <div className="admin-stat-icon"><FaCoins /></div>
-            <div className="stat-value">{formatAdminYen(currentLang, estimatedRecurringValue.total)}</div>
+            <div className="stat-value">{formatAdminYen(currentLang, estimatedRecurringValue ? estimatedRecurringValue.total : null)}</div>
             <div className="stat-label">{t('adminEstimatedValueTotal')}</div>
           </div>
           <div className="stat-card admin-stat-card admin-stat-card--blue">
             <div className="admin-stat-icon"><FaBuilding /></div>
-            <div className="stat-value">{formatAdminNumber(currentLang, estimatedRecurringValue.activeOrgCount)}</div>
+            <div className="stat-value">{formatAdminNumber(currentLang, estimatedRecurringValue ? estimatedRecurringValue.activeOrgCount : null)}</div>
             <div className="stat-label">{t('adminActiveOrgs')}</div>
           </div>
         </div>
@@ -124,7 +131,7 @@ const AdminAnalytics = () => {
         <section className="profile-section">
           <h2 className="admin-section-title"><FaChartLine /> {t('adminUserGrowth')}</h2>
           <p className="admin-explain">{t('adminUserGrowthExplain')}</p>
-          <TrendLine data={userGrowth} />
+          {userGrowth ? <TrendLine data={userGrowth} /> : <Unavailable />}
           <div className="admin-trend-summary">
             <span>{t('adminLast30Days')}</span>
             <strong>{t('adminNewInPeriod', { count: formatAdminNumber(currentLang, newUsers30d) })}</strong>
@@ -134,7 +141,7 @@ const AdminAnalytics = () => {
         <section className="profile-section">
           <h2 className="admin-section-title"><FaBuilding /> {t('adminOrgGrowth')}</h2>
           <p className="admin-explain">{t('adminOrgGrowthExplain')}</p>
-          <TrendLine data={organizationGrowth} />
+          {organizationGrowth ? <TrendLine data={organizationGrowth} /> : <Unavailable />}
           <div className="admin-trend-summary">
             <span>{t('adminLast30Days')}</span>
             <strong>{t('adminNewInPeriod', { count: formatAdminNumber(currentLang, newOrgs30d) })}</strong>
@@ -147,19 +154,21 @@ const AdminAnalytics = () => {
         <section className="profile-section">
           <h2 className="admin-section-title">{t('adminSubscriptionHealth')}</h2>
           <p className="admin-explain">{t('adminSubscriptionHealthExplain')}</p>
-          <DistributionBars
-            rows={subscriptionRows}
-            total={subscriptionTotal}
-            renderLabel={(row) => getSubscriptionStatusLabel(t, row.statusId) || t('adminFree')}
-            renderColor={(row) => SUBSCRIPTION_STATUS_COLOR[row.statusId] || SUBSCRIPTION_STATUS_COLOR['null']}
-            emptyText={t('adminNoData')}
-          />
+          {subscriptionStatusDistribution ? (
+            <DistributionBars
+              rows={subscriptionRows}
+              total={subscriptionTotal}
+              renderLabel={(row) => getSubscriptionStatusLabel(t, row.statusId) || t('adminFree')}
+              renderColor={(row) => SUBSCRIPTION_STATUS_COLOR[row.statusId] || SUBSCRIPTION_STATUS_COLOR['null']}
+              emptyText={t('adminNoData')}
+            />
+          ) : <Unavailable />}
         </section>
 
         <section className="profile-section">
           <h2 className="admin-section-title"><FaShieldAlt /> {t('adminScanActivity')}</h2>
           <p className="admin-explain">{t('adminScanActivityExplain')}</p>
-          <TrendLine data={scanActivity} valueKey="total" />
+          {scanActivity ? <TrendLine data={scanActivity} valueKey="total" /> : <Unavailable />}
           <div className="admin-trend-summary">
             <span>{t('adminLast7Days')}</span>
             <strong>{t('adminScansThisWeek', { count: formatAdminNumber(currentLang, scansThisWeek) })}</strong>
@@ -171,7 +180,7 @@ const AdminAnalytics = () => {
       <section className="profile-section">
         <h2 className="admin-section-title">{t('adminTopOrgsByUsage')}</h2>
         <p className="admin-explain">{t('adminTopOrgsByUsageExplain')}</p>
-        {topOrgsByUsage.length === 0 ? (
+        {topOrgsByUsage === null ? <Unavailable /> : topOrgsByUsage.length === 0 ? (
           <p className="admin-empty no-scans">{t('adminNoData')}</p>
         ) : (
           <div className="admin-table-wrap">
@@ -193,11 +202,11 @@ const AdminAnalytics = () => {
               <tbody>
                 {topOrgsByUsage.map((org) => (
                   <tr key={org._id}>
-                    <td className="admin-td-name">
+                    <td className="admin-td-name-cell"><div className="admin-td-name">
                       <span className="admin-td-name-text" title={org.name}>
                         {org.name || <span className="admin-muted">—</span>}
                       </span>
-                    </td>
+                    </div></td>
                     <td>
                       <span className={`account-type ${org.planType ? org.planType.replace(/\d/g, '') : 'free'}`}>
                         {getPlanLabel(t, org.planType)}
@@ -205,12 +214,12 @@ const AdminAnalytics = () => {
                     </td>
                     <td>
                       <span className="admin-seats">
-                        {formatAdminNumber(currentLang, org.scansUsed ?? 0)} / {org.scanLimit != null ? formatAdminNumber(currentLang, org.scanLimit) : '∞'}
+                        {formatAdminNumber(currentLang, org.scansUsedThisMonth)} / {org.scanLimit != null ? formatAdminNumber(currentLang, org.scanLimit) : '∞'}
                       </span>
                     </td>
                     <td>
                       <span className="admin-seats">
-                        {formatAdminNumber(currentLang, org.seatsUsed ?? 0)} / {formatAdminNumber(currentLang, org.seatsAllowed ?? 1)}
+                        {formatAdminNumber(currentLang, org.seatsUsed)} / {formatAdminNumber(currentLang, org.seatsAllowed)}
                       </span>
                     </td>
                   </tr>
@@ -220,6 +229,9 @@ const AdminAnalytics = () => {
           </div>
         )}
       </section>
+      {generatedAt && (
+        <p className="admin-timestamp">{t('adminLastUpdated', { time: formatAdminDateTime(currentLang, generatedAt) })}</p>
+      )}
     </div>
   );
 };

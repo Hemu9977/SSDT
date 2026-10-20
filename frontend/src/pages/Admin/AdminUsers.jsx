@@ -9,7 +9,8 @@ import { FaSearch, FaUser } from 'react-icons/fa';
 import { useTranslation } from '../../contexts/TranslationContext';
 import { useUser } from '../../contexts/UserContext';
 import { adminService } from '../../services/adminService';
-import { getPlanLabel, getSystemRoleLabel, getOrgRoleLabel, getAdminErrorLabel } from './adminLabels';
+import { getPlanLabel, getSystemRoleLabel, getOrgRoleLabel, getAdminErrorLabel, getSubscriptionStatusLabel } from './adminLabels';
+import { signInAgain } from '../../utils/authRedirect';
 import { formatAdminDate, formatAdminNumber } from './adminFormat';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
@@ -17,6 +18,10 @@ const PlanBadge = ({ plan, t }) => {
   const cls = plan ? `account-type ${plan.replace(/\d/g, '')}` : 'account-type free';
   return <span className={cls}>{getPlanLabel(t, plan)}</span>;
 };
+
+// States worth calling out next to the plan: anything that is not plain paid
+// access. Computed server-side with the entitlement rules.
+const PLAN_STATE_NOTES = ['expired', 'cancelling', 'past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired', 'paused'];
 
 const StatusBadge = ({ user, t }) => {
   if (user.isDisabled) {
@@ -90,7 +95,7 @@ const AdminUsers = () => {
   const [error, setError]         = useState(null);
   const [pendingAction, setPendingAction] = useState(null); // { action, targetUser }
   const [actionLoadingId, setActionLoadingId] = useState(null);
-  const [actionMessage, setActionMessage] = useState(null); // { type, text }
+  const [actionMessage, setActionMessage] = useState(null); // { type, text, reauth }
   const messageTimer              = useRef(null);
 
   const fetchUsers = useCallback(async (currentPage, currentSearch) => {
@@ -98,6 +103,11 @@ const AdminUsers = () => {
     setError(null);
     try {
       const res = await adminService.getUsers({ page: currentPage, limit: 20, search: currentSearch });
+      // After deleting the last row of the last page, step back a page.
+      if ((res.users || []).length === 0 && currentPage > 1) {
+        setPage(currentPage - 1);
+        return;
+      }
       setUsers(res.users || []);
       setPagination(res.pagination || { page: 1, pages: 1, total: 0 });
     } catch (err) {
@@ -118,11 +128,14 @@ const AdminUsers = () => {
 
   useEffect(() => () => clearTimeout(messageTimer.current), []);
 
-  const showMessage = (type, text) => {
-    setActionMessage({ type, text });
+  const showMessage = (type, text, reauth = false) => {
+    setActionMessage({ type, text, reauth });
     clearTimeout(messageTimer.current);
-    messageTimer.current = setTimeout(() => setActionMessage(null), 5000);
+    messageTimer.current = setTimeout(() => setActionMessage(null), reauth ? 20000 : 5000);
   };
+
+  const showError = (err) =>
+    showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'), err && err.code === 'ADMIN_REAUTH_REQUIRED');
 
   const handleSearchChange = (e) => {
     setSearch(e.target.value);
@@ -163,7 +176,7 @@ const AdminUsers = () => {
       }
       fetchUsers(page, search);
     } catch (err) {
-      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
+      showError(err);
     } finally {
       setActionLoadingId(null);
       setPendingAction(null);
@@ -180,7 +193,7 @@ const AdminUsers = () => {
       showMessage('success', t('adminUserUpdated'));
       fetchUsers(page, search);
     } catch (err) {
-      showMessage('error', getAdminErrorLabel(t, err, 'adminActionFailed'));
+      showError(err);
     } finally {
       setActionLoadingId(null);
     }
@@ -200,7 +213,14 @@ const AdminUsers = () => {
         </div>
 
         {actionMessage && (
-          <div className={`save-message ${actionMessage.type}`}>{actionMessage.text}</div>
+          <div className={`save-message ${actionMessage.type}`}>
+            {actionMessage.text}
+            {actionMessage.reauth && (
+              <button type="button" className="admin-action-btn admin-reauth-btn" onClick={signInAgain}>
+                {t('adminSignInAgain')}
+              </button>
+            )}
+          </div>
         )}
 
         {/* Search */}
@@ -259,9 +279,14 @@ const AdminUsers = () => {
                     const isSelf = currentUser && String(currentUser.id) === String(u._id);
                     const isBusy = actionLoadingId === u._id;
                     const canRemoveFromOrg = u.organizationId && u.role !== 'owner';
+                    // Only a superadmin may act on an account holding an admin
+                    // role (routes/admin.js) — don't offer a plain admin buttons
+                    // the server would refuse.
+                    const canManage = isSuperadmin || u.systemRole === 'user';
+                    const planState = u.organization?.subscriptionState;
                     return (
                       <tr key={u._id}>
-                        <td className="admin-td-name">
+                        <td className="admin-td-name-cell"><div className="admin-td-name">
                           <span className="admin-td-name-text" title={u.name || u.email}>
                             {u.name || <span className="admin-muted">—</span>}
                           </span>
@@ -270,20 +295,36 @@ const AdminUsers = () => {
                               {getSystemRoleLabel(t, u.systemRole)}
                             </span>
                           )}
-                        </td>
+                        </div></td>
                         <td className="admin-td-email" title={u.email}>{u.email}</td>
                         <td>
-                          <span className={`scan-tag ${u.role === 'owner' ? 'scheduled' : ''}`}>
-                            {getOrgRoleLabel(t, u.role)}
-                          </span>
+                          {u.organization ? (
+                            <>
+                              <span className={`scan-tag ${u.role === 'owner' ? 'scheduled' : ''}`}>
+                                {getOrgRoleLabel(t, u.role)}
+                              </span>
+                              <span className="admin-muted admin-cell-sub" title={u.organization.name}>
+                                {u.organization.name}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="admin-muted">{t('adminNoOrganization')}</span>
+                          )}
                         </td>
-                        <td><PlanBadge plan={u.organizationId?.planType || u.planType} t={t} /></td>
+                        <td>
+                          <PlanBadge plan={u.organization?.planType} t={t} />
+                          {PLAN_STATE_NOTES.includes(planState) && (
+                            <span className="admin-muted admin-cell-sub">{getSubscriptionStatusLabel(t, planState)}</span>
+                          )}
+                        </td>
                         <td><StatusBadge user={u} t={t} /></td>
                         <td>{formatAdminDate(currentLang, u.createdAt)}</td>
                         <td>{formatAdminDate(currentLang, u.lastLoginAt)}</td>
                         <td>
                           {isSelf ? (
                             <span className="admin-muted admin-row-actions-placeholder">{t('adminYou')}</span>
+                          ) : !canManage ? (
+                            <span className="admin-muted admin-row-actions-placeholder">{t('adminSuperadminOnly')}</span>
                           ) : (
                             <div className="admin-row-actions">
                               {isSuperadmin && u.systemRole === 'user' && (
@@ -339,14 +380,17 @@ const AdminUsers = () => {
                                 </button>
                               )}
 
-                              <button
-                                type="button"
-                                className="admin-action-btn admin-action-btn--danger"
-                                disabled={isBusy}
-                                onClick={() => requestAction('delete', u)}
-                              >
-                                {t('delete')}
-                              </button>
+                              {/* Permanent deletion is superadmin-only (server-enforced); admins disable instead. */}
+                              {isSuperadmin && (
+                                <button
+                                  type="button"
+                                  className="admin-action-btn admin-action-btn--danger"
+                                  disabled={isBusy}
+                                  onClick={() => requestAction('delete', u)}
+                                >
+                                  {t('delete')}
+                                </button>
+                              )}
                             </div>
                           )}
                         </td>
