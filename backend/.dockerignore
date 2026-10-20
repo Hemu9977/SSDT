@@ -6,3 +6,7 @@ npm-debug.log
 *.log
 Dockerfile*
 .dockerignore
+
+# Local artefacts that must not ship in the production image
+zap-report-*
+test-stripe.js
