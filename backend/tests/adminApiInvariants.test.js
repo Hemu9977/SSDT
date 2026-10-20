@@ -208,11 +208,15 @@ test('every backend error code has a UI mapping and a translation in both locale
 // 5. Token issuance and the account-disabled lockout
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Application code only. The test suite itself mints and verifies tokens on
+// purpose (tests/sessionRules.test.js) and is never served, so it is outside
+// the census; every route, middleware, service and script is still inside it.
 function backendJsFiles() {
   const out = [];
   (function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      if (dir === BACKEND && entry.name === 'tests') continue;
       const p = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(p);
       else if (entry.name.endsWith('.js')) out.push(p);

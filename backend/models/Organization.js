@@ -28,6 +28,12 @@ const OrganizationSchema = new mongoose.Schema({
   // Platform-level admin lock — blocks login for all members of this org.
   // Independent from subscriptionStatus (which reflects billing state, not access).
   isDisabled: { type: Boolean, default: false },
+  // Soft delete (admin "Delete organization"). The document is kept so the
+  // deletion is recoverable and its history (purchased credits, lifetime scan
+  // count, Stripe id) survives; members are detached at the same time. Every
+  // admin listing excludes it via `deletedAt: null`.
+  deletedAt: { type: Date, default: null },
+  deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   seatsAllowed: { type: Number, default: 1 },
   seatsUsed: { type: Number, default: 1 },
   scanLimit: { type: Number, default: 0 },

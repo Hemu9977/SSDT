@@ -11,24 +11,28 @@ module.exports = async function adminAuth(req, res, next) {
       console.log('⚠️ [adminAuth] No authenticated user on request');
       return res.status(401).json({
         success: false,
+        code: 'UNAUTHORIZED',
         error: 'UNAUTHORIZED',
         message: 'No token, authorization denied'
       });
     }
 
     // Fetch the user with systemRole from DB; never trust JWT payload alone for role
-    const user = await User.findById(req.user.id).select('systemRole email name isDisabled');
+    const user = await User.findById(req.user.id).select('systemRole email name isDisabled organizationId');
     if (!user) {
       console.log('⚠️ [adminAuth] User not found:', req.user.id);
       return res.status(401).json({
         success: false,
+        code: 'UNAUTHORIZED',
         error: 'UNAUTHORIZED',
         message: 'User account not found'
       });
     }
 
+    // Logged by account id, not email: these lines go to CloudWatch, which keeps
+    // them, and an id is enough to investigate.
     if (user.isDisabled) {
-      console.log(`🚫 [adminAuth] Disabled admin account blocked: ${user.email}`);
+      console.log(`🚫 [adminAuth] Disabled admin account blocked: ${user._id}`);
       return res.status(403).json({
         success: false,
         error: 'ACCOUNT_DISABLED',
@@ -39,24 +43,25 @@ module.exports = async function adminAuth(req, res, next) {
 
     const allowedRoles = ['admin', 'superadmin'];
     if (!allowedRoles.includes(user.systemRole)) {
-      console.log(`🚫 [adminAuth] Access denied for user ${user.email} (systemRole: ${user.systemRole})`);
+      console.log(`🚫 [adminAuth] Access denied for user ${user._id} (systemRole: ${user.systemRole})`);
       return res.status(403).json({
         success: false,
+        code: 'FORBIDDEN',
         error: 'FORBIDDEN',
         message: 'Access denied. Administrator privileges required.'
       });
     }
 
     // Attach the full admin user info for downstream handlers.
-    // Deliberately no success log — this runs on every admin request and would
-    // write the admin's email address into the logs continuously. Denials below
-    // are still logged, which is the part worth auditing.
+    // Deliberately no success log — this runs on every admin request. Denials
+    // above are still logged, which is the part worth auditing.
     req.adminUser = user;
     next();
   } catch (err) {
     console.error('❌ [adminAuth] Error:', err.message);
     res.status(500).json({
       success: false,
+      code: 'SERVER_ERROR',
       error: 'SERVER_ERROR',
       message: 'Authorization check failed'
     });

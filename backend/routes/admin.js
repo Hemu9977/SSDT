@@ -1,19 +1,28 @@
 // backend/routes/admin.js
 // Platform-level Global Admin Dashboard API
 // All routes are protected by auth + adminAuth middleware.
-// Read endpoints for statistics, users, organizations, scans, and system health,
-// plus mutation endpoints for user/organization lifecycle management.
+// Read endpoints for statistics, users, organizations, scans, system health and
+// the admin audit log, plus mutation endpoints for user/organization lifecycle
+// management. Every mutation is recorded in AdminAuditLog (services/adminAudit.js).
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const stripe = require('../config/stripe');
 const auth = require('../middleware/auth');
-const { invalidatePrincipal, invalidateAllPrincipals } = require('../middleware/auth');
+const { invalidatePrincipal, invalidateAllPrincipals, isRecentAuth } = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const ScanResult = require('../models/ScanResult');
-const { applySubscription } = require('../services/subscriptionLifecycle');
+const ScheduledScan = require('../models/ScheduledScan');
+const Invite = require('../models/Invite');
+const AdminAuditLog = require('../models/AdminAuditLog');
+const { applySubscription, isCancellationScheduled, periodEndOf } = require('../services/subscriptionLifecycle');
+const { entitlementFilter } = require('../utils/entitlement');
+const { subscriptionState, isCancellable } = require('../utils/subscriptionState');
+const { RECENT_AUTH_MAX_AGE_MS } = require('../utils/sessionPolicy');
+const { scansUsedThisMonth, startOfUtcMonth } = require('../utils/monthlyUsage');
+const { beginAdminAction, finishAdminAction, recordDenied } = require('../services/adminAudit');
 
 const devMsg = (err) =>
   process.env.NODE_ENV !== 'production' ? err.message : undefined;
@@ -33,9 +42,49 @@ const isActiveAdmin = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole) && !u.is
 // so without this a plain admin could promote anyone to superadmin, or demote,
 // disable and delete existing superadmins — i.e. the three-role enum would
 // describe a hierarchy that nothing actually enforced.
-// Rule: only a superadmin may grant/revoke administrator roles, or act on an
-// account that already holds one. Admins manage ordinary users only.
+// Rule: only a superadmin may grant/revoke administrator roles, act on an
+// account that already holds one, lock out an organization that contains one,
+// cancel a customer's billing, or delete an organization. Admins manage
+// ordinary users only.
 const holdsAdminRole = (u) => ADMIN_CAPABLE_ROLES.includes(u.systemRole);
+const isSuperadmin = (req) => req.adminUser && req.adminUser.systemRole === 'superadmin';
+
+// Soft-deleted organizations are kept for recovery and history but are gone from
+// every admin listing and count. `null` also matches documents without the field.
+const NOT_DELETED = { deletedAt: null };
+
+// Scan statuses the dashboard can filter on (ScanResult.status enum).
+const SCAN_STATUSES = ['queued', 'pending', 'combining', 'completed', 'failed', 'stopped', 'cancelled'];
+const IN_FLIGHT_SCAN_STATUSES = ['queued', 'pending', 'combining'];
+const PLAN_FILTERS = ['light', 'basic', 'pro', 'trial1', 'trial2', 'free'];
+const ORG_ROLES = ['owner', 'admin', 'member'];
+const SYSTEM_ROLES = ['user', 'admin', 'superadmin'];
+// Stripe statuses after which a subscription bills no one (matches
+// services/subscriptionLifecycle.js).
+const STRIPE_ENDED = ['canceled', 'incomplete_expired'];
+
+// Query strings arrive as strings, arrays (?a=1&a=2) or not at all. Only a
+// plain string is a usable filter value.
+const qstr = (v) => (typeof v === 'string' ? v.trim() : '');
+
+// Page/limit parsing that cannot produce NaN (which 500'd the list endpoints).
+const pageParams = (query) => {
+  const page = Number.parseInt(qstr(query.page), 10);
+  const limit = Number.parseInt(qstr(query.limit), 10);
+  const pageNum = Number.isFinite(page) && page > 0 ? page : 1;
+  const limitNum = Number.isFinite(limit) && limit > 0 ? Math.min(100, limit) : 20;
+  return { pageNum, limitNum, skip: (pageNum - 1) * limitNum };
+};
+
+const paginationOf = ({ pageNum, limitNum }, total) => ({
+  page: pageNum,
+  limit: limitNum,
+  total,
+  pages: Math.max(1, Math.ceil(total / limitNum)),
+});
+
+const badFilter = (res) =>
+  res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'Invalid filter value' });
 
 // Revoking access must also cut the realtime channel: the Socket.IO handshake
 // is only checked at connect time, so an already-open socket would otherwise
@@ -53,7 +102,7 @@ const cutRealtime = (userId) => {
 // Disabling an organization blocks every one of its members at the auth layer,
 // exactly as if each had been disabled individually. Without this guard,
 // disabling the org that happens to contain the last administrator locks
-// everyone out of the admin panel — recoverable only via scripts/makeAdmin.js
+// everyone out of the admin panel — recoverable only via scripts/grantSystemRole.js
 // or a direct DB edit. The user-level paths already refuse to remove the last
 // administrator; this applies the same rule to the org-level switch.
 const adminsRemainAfterOrgDisable = async (orgId) => {
@@ -73,59 +122,168 @@ const adminsRemainAfterOrgDisable = async (orgId) => {
   });
   return reachable > 0;
 };
+
+// Superadmins who could still sign in and act: enabled, and not in a disabled
+// organization (nor in `blockedOrgId`, the one about to be disabled). Only a
+// superadmin can grant admin rights, cancel billing, delete organizations or
+// read the audit log, so no action may leave the platform without one — the
+// generic last-admin guards count plain admins too and do not prevent that.
+// Recovery would otherwise need a script run against production.
+const reachableSuperadmins = async ({ excludeUserId = null, blockedOrgId = null } = {}) => {
+  const disabledOrgs = await Organization.find({ isDisabled: true }, { _id: 1 }).lean();
+  const blocked = disabledOrgs.map((o) => o._id);
+  if (blockedOrgId) blocked.push(blockedOrgId);
+  const query = {
+    systemRole: 'superadmin',
+    isDisabled: { $ne: true },
+    $or: [
+      { organizationId: null },
+      { organizationId: { $exists: false } },
+      { organizationId: { $nin: blocked } },
+    ],
+  };
+  if (excludeUserId) query._id = { $ne: excludeUserId };
+  return User.countDocuments(query);
+};
+
+/** True when `target` is an enabled superadmin and nobody else could take over. */
+const isLastSuperadmin = async (target) =>
+  target.systemRole === 'superadmin' && !target.isDisabled &&
+  (await reachableSuperadmins({ excludeUserId: target._id })) === 0;
+
+const lastSuperadmin = (res) =>
+  res.status(409).json({
+    success: false,
+    code: 'ADMIN_LAST_SUPERADMIN',
+    error: 'This would leave no superadmin able to sign in',
+  });
+
 const superadminRequired = (res) =>
   res.status(403).json({
     success: false,
     code: 'ADMIN_SUPERADMIN_REQUIRED',
-    error: 'Only a superadmin can manage administrator accounts',
+    error: 'Only a superadmin can perform this action',
   });
+
+const reauthRequired = (res) =>
+  res.status(403).json({
+    success: false,
+    code: 'ADMIN_REAUTH_REQUIRED',
+    error: 'Recent sign-in required for this action',
+  });
+
+// An audit row could not be written, so the action was refused (fail closed).
+const auditUnavailable = (res) =>
+  res.status(503).json({
+    success: false,
+    code: 'ADMIN_AUDIT_FAILED',
+    error: 'Action refused: the audit record could not be written',
+  });
+
+// Destructive actions need a sign-in within RECENT_AUTH_MAX_AGE_MS. Checked
+// after the permission checks, so a caller who may not act at all is told so
+// (and the attempt audited) rather than being sent to sign in again.
+const hasRecentAuth = (req) => isRecentAuth(req, RECENT_AUTH_MAX_AGE_MS);
+
+// A Stripe "no such subscription" means nothing is billing; anything else is a
+// real failure the caller must not proceed past.
+const isStripeMissing = (err) =>
+  !!err && (err.code === 'resource_missing' || err.statusCode === 404);
+
+// Run independent dashboard queries. A failed one becomes `null` and is named in
+// `unavailable`, so one failure neither blanks the whole tab nor shows up as a
+// plausible 0 — the UI renders null as "unavailable". If every query failed the
+// database is down, and the caller answers with an error instead.
+async function settleMetrics(tasks) {
+  const names = Object.keys(tasks);
+  const settled = await Promise.allSettled(names.map((n) => tasks[n]()));
+  const values = {};
+  const unavailable = [];
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      values[names[i]] = r.value;
+    } else {
+      values[names[i]] = null;
+      unavailable.push(names[i]);
+      console.error(`❌ [admin] metric ${names[i]} failed:`, r.reason && r.reason.message);
+    }
+  });
+  return { values, unavailable, allFailed: unavailable.length === names.length };
+}
+
+// The plan an organization is on right now, for plan distributions: its stored
+// plan while that plan grants access (active, trialing, cancelling — paid until
+// the period ends — or a legacy one-time org), 'lapsed' when a plan is still
+// stored but no longer grants access (expired, past_due, canceled … before the
+// reconcile sweep clears it), and null (Free) when there is no plan. Grouping by
+// the stored planType alone counted lapsed customers as paying ones.
+const PLAN_IN_EFFECT_STATES = ['active', 'trialing', 'cancelling', 'onetime'];
+const planBucket = (org, now) => {
+  if (!org.planType) return null;
+  return PLAN_IN_EFFECT_STATES.includes(subscriptionState(org, now)) ? org.planType : 'lapsed';
+};
+const planDistributionOf = (orgs, now) => {
+  const counts = new Map();
+  for (const org of orgs) {
+    const key = planBucket(org, now);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].map(([_id, count]) => ({ _id, count })).sort((a, b) => b.count - a.count);
+};
+const PLAN_STATE_FIELDS = 'planType billingCycle subscriptionStatus expiresAt cancelAtPeriodEnd';
 
 // Apply auth + adminAuth to ALL routes in this router
 router.use(auth, adminAuth);
 
 // ── GET /api/admin/kpis ────────────────────────────────────────────────────────
-// Aggregate platform-level KPI statistics for the dashboard overview.
+// Aggregate platform-level KPI statistics for the dashboard overview. Each
+// figure is queried independently; one that fails is null (see settleMetrics).
 router.get('/kpis', async (req, res) => {
   try {
-    const [
-      totalUsers,
-      verifiedUsers,
-      activeOrgs,
-      totalOrgs,
-      totalScansAggregate,
-      runningScans,
-      recentUsers,
-    ] = await Promise.all([
-      User.countDocuments({}),
-      User.countDocuments({ isVerified: true }),
-      Organization.countDocuments({ subscriptionStatus: 'active' }),
-      Organization.countDocuments({}),
-      User.aggregate([{ $group: { _id: null, total: { $sum: '$totalScans' } } }]),
-      ScanResult.countDocuments({ status: { $in: ['queued', 'pending', 'combining'] } }),
-      User.find({}).sort({ createdAt: -1 }).limit(5).select('name email createdAt systemRole accountType').lean(),
-    ]);
-
-    // Plan distribution
-    const planDistribution = await Organization.aggregate([
-      { $group: { _id: '$planType', count: { $sum: 1 } } },
-      { $sort: { count: -1 } }
-    ]);
-
-    // Same .lean()-bypasses-schema-defaults gap as GET /users — normalize here too.
-    const normalizedRecentUsers = recentUsers.map((u) => ({ ...u, systemRole: u.systemRole || 'user' }));
+    const now = new Date();
+    const { values: v, unavailable, allFailed } = await settleMetrics({
+      totalUsers: () => User.countDocuments({}),
+      verifiedUsers: () => User.countDocuments({ isVerified: true }),
+      // Paid access right now, by the same rule that grants it
+      // (utils/entitlement.js) — not the raw 'active' status, which outlives the
+      // paid period until the reconcile sweep catches up.
+      activeOrgs: () => Organization.countDocuments({ ...NOT_DELETED, ...entitlementFilter(now) }),
+      totalOrgs: () => Organization.countDocuments(NOT_DELETED),
+      // Lifetime completed scans. Organization.totalScansAllTime is incremented
+      // on every billing path (planService) and never expires; ScanResult keeps
+      // only 7 days. Soft-deleted organizations are included: their scans ran.
+      // Users without an organization cannot start scans (planCheck), so this
+      // covers every completed scan since the counter was introduced. No
+      // organizations at all is a genuine 0.
+      totalScansAllTime: async () => {
+        const agg = await Organization.aggregate([{ $group: { _id: null, total: { $sum: '$totalScansAllTime' } } }]);
+        return agg.length ? agg[0].total || 0 : 0;
+      },
+      runningScans: () => ScanResult.countDocuments({ status: { $in: IN_FLIGHT_SCAN_STATUSES } }),
+      // .lean() bypasses schema defaults — normalize like GET /users.
+      recentUsers: async () => (await User.find({}).sort({ createdAt: -1 }).limit(5)
+        .select('name email createdAt systemRole').lean())
+        .map((u) => ({ ...u, systemRole: u.systemRole || 'user' })),
+      planDistribution: async () => planDistributionOf(
+        await Organization.find(NOT_DELETED).select(PLAN_STATE_FIELDS).lean(), now),
+    });
+    if (allFailed) throw new Error('every KPI query failed');
 
     res.json({
       success: true,
       kpis: {
-        totalUsers,
-        verifiedUsers,
-        activeOrgs,
-        totalOrgs,
-        totalScansAllTime: totalScansAggregate[0]?.total || 0,
-        runningScans,
+        totalUsers: v.totalUsers,
+        verifiedUsers: v.verifiedUsers,
+        // `activeOrgs` kept as the field name the UI already reads.
+        activeOrgs: v.activeOrgs,
+        totalOrgs: v.totalOrgs,
+        totalScansAllTime: v.totalScansAllTime,
+        runningScans: v.runningScans,
       },
-      planDistribution,
-      recentUsers: normalizedRecentUsers,
+      planDistribution: v.planDistribution,
+      recentUsers: v.recentUsers,
+      unavailable,
+      generatedAt: now.toISOString(),
     });
   } catch (err) {
     console.error('❌ [admin/kpis]', err.message);
@@ -137,9 +295,12 @@ router.get('/kpis', async (req, res) => {
 // Paginated list of all users with optional search and filters.
 router.get('/users', async (req, res) => {
   try {
-    const { page = 1, limit = 20, search = '', role = '', systemRole = '' } = req.query;
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const paging = pageParams(req.query);
+    const search = qstr(req.query.search);
+    const role = qstr(req.query.role);
+    const systemRole = qstr(req.query.systemRole);
+    if (role && !ORG_ROLES.includes(role)) return badFilter(res);
+    if (systemRole && !SYSTEM_ROLES.includes(systemRole)) return badFilter(res);
 
     const query = {};
     if (search) {
@@ -149,35 +310,50 @@ router.get('/users', async (req, res) => {
       ];
     }
     if (role) query.role = role;
-    if (systemRole) query.systemRole = systemRole;
+    if (systemRole === 'user') {
+      // Documents created before systemRole existed have no such key at all.
+      query.systemRole = { $in: ['user', null] };
+    } else if (systemRole) {
+      query.systemRole = systemRole;
+    }
 
     const [total, users] = await Promise.all([
       User.countDocuments(query),
       User.find(query)
         .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * limitNum)
-        .limit(limitNum)
-        .select('name email role systemRole accountType planType isVerified isDisabled createdAt lastLoginAt organizationId totalScans')
-        .populate('organizationId', 'planType subscriptionStatus')
+        .skip(paging.skip)
+        .limit(paging.limitNum)
+        .select('name email role systemRole isVerified isDisabled createdAt lastLoginAt organizationId')
+        .populate('organizationId', 'name planType billingCycle subscriptionStatus expiresAt cancelAtPeriodEnd')
         .lean(),
     ]);
 
+    const now = new Date();
     // .lean() returns raw MongoDB documents, bypassing Mongoose's schema-default
     // injection — documents created before systemRole existed have no such key
     // at all. Normalize here so the API contract guarantees systemRole is always
     // a string, matching the schema default (see backfillSystemRole.js for the
     // one-time data migration that fixed existing documents).
-    const normalizedUsers = users.map((u) => ({ ...u, systemRole: u.systemRole || 'user', isDisabled: u.isDisabled || false }));
+    const normalizedUsers = users.map(({ organizationId: org, ...u }) => ({
+      ...u,
+      systemRole: u.systemRole || 'user',
+      isDisabled: u.isDisabled || false,
+      lastLoginAt: u.lastLoginAt || null,
+      organizationId: org ? org._id : null,
+      // The plan shown for a user is their organization's, with its real state
+      // (a lapsed subscription reads as expired, not as a paid plan).
+      organization: org ? {
+        _id: org._id,
+        name: org.name,
+        planType: org.planType || null,
+        subscriptionState: subscriptionState(org, now),
+      } : null,
+    }));
 
     res.json({
       success: true,
       users: normalizedUsers,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
-      },
+      pagination: paginationOf(paging, total),
     });
   } catch (err) {
     console.error('❌ [admin/users]', err.message);
@@ -189,23 +365,27 @@ router.get('/users', async (req, res) => {
 // Paginated list of all organizations with usage statistics.
 router.get('/organizations', async (req, res) => {
   try {
-    const { page = 1, limit = 20, search = '', plan = '', status = '' } = req.query;
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const paging = pageParams(req.query);
+    const search = qstr(req.query.search);
+    const plan = qstr(req.query.plan);
+    const status = qstr(req.query.status);
+    if (plan && !PLAN_FILTERS.includes(plan)) return badFilter(res);
+    if (status && !/^[a-z_]+$/.test(status)) return badFilter(res);
 
-    const query = {};
+    const query = { ...NOT_DELETED };
     if (search) {
       query.name = { $regex: escapeRegex(search), $options: 'i' };
     }
-    if (plan) query.planType = plan;
+    if (plan === 'free') query.planType = null;
+    else if (plan) query.planType = plan;
     if (status) query.subscriptionStatus = status;
 
     const [total, orgs] = await Promise.all([
       Organization.countDocuments(query),
       Organization.find(query)
         .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * limitNum)
-        .limit(limitNum)
+        .skip(paging.skip)
+        .limit(paging.limitNum)
         // Explicit projection, matching every other list query in this file.
         // Without it the whole document went to the browser, including
         // stripeCustomerId / stripeSubscriptionId / stripeCheckoutSessionId,
@@ -227,25 +407,26 @@ router.get('/organizations', async (req, res) => {
       ownerMap[String(u.organizationId)] = { name: u.name, email: u.email };
     });
 
+    const now = new Date();
     // stripeSubscriptionId is destructured OUT rather than spread: the table
     // only needs to know whether a cancellable subscription exists, so send a
     // boolean instead of the Stripe identifier.
     const enriched = orgs.map(({ stripeSubscriptionId, ...o }) => ({
       ...o,
       isDisabled: o.isDisabled || false,
+      // The stored scansUsed is reset only when the org next scans, so it can
+      // be last month's figure; this is the current UTC billing month's.
+      scansUsedThisMonth: scansUsedThisMonth(o, now),
       owner: ownerMap[String(o._id)] || null,
       hasSubscription: Boolean(stripeSubscriptionId),
+      subscriptionState: subscriptionState(o, now),
+      cancellable: isCancellable({ ...o, stripeSubscriptionId }, now),
     }));
 
     res.json({
       success: true,
       organizations: enriched,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
-      },
+      pagination: paginationOf(paging, total),
     });
   } catch (err) {
     console.error('❌ [admin/organizations]', err.message);
@@ -255,11 +436,14 @@ router.get('/organizations', async (req, res) => {
 
 // ── GET /api/admin/scans ───────────────────────────────────────────────────────
 // Paginated list of all scans across all users with status filter.
+// Scans exist for 7 days (ScanResult TTL). Failed/stopped scans keep their
+// lightweight record for that period; their heavy artifacts are purged hourly
+// (jobs/cleanupJob.js).
 router.get('/scans', async (req, res) => {
   try {
-    const { page = 1, limit = 20, status = '' } = req.query;
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const paging = pageParams(req.query);
+    const status = qstr(req.query.status);
+    if (status && !SCAN_STATUSES.includes(status)) return badFilter(res);
 
     const query = {};
     if (status) query.status = status;
@@ -268,14 +452,14 @@ router.get('/scans', async (req, res) => {
       ScanResult.countDocuments(query),
       ScanResult.find(query)
         .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * limitNum)
-        .limit(limitNum)
+        .skip(paging.skip)
+        .limit(paging.limitNum)
         // zapResult and webCheckResult are deliberately NOT selected. They are
         // untyped Object columns holding entire scan payloads (ZAP alert arrays,
         // WebCheck results); this handler never reads them and AdminScans.jsx
         // never renders them, so selecting them shipped every customer's full
         // vulnerability detail to the browser — up to 100 rows per request.
-        .select('analysisId target status userId createdAt updatedAt')
+        .select('analysisId target status failureReason userId createdAt updatedAt')
         .lean(),
     ]);
 
@@ -290,23 +474,27 @@ router.get('/scans', async (req, res) => {
       userMap[String(u._id)] = { name: u.name, email: u.email, plan: u.organizationId?.planType || 'free' };
     });
 
-    const enriched = scans.map((s) => ({
-      ...s,
-      user: userMap[String(s.userId)] || null,
-      duration: s.updatedAt && s.createdAt
-        ? Math.round((new Date(s.updatedAt) - new Date(s.createdAt)) / 1000)
-        : null,
-    }));
+    const now = Date.now();
+    const enriched = scans.map((s) => {
+      const inProgress = IN_FLIGHT_SCAN_STATUSES.includes(s.status);
+      const created = s.createdAt ? new Date(s.createdAt).getTime() : null;
+      const updated = s.updatedAt ? new Date(s.updatedAt).getTime() : null;
+      return {
+        ...s,
+        user: userMap[String(s.userId)] || null,
+        inProgress,
+        // Finished scans: time to their last update (there is no separate
+        // completion timestamp). Running scans: time elapsed so far — the old
+        // updatedAt-based figure showed "time since the last progress write".
+        duration: !inProgress && created && updated ? Math.max(0, Math.round((updated - created) / 1000)) : null,
+        elapsed: inProgress && created ? Math.max(0, Math.round((now - created) / 1000)) : null,
+      };
+    });
 
     res.json({
       success: true,
       scans: enriched,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
-      },
+      pagination: paginationOf(paging, total),
     });
   } catch (err) {
     console.error('❌ [admin/scans]', err.message);
@@ -315,132 +503,22 @@ router.get('/scans', async (req, res) => {
 });
 
 // ── GET /api/admin/system-health ──────────────────────────────────────────────
-// Reports the health status of all integrated services.
+// Health of the services Fortexa runs on in production. The service list,
+// check methods, timeouts and status meanings live in config/healthInventory.js;
+// the checks themselves in services/systemHealth.js (read-only, time-boxed,
+// concurrent, sanitized, briefly cached). `?service=<id>` re-checks one
+// inventory service now — the only thing a caller can choose.
+const systemHealth = require('../services/systemHealth');
+const { SERVICE_IDS: HEALTH_SERVICE_IDS } = require('../config/healthInventory');
+
 router.get('/system-health', async (req, res) => {
   try {
-    const mem = process.memoryUsage();
-    const checks = {
-      server: {
-        status: 'online',
-        uptimeSeconds: Math.floor(process.uptime()),
-        memoryMB: Math.round(mem.heapUsed / 1048576),
-        memoryTotalMB: Math.round(mem.heapTotal / 1048576),
-        rssMB: Math.round(mem.rss / 1048576),
-        nodeVersion: process.version,
-      },
-    };
-
-    // MongoDB
-    const mongoState = mongoose.connection.readyState;
-    const mongoStateLabel = ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoState] ?? String(mongoState);
-    checks.mongodb = {
-      status: mongoState === 1 ? 'online' : 'offline',
-      state: mongoStateLabel,
-    };
-    if (mongoState === 1) {
-      try {
-        const dbStats = await mongoose.connection.db.stats();
-        checks.mongodb.collections = dbStats.collections;
-        checks.mongodb.storageMB = Math.round((dbStats.storageSize || 0) / 1048576);
-        checks.mongodb.dataFileMB = Math.round((dbStats.dataSize || 0) / 1048576);
-      } catch (_) { }
-    }
-
-    // Redis
-    if (process.env.REDIS_URL) {
-      try {
-        const { getPublisher } = require('../config/redis');
-        const pub = getPublisher();
-        if (pub && pub.status === 'ready') {
-          let latencyMs = null;
-          try {
-            const start = Date.now();
-            await pub.ping();
-            latencyMs = Date.now() - start;
-          } catch (_) { }
-          checks.redis = { status: 'online', latencyMs };
-        } else {
-          checks.redis = { status: 'offline', state: pub ? pub.status : 'unavailable' };
-        }
-      } catch (e) {
-        checks.redis = { status: 'offline', error: e.message };
-      }
-    } else {
-      checks.redis = { status: 'not_configured' };
-    }
-
-    // WebCheck container
-    try {
-      const { checkHealth } = require('../services/webCheckService');
-      const start = Date.now();
-      const ok = await checkHealth();
-      checks.webcheck = { status: ok ? 'online' : 'offline', latencyMs: Date.now() - start };
-    } catch (e) {
-      checks.webcheck = { status: 'offline', error: e.message };
-    }
-
-    // ZAP (standard scanner on port 8080)
-    try {
-      const axios = require('axios');
-      const zapUrl = process.env.ZAP_API_URL || 'http://127.0.0.1:8080';
-      const start = Date.now();
-      const resp = await axios.get(`${zapUrl}/JSON/core/view/version/`, { timeout: 3000 });
-      checks.zap = {
-        status: resp.data?.version ? 'online' : 'offline',
-        version: resp.data?.version,
-        latencyMs: Date.now() - start,
-      };
-    } catch (e) {
-      checks.zap = { status: 'offline', error: e.message };
-    }
-
-    // ZAP Auth scanner — same env var the auth scan service itself uses
-    // (services/zapAuthService.js); loopback is only the local-compose default.
-    try {
-      const axios = require('axios');
-      const zapAuthUrl = process.env.ZAP_AUTH_API_URL || 'http://127.0.0.1:8081';
-      const start = Date.now();
-      const resp = await axios.get(`${zapAuthUrl}/JSON/core/view/version/`, { timeout: 3000 });
-      checks.zapAuth = {
-        status: resp.data?.version ? 'online' : 'offline',
-        version: resp.data?.version,
-        latencyMs: Date.now() - start,
-      };
-    } catch (e) {
-      checks.zapAuth = { status: 'offline', error: e.message };
-    }
-
-    // Gemini API (check key presence only — don't make API call to avoid quota)
-    checks.gemini = {
-      status: process.env.GEMINI_API_KEY ? 'configured' : 'not_configured',
-    };
-
-    // Google PageSpeed Insights
-    checks.pagespeed = {
-      status: process.env.PSI_API_KEY ? 'configured' : 'not_configured',
-    };
-
-    // urlscan.io
-    checks.urlscan = {
-      status: process.env.URLSCAN_API_KEY ? 'configured' : 'not_configured',
-    };
-
-    // BullMQ (check if queue can be reached via Redis)
-    try {
-      const { getScanQueue } = require('../queues/scanQueue');
-      const queue = getScanQueue ? getScanQueue() : null;
-      if (queue) {
-        const counts = await queue.getJobCounts('waiting', 'active', 'completed', 'failed');
-        checks.bullmq = { status: 'online', ...counts };
-      } else {
-        checks.bullmq = { status: 'unavailable' };
-      }
-    } catch (e) {
-      checks.bullmq = { status: checks.redis.status === 'online' ? 'unavailable' : 'offline', error: e.message };
-    }
-
-
-    res.json({ success: true, checks, timestamp: new Date().toISOString() });
+    const { service } = req.query;
+    if (service !== undefined && typeof service !== 'string') return badFilter(res);
+    const retry = qstr(service);
+    if (retry && !HEALTH_SERVICE_IDS.includes(retry)) return badFilter(res);
+    const report = await systemHealth.getReport({ retry: retry || null });
+    res.json({ success: true, ...report });
   } catch (err) {
     console.error('❌ [admin/system-health]', err.message);
     res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch system health', details: devMsg(err) });
@@ -455,20 +533,17 @@ router.get('/system-health', async (req, res) => {
 //   1. There is no invoice/transaction table anywhere — Stripe webhooks only
 //      ever write planType/subscriptionStatus/expiresAt, never amount_paid.
 //      So there is no "revenue" figure to report. `estimatedRecurringValue`
-//      is explicitly an ESTIMATE: (count of orgs with subscriptionStatus
-//      'active' on each plan) × (that plan's published list price, normalized
-//      to a monthly figure). It does not reflect discounts, proration, failed
-//      payments, or refunds — none of which are recorded anywhere.
+//      is explicitly an ESTIMATE: (count of organizations whose subscription
+//      grants paid access right now, by utils/entitlement.js, on each plan) ×
+//      (that plan's published list price, normalized to a monthly figure). It
+//      does not reflect discounts, proration, failed payments, or refunds —
+//      none of which are recorded anywhere.
 //   2. ScanResult.createdAt has a 7-day TTL index (see models/ScanResult.js) —
 //      MongoDB physically deletes scan documents after 7 days, so scan
 //      activity can only ever be reported as a 7-day rolling window, never a
 //      monthly/quarterly trend.
 // ════════════════════════════════════════════════════════════════════════════
 
-// Published list prices (¥), matching the pricing table in CLAUDE.md and the
-// PLANS constant in frontend/src/pages/Profile.jsx exactly. Monthly-equivalent
-// is annual ÷ 12, used only to make monthly and annual subscribers comparable
-// on one chart — it is not a discount calculation.
 // Prices come from the plan catalog. monthlyEquivalent returns 0 for trial1/trial2:
 // they are one-time purchases, not recurring revenue, and are excluded by design.
 const { monthlyEquivalent } = require('../config/planCatalog');
@@ -476,14 +551,11 @@ const { monthlyEquivalent } = require('../config/planCatalog');
 // Produces a continuous [{ date: 'YYYY-MM-DD', count }] series for the last N
 // days (inclusive of today), filling in zero for days with no matching docs —
 // so a trend line never silently skips a day with no activity.
-const fillDailySeries = (rawCounts, days) => {
+const fillDailySeries = (rawCounts, days, startOfToday) => {
   const map = new Map(rawCounts.map((r) => [r._id, r.count]));
   const series = [];
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setUTCHours(0, 0, 0, 0);
-    d.setUTCDate(d.getUTCDate() - i);
-    const key = d.toISOString().slice(0, 10);
+    const key = new Date(startOfToday.getTime() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     series.push({ date: key, count: map.get(key) || 0 });
   }
   return series;
@@ -492,98 +564,122 @@ const fillDailySeries = (rawCounts, days) => {
 router.get('/analytics', async (req, res) => {
   try {
     const now = new Date();
-    const since30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const since7 = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    // Day boundaries are UTC: the 30-day window starts at 00:00 UTC 29 days ago,
+    // so every bucket in the series is a whole day (the old rolling 30×24 h
+    // window cut the first day short).
+    const startOfToday = new Date(now);
+    startOfToday.setUTCHours(0, 0, 0, 0);
+    const since30 = new Date(startOfToday.getTime() - 29 * 24 * 60 * 60 * 1000);
+    const since7 = new Date(startOfToday.getTime() - 6 * 24 * 60 * 60 * 1000);
+    const monthStart = startOfUtcMonth(now);
     const dayFormat = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'UTC' } };
 
-    const [
-      userGrowthRaw,
-      orgGrowthRaw,
-      planDistribution,
-      subscriptionStatusDistribution,
-      activeOrgsForValue,
-      scanActivityRaw,
-      topOrgsByUsage,
-    ] = await Promise.all([
-      User.aggregate([
+    // Independent queries; a failed one leaves its sections null (settleMetrics).
+    const { values: q, unavailable: failedQueries, allFailed } = await settleMetrics({
+      userGrowthRaw: () => User.aggregate([
         { $match: { createdAt: { $gte: since30 } } },
         { $group: { _id: dayFormat, count: { $sum: 1 } } },
       ]),
-      Organization.aggregate([
+      // Registrations that happened, including organizations deleted since.
+      orgGrowthRaw: () => Organization.aggregate([
         { $match: { createdAt: { $gte: since30 } } },
         { $group: { _id: dayFormat, count: { $sum: 1 } } },
       ]),
-      Organization.aggregate([
-        { $group: { _id: '$planType', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      Organization.aggregate([
-        { $group: { _id: '$subscriptionStatus', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      Organization.find({ subscriptionStatus: 'active' })
+      orgsForState: () => Organization.find(NOT_DELETED).select(PLAN_STATE_FIELDS).lean(),
+      activeOrgsForValue: () => Organization.find({ ...NOT_DELETED, ...entitlementFilter(now) })
         .select('planType billingCycle')
         .lean(),
-      ScanResult.aggregate([
+      scanActivityRaw: () => ScanResult.aggregate([
         { $match: { createdAt: { $gte: since7 } } },
         { $group: { _id: { day: dayFormat, status: '$status' }, count: { $sum: 1 } } },
       ]),
-      Organization.find({ scansUsed: { $gt: 0 } })
+      // Usage this UTC billing month. planService resets scansUsed only when an
+      // org next scans, so an org whose counters were last reset in an earlier
+      // month has used 0 this month whatever the stored figure says.
+      topOrgsByUsage: () => Organization.find({ ...NOT_DELETED, scansUsed: { $gt: 0 }, lastScanReset: { $gte: monthStart } })
         .sort({ scansUsed: -1 })
         .limit(8)
-        .select('name planType scansUsed scanLimit seatsUsed seatsAllowed')
+        .select('name planType scansUsed scanLimit seatsUsed seatsAllowed lastScanReset')
         .lean(),
-    ]);
+    });
+    if (allFailed) throw new Error('every analytics query failed');
+
+    // ── Subscription health: the computed state, not the raw Stripe status ──
+    let subscriptionStatusDistribution = null;
+    if (q.orgsForState) {
+      const stateCounts = {};
+      for (const org of q.orgsForState) {
+        const state = subscriptionState(org, now);
+        stateCounts[state] = (stateCounts[state] || 0) + 1;
+      }
+      subscriptionStatusDistribution = Object.entries(stateCounts)
+        .map(([_id, count]) => ({ _id, count }))
+        .sort((a, b) => b.count - a.count);
+    }
 
     // ── Estimated recurring value (see disclaimer in the comment block above) ──
-    let estimatedRecurringValueTotal = 0;
-    const estimatedRecurringValueByPlan = {};
-    for (const org of activeOrgsForValue) {
-      const value = monthlyEquivalent(org.planType, org.billingCycle);
-      estimatedRecurringValueTotal += value;
-      if (value > 0) {
-        estimatedRecurringValueByPlan[org.planType] = (estimatedRecurringValueByPlan[org.planType] || 0) + value;
+    let estimatedRecurringValue = null;
+    if (q.activeOrgsForValue) {
+      let total = 0;
+      const byPlan = {};
+      for (const org of q.activeOrgsForValue) {
+        const value = monthlyEquivalent(org.planType, org.billingCycle);
+        total += value;
+        if (value > 0) byPlan[org.planType] = (byPlan[org.planType] || 0) + value;
       }
+      estimatedRecurringValue = { total, byPlan, activeOrgCount: q.activeOrgsForValue.length };
     }
 
     // ── Reshape scan activity into one row per day with a column per status ──
-    const scanStatusKeys = ['queued', 'pending', 'combining', 'completed', 'failed', 'stopped', 'cancelled'];
-    const scanByDay = new Map();
-    for (const row of scanActivityRaw) {
-      const { day, status } = row._id;
-      if (!scanByDay.has(day)) {
-        const base = { date: day, total: 0 };
-        scanStatusKeys.forEach((k) => { base[k] = 0; });
-        scanByDay.set(day, base);
+    let scanActivity = null;
+    if (q.scanActivityRaw) {
+      const scanByDay = new Map();
+      for (const row of q.scanActivityRaw) {
+        const { day, status } = row._id;
+        if (!scanByDay.has(day)) {
+          const base = { date: day, total: 0 };
+          SCAN_STATUSES.forEach((k) => { base[k] = 0; });
+          scanByDay.set(day, base);
+        }
+        const entry = scanByDay.get(day);
+        entry[status] = (entry[status] || 0) + row.count;
+        entry.total += row.count;
       }
-      const entry = scanByDay.get(day);
-      entry[status] = (entry[status] || 0) + row.count;
-      entry.total += row.count;
+      scanActivity = [];
+      for (let i = 6; i >= 0; i--) {
+        const key = new Date(startOfToday.getTime() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const base = { date: key, total: 0 };
+        SCAN_STATUSES.forEach((k) => { base[k] = 0; });
+        scanActivity.push(scanByDay.get(key) || base);
+      }
     }
-    const scanActivity = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setUTCHours(0, 0, 0, 0);
-      d.setUTCDate(d.getUTCDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      const base = { date: key, total: 0 };
-      scanStatusKeys.forEach((k) => { base[k] = 0; });
-      scanActivity.push(scanByDay.get(key) || base);
-    }
+
+    // Response field → the query it depends on, so the UI can mark exactly
+    // which sections could not be loaded.
+    const DEPENDS = {
+      userGrowth: 'userGrowthRaw',
+      organizationGrowth: 'orgGrowthRaw',
+      planDistribution: 'orgsForState',
+      subscriptionStatusDistribution: 'orgsForState',
+      estimatedRecurringValue: 'activeOrgsForValue',
+      scanActivity: 'scanActivityRaw',
+      topOrgsByUsage: 'topOrgsByUsage',
+    };
+    const unavailable = Object.keys(DEPENDS).filter((k) => failedQueries.includes(DEPENDS[k]));
 
     res.json({
       success: true,
-      userGrowth: fillDailySeries(userGrowthRaw, 30),
-      organizationGrowth: fillDailySeries(orgGrowthRaw, 30),
-      planDistribution,
+      userGrowth: q.userGrowthRaw ? fillDailySeries(q.userGrowthRaw, 30, startOfToday) : null,
+      organizationGrowth: q.orgGrowthRaw ? fillDailySeries(q.orgGrowthRaw, 30, startOfToday) : null,
+      planDistribution: q.orgsForState ? planDistributionOf(q.orgsForState, now) : null,
       subscriptionStatusDistribution,
-      estimatedRecurringValue: {
-        total: estimatedRecurringValueTotal,
-        byPlan: estimatedRecurringValueByPlan,
-        activeOrgCount: activeOrgsForValue.length,
-      },
+      estimatedRecurringValue,
       scanActivity,
-      topOrgsByUsage,
+      topOrgsByUsage: q.topOrgsByUsage
+        ? q.topOrgsByUsage.map(({ lastScanReset, ...o }) => ({ ...o, scansUsedThisMonth: scansUsedThisMonth({ ...o, lastScanReset }, now) }))
+        : null,
+      unavailable,
+      generatedAt: now.toISOString(),
     });
   } catch (err) {
     console.error('❌ [admin/analytics]', err.message);
@@ -591,13 +687,50 @@ router.get('/analytics', async (req, res) => {
   }
 });
 
+// ── GET /api/admin/audit-log ───────────────────────────────────────────────────
+// Read-only history of admin actions. Superadmin only: it shows what every
+// administrator did, which is the superadmin's oversight job.
+router.get('/audit-log', async (req, res) => {
+  try {
+    if (!isSuperadmin(req)) return superadminRequired(res);
+    const paging = pageParams(req.query);
+    const action = qstr(req.query.action);
+    const targetId = qstr(req.query.targetId);
+    if (action && !AdminAuditLog.ACTIONS.includes(action)) return badFilter(res);
+    if (targetId && !mongoose.Types.ObjectId.isValid(targetId)) return badFilter(res);
+
+    const query = {};
+    if (action) query.action = action;
+    if (targetId) query.targetId = targetId;
+
+    const [total, entries] = await Promise.all([
+      AdminAuditLog.countDocuments(query),
+      AdminAuditLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip(paging.skip)
+        .limit(paging.limitNum)
+        .select('actorType actorEmail actorRole operator ticket action targetType targetId targetLabel result errorCode createdAt completedAt')
+        .lean(),
+    ]);
+
+    res.json({ success: true, entries, pagination: paginationOf(paging, total) });
+  } catch (err) {
+    console.error('❌ [admin/audit-log]', err.message);
+    res.status(500).json({ success: false, code: 'ADMIN_FETCH_FAILED', error: 'Failed to fetch audit log', details: devMsg(err) });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // MUTATION ENDPOINTS — user & organization lifecycle management
+//
+// Pattern for every mutation: validate → permission checks (denials recorded) →
+// beginAdminAction (a pending audit row; if it cannot be written the action is
+// refused) → mutate → finishAdminAction with the outcome.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ── PATCH /api/admin/users/:id ─────────────────────────────────────────────────
-// Partial update — only the fields present in the body are changed.
-// Body: { systemRole?: 'user'|'admin'|'superadmin', isDisabled?: boolean }
+// Exactly one change per request.
+// Body: { systemRole: 'user'|'admin'|'superadmin' }  or  { isDisabled: boolean }
 router.patch('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -605,11 +738,25 @@ router.patch('/users/:id', async (req, res) => {
       return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid user id' });
     }
 
+    const { systemRole, isDisabled } = req.body || {};
+    if ((systemRole === undefined) === (isDisabled === undefined)) {
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'Send exactly one of systemRole or isDisabled' });
+    }
+    if (systemRole !== undefined && !SYSTEM_ROLES.includes(systemRole)) {
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ROLE', error: 'Invalid systemRole' });
+    }
+    if (isDisabled !== undefined && typeof isDisabled !== 'boolean') {
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
+    }
+
     const target = await User.findById(id);
     if (!target) return res.status(404).json({ success: false, code: 'ADMIN_USER_NOT_FOUND', error: 'User not found' });
 
-    const { systemRole, isDisabled } = req.body;
     const isSelf = String(target._id) === String(req.adminUser._id);
+    const action = systemRole !== undefined
+      ? 'user.role_change'
+      : (isDisabled ? 'user.disable' : 'user.enable');
+    const auditTarget = { action, targetType: 'user', targetId: target._id, targetLabel: target.email };
 
     const assertNotLastAdmin = async () => {
       const otherAdmins = await User.countDocuments({
@@ -621,45 +768,64 @@ router.patch('/users/:id', async (req, res) => {
     };
 
     if (systemRole !== undefined) {
-      if (!['user', 'admin', 'superadmin'].includes(systemRole)) {
-        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ROLE', error: 'Invalid systemRole' });
-      }
       if (isSelf) {
         return res.status(403).json({ success: false, code: 'ADMIN_SELF_ROLE', error: 'You cannot change your own system role' });
       }
       // Granting OR revoking an admin role is a superadmin-only action.
       if (req.adminUser.systemRole !== 'superadmin' &&
           (holdsAdminRole(target) || ADMIN_CAPABLE_ROLES.includes(systemRole))) {
+        await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
         return superadminRequired(res);
       }
+      // Changing who holds admin rights is destructive enough to need a fresh sign-in.
+      if (!hasRecentAuth(req)) return reauthRequired(res);
       const willLoseAdmin = isActiveAdmin(target) && !ADMIN_CAPABLE_ROLES.includes(systemRole);
       if (willLoseAdmin && !(await assertNotLastAdmin())) {
         return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot remove the last remaining administrator' });
       }
-      target.systemRole = systemRole;
-    }
-
-    if (isDisabled !== undefined) {
-      if (typeof isDisabled !== 'boolean') {
-        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
-      }
+      if (systemRole !== 'superadmin' && (await isLastSuperadmin(target))) return lastSuperadmin(res);
+    } else {
       if (isSelf && isDisabled) {
         return res.status(403).json({ success: false, code: 'ADMIN_SELF_DISABLE', error: 'You cannot disable your own account' });
       }
       if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+        await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
         return superadminRequired(res);
       }
       if (isDisabled && isActiveAdmin(target) && !(await assertNotLastAdmin())) {
         return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot disable the last remaining administrator' });
       }
-      target.isDisabled = isDisabled;
+      if (isDisabled && (await isLastSuperadmin(target))) return lastSuperadmin(res);
     }
 
-    await target.save();
+    const before = systemRole !== undefined
+      ? { systemRole: target.systemRole || 'user' }
+      : { isDisabled: Boolean(target.isDisabled) };
+    let audit;
+    try {
+      audit = await beginAdminAction(req, { ...auditTarget, before });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
+
+    try {
+      if (systemRole !== undefined) target.systemRole = systemRole;
+      else target.isDisabled = isDisabled;
+      await target.save();
+    } catch (err) {
+      await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_ACTION_FAILED' });
+      throw err;
+    }
+
     // Make the change effective on the target's very next request rather than
     // waiting out the auth-middleware cache TTL.
     invalidatePrincipal(target._id);
     if (target.isDisabled) cutRealtime(target._id);
+
+    await finishAdminAction(audit, {
+      result: 'success',
+      after: systemRole !== undefined ? { systemRole: target.systemRole } : { isDisabled: target.isDisabled },
+    });
 
     res.json({
       success: true,
@@ -691,7 +857,9 @@ router.delete('/users/:id/organization', async (req, res) => {
     if (!target.organizationId) {
       return res.status(400).json({ success: false, code: 'ADMIN_NO_ORG', error: 'User does not belong to an organization' });
     }
+    const auditTarget = { action: 'user.remove_from_org', targetType: 'user', targetId: target._id, targetLabel: target.email };
     if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+      await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
       return superadminRequired(res);
     }
     if (target.role === 'owner') {
@@ -699,14 +867,27 @@ router.delete('/users/:id/organization', async (req, res) => {
     }
 
     const orgId = target.organizationId;
-    target.organizationId = null;
-    await target.save();
+    let audit;
+    try {
+      audit = await beginAdminAction(req, { ...auditTarget, before: { organizationId: orgId, role: target.role } });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
+
+    try {
+      target.organizationId = null;
+      await target.save();
+    } catch (err) {
+      await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_ACTION_FAILED' });
+      throw err;
+    }
 
     // Recount seats from DB for accuracy (same pattern as orgRoutes.js accept-invite).
     const actualSeats = await User.countDocuments({ organizationId: orgId });
     await Organization.updateOne({ _id: orgId }, { $set: { seatsUsed: actualSeats } });
     invalidatePrincipal(target._id);
 
+    await finishAdminAction(audit, { result: 'success', after: { organizationId: null } });
     res.json({ success: true });
   } catch (err) {
     console.error('❌ [admin/users/:id/organization DELETE]', err.message);
@@ -715,7 +896,8 @@ router.delete('/users/:id/organization', async (req, res) => {
 });
 
 // ── DELETE /api/admin/users/:id ────────────────────────────────────────────────
-// Permanently deletes a user account.
+// Permanently deletes a user account. Superadmin only (it cannot be undone;
+// plain admins disable instead), recent sign-in required.
 router.delete('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -729,12 +911,15 @@ router.delete('/users/:id', async (req, res) => {
     if (String(target._id) === String(req.adminUser._id)) {
       return res.status(403).json({ success: false, code: 'ADMIN_SELF_DELETE', error: 'You cannot delete your own account' });
     }
-    if (req.adminUser.systemRole !== 'superadmin' && holdsAdminRole(target)) {
+    const auditTarget = { action: 'user.delete', targetType: 'user', targetId: target._id, targetLabel: target.email };
+    if (!isSuperadmin(req)) {
+      await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
       return superadminRequired(res);
     }
     if (target.role === 'owner' && target.organizationId) {
       return res.status(409).json({ success: false, code: 'ADMIN_OWNER_PROTECTED', error: 'Cannot delete an organization owner — delete the organization instead' });
     }
+    if (!hasRecentAuth(req)) return reauthRequired(res);
     if (isActiveAdmin(target)) {
       const otherAdmins = await User.countDocuments({
         _id: { $ne: target._id },
@@ -745,9 +930,32 @@ router.delete('/users/:id', async (req, res) => {
         return res.status(409).json({ success: false, code: 'ADMIN_LAST_ADMIN', error: 'Cannot delete the last remaining administrator' });
       }
     }
+    if (await isLastSuperadmin(target)) return lastSuperadmin(res);
 
     const orgId = target.organizationId;
-    await User.deleteOne({ _id: target._id });
+    let audit;
+    try {
+      audit = await beginAdminAction(req, {
+        ...auditTarget,
+        before: {
+          name: target.name,
+          email: target.email,
+          systemRole: target.systemRole || 'user',
+          role: target.role,
+          organizationId: orgId || null,
+          createdAt: target.createdAt,
+        },
+      });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
+
+    try {
+      await User.deleteOne({ _id: target._id });
+    } catch (err) {
+      await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_ACTION_FAILED' });
+      throw err;
+    }
     invalidatePrincipal(target._id);
     cutRealtime(target._id);
 
@@ -756,6 +964,7 @@ router.delete('/users/:id', async (req, res) => {
       await Organization.updateOne({ _id: orgId }, { $set: { seatsUsed: actualSeats } });
     }
 
+    await finishAdminAction(audit, { result: 'success', after: { deleted: true } });
     res.json({ success: true });
   } catch (err) {
     console.error('❌ [admin/users DELETE]', err.message);
@@ -772,26 +981,65 @@ router.patch('/organizations/:id', async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, code: 'ADMIN_INVALID_ID', error: 'Invalid organization id' });
     }
+    const { isDisabled } = req.body || {};
+    if (typeof isDisabled !== 'boolean') {
+      return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
+    }
 
     const org = await Organization.findById(id);
-    if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
+    if (!org || org.deletedAt) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
 
-    const { isDisabled } = req.body;
-    if (isDisabled !== undefined) {
-      if (typeof isDisabled !== 'boolean') {
-        return res.status(400).json({ success: false, code: 'ADMIN_INVALID_PAYLOAD', error: 'isDisabled must be a boolean' });
+    const auditTarget = {
+      action: isDisabled ? 'org.disable' : 'org.enable',
+      targetType: 'organization',
+      targetId: org._id,
+      targetLabel: org.name,
+    };
+
+    if (isDisabled) {
+      // Disabling your own organization locks you out mid-session.
+      if (req.adminUser.organizationId && String(req.adminUser.organizationId) === String(org._id)) {
+        return res.status(403).json({ success: false, code: 'ADMIN_SELF_ORG', error: 'You cannot disable your own organization' });
       }
-      if (isDisabled && !(await adminsRemainAfterOrgDisable(org._id))) {
+      // Disabling an org locks out every member. A plain admin may not do that
+      // to an organization containing an administrator — it would bypass the
+      // rule that only a superadmin acts on admin accounts.
+      if (!isSuperadmin(req)) {
+        const adminMembers = await User.countDocuments({
+          organizationId: org._id,
+          systemRole: { $in: ADMIN_CAPABLE_ROLES },
+        });
+        if (adminMembers > 0) {
+          await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
+          return superadminRequired(res);
+        }
+      }
+      if (!(await adminsRemainAfterOrgDisable(org._id))) {
         return res.status(409).json({
           success: false,
           code: 'ADMIN_LAST_ADMIN_ORG',
           error: 'Disabling this organization would leave no reachable administrator',
         });
       }
-      org.isDisabled = isDisabled;
+      if ((await reachableSuperadmins()) > 0 && (await reachableSuperadmins({ blockedOrgId: org._id })) === 0) {
+        return lastSuperadmin(res);
+      }
     }
 
-    await org.save();
+    let audit;
+    try {
+      audit = await beginAdminAction(req, { ...auditTarget, before: { isDisabled: Boolean(org.isDisabled) } });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
+
+    try {
+      org.isDisabled = isDisabled;
+      await org.save();
+    } catch (err) {
+      await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_ACTION_FAILED' });
+      throw err;
+    }
     // An org-level lock changes access for every member, and the auth cache is
     // keyed by user — clear all of it rather than trying to enumerate members.
     invalidateAllPrincipals();
@@ -799,6 +1047,7 @@ router.patch('/organizations/:id', async (req, res) => {
       const members = await User.find({ organizationId: org._id }, { _id: 1 }).lean();
       members.forEach((m) => cutRealtime(m._id));
     }
+    await finishAdminAction(audit, { result: 'success', after: { isDisabled: org.isDisabled } });
     res.json({ success: true, organization: { _id: org._id, name: org.name, isDisabled: org.isDisabled } });
   } catch (err) {
     console.error('❌ [admin/organizations PATCH]', err.message);
@@ -806,13 +1055,56 @@ router.patch('/organizations/:id', async (req, res) => {
   }
 });
 
+/**
+ * Make sure subscription `org.stripeSubscriptionId` will not bill again after
+ * its current period, and record that on the org. Mirrors
+ * POST /api/stripe/cancel-subscription: no refund, access continues to the end
+ * of the paid period. Throws on any Stripe failure other than "no such
+ * subscription" (which means nothing is billing).
+ *
+ * @returns {Promise<{outcome: 'scheduled'|'already_scheduled'|'already_ended', cancelAt: Date|null, synced: boolean}>}
+ */
+async function ensureCancelledAtPeriodEnd(org) {
+  let sub;
+  try {
+    sub = await stripe.subscriptions.retrieve(org.stripeSubscriptionId);
+  } catch (err) {
+    if (!isStripeMissing(err)) throw err;
+    sub = { id: org.stripeSubscriptionId, object: 'subscription', status: 'canceled' };
+  }
+
+  let outcome;
+  if (STRIPE_ENDED.includes(sub.status)) {
+    outcome = 'already_ended';
+  } else if (isCancellationScheduled(sub)) {
+    outcome = 'already_scheduled';
+  } else {
+    sub = await stripe.subscriptions.update(org.stripeSubscriptionId, { cancel_at_period_end: true });
+    outcome = 'scheduled';
+  }
+
+  // Stripe is now right. Writing it onto the org is a convenience — the
+  // customer.subscription.updated webhook and the 5-minute sweep reconcile the
+  // same state — so a failure here is reported, not fatal.
+  let synced = true;
+  try {
+    await applySubscription(org, sub);
+  } catch (err) {
+    synced = false;
+    console.error(`❌ [admin] Stripe updated but org ${org._id} could not be synced (webhook will reconcile):`, err.message);
+  }
+
+  const cancelAt = outcome === 'already_ended'
+    ? null
+    : (sub.cancel_at ? new Date(sub.cancel_at * 1000) : periodEndOf(sub));
+  return { outcome, cancelAt, synced };
+}
+
 // ── POST /api/admin/organizations/:id/cancel-subscription ────────────────────
 // Cancels the organization's Stripe subscription at the end of the current
-// billing period. Mirrors POST /api/stripe/cancel-subscription exactly, just
-// scoped by organization id instead of the caller's own account. The plan keeps
-// working until the period ends; only the pending cancellation is recorded here,
-// through services/subscriptionLifecycle.js (the only writer of subscription
-// state). The downgrade to Free happens when Stripe ends the subscription.
+// billing period. Superadmin only, recent sign-in required. The plan keeps
+// working until the period ends; the downgrade to Free happens when Stripe ends
+// the subscription (services/subscriptionLifecycle.js).
 router.post('/organizations/:id/cancel-subscription', async (req, res) => {
   try {
     const { id } = req.params;
@@ -821,25 +1113,52 @@ router.post('/organizations/:id/cancel-subscription', async (req, res) => {
     }
 
     const org = await Organization.findById(id);
-    if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
+    if (!org || org.deletedAt) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
+
+    const auditTarget = { action: 'org.cancel_subscription', targetType: 'organization', targetId: org._id, targetLabel: org.name };
+    if (!isSuperadmin(req)) {
+      await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
+      return superadminRequired(res);
+    }
     if (!org.stripeSubscriptionId) {
       return res.status(400).json({ success: false, code: 'ADMIN_NO_SUBSCRIPTION', error: 'This organization has no active subscription' });
     }
+    if (!hasRecentAuth(req)) return reauthRequired(res);
     // Already scheduled to end — nothing to do, and no second Stripe call.
     if (org.cancelAtPeriodEnd) {
-      return res.json({ success: true, cancelAt: org.expiresAt });
+      return res.json({ success: true, alreadyScheduled: true, cancelAt: org.expiresAt });
     }
 
-    const subscription = await stripe.subscriptions.update(org.stripeSubscriptionId, {
-      cancel_at_period_end: true,
-    });
-    await applySubscription(org, subscription);
+    let audit;
+    try {
+      audit = await beginAdminAction(req, {
+        ...auditTarget,
+        before: { subscriptionState: subscriptionState(org), expiresAt: org.expiresAt },
+      });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
 
-    console.log(`🚫 [admin] Subscription cancel_at_period_end set for org ${org._id} by ${req.adminUser.email}`);
+    let result;
+    try {
+      result = await ensureCancelledAtPeriodEnd(org);
+    } catch (err) {
+      console.error(`❌ [admin] Stripe cancel failed for org ${org._id}:`, err.message);
+      await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_STRIPE_FAILED' });
+      return res.status(502).json({ success: false, code: 'ADMIN_STRIPE_FAILED', error: 'Stripe could not cancel the subscription' });
+    }
+
+    console.log(`🚫 [admin] Subscription cancel (${result.outcome}) for org ${org._id} by admin ${req.adminUser._id}`);
+    await finishAdminAction(audit, {
+      result: 'success',
+      after: { stripe: result.outcome, cancelAt: result.cancelAt, dbSynced: result.synced },
+    });
 
     res.json({
       success: true,
-      cancelAt: subscription.cancel_at ? new Date(subscription.cancel_at * 1000) : null,
+      outcome: result.outcome,
+      cancelAt: result.cancelAt,
+      synced: result.synced,
     });
   } catch (err) {
     console.error('❌ [admin/organizations/:id/cancel-subscription]', err.message);
@@ -848,10 +1167,21 @@ router.post('/organizations/:id/cancel-subscription', async (req, res) => {
 });
 
 // ── DELETE /api/admin/organizations/:id ───────────────────────────────────────
-// Permanently deletes an organization. Members are detached (organizationId
-// cleared) rather than deleted — their accounts survive as standalone users.
-// Any active Stripe subscription is set to cancel at period end so billing
-// doesn't continue against a deleted organization.
+// Soft-deletes an organization. Superadmin only, recent sign-in required.
+//
+// Order matters:
+//   1. Stripe first. If the organization still has a live subscription it is set
+//      to end at period end; if Stripe refuses, NOTHING else happens (deleting
+//      the org would leave a customer billed for an account that is gone, and no
+//      webhook could ever find the org again).
+//   2. The org is marked deleted AND disabled in one write, so its members are
+//      locked out even if a later step fails.
+//   3. Members are detached (their accounts survive as standalone users with no
+//      plan), their schedules disabled, pending invites expired — the same
+//      clean-up as a downgrade to Free.
+// The document, its purchased credits and lifetime counters are kept: the
+// deletion is recoverable from the audit row (which lists the members).
+// Repeating the call on an org whose clean-up failed resumes it.
 router.delete('/organizations/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -862,24 +1192,110 @@ router.delete('/organizations/:id', async (req, res) => {
     const org = await Organization.findById(id);
     if (!org) return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
 
-    if (org.stripeSubscriptionId) {
+    const auditTarget = { action: 'org.delete', targetType: 'organization', targetId: org._id, targetLabel: org.name };
+    if (!isSuperadmin(req)) {
+      await recordDenied(req, { ...auditTarget, errorCode: 'ADMIN_SUPERADMIN_REQUIRED' });
+      return superadminRequired(res);
+    }
+    if (!hasRecentAuth(req)) return reauthRequired(res);
+
+    const resuming = Boolean(org.deletedAt);
+    const members = await User.find({ organizationId: org._id }, { _id: 1, email: 1, role: 1 }).lean();
+    const memberIds = members.map((m) => m._id);
+
+    let audit;
+    try {
+      audit = await beginAdminAction(req, {
+        ...auditTarget,
+        before: {
+          resuming,
+          planType: org.planType,
+          subscriptionState: subscriptionState(org),
+          hasSubscription: Boolean(org.stripeSubscriptionId),
+          members: members.map((m) => ({ _id: m._id, email: m.email, role: m.role })),
+          creditsRemaining: (org.scanCredits || []).reduce((n, c) => n + (c.scansRemaining || 0), 0),
+        },
+      });
+    } catch (_) {
+      return auditUnavailable(res);
+    }
+
+    // 1. Stripe — fail closed.
+    let stripeOutcome = 'none';
+    if (!resuming && org.stripeSubscriptionId && !STRIPE_ENDED.includes(org.subscriptionStatus)) {
       try {
-        await stripe.subscriptions.update(org.stripeSubscriptionId, { cancel_at_period_end: true });
-      } catch (stripeErr) {
-        console.warn(`⚠️ [admin] Failed to cancel Stripe subscription for org ${org._id} during deletion:`, stripeErr.message);
+        stripeOutcome = (await ensureCancelledAtPeriodEnd(org)).outcome;
+      } catch (err) {
+        console.error(`❌ [admin] Stripe cancel failed — org ${org._id} NOT deleted:`, err.message);
+        await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_STRIPE_FAILED' });
+        return res.status(502).json({
+          success: false,
+          code: 'ADMIN_STRIPE_FAILED',
+          error: 'Stripe could not cancel the subscription; the organization was not deleted',
+        });
       }
     }
 
-    const { modifiedCount } = await User.updateMany(
-      { organizationId: org._id },
-      { $set: { organizationId: null } }
-    );
-    await Organization.deleteOne({ _id: org._id });
+    // 2. Mark deleted + disabled (members are blocked from here on).
+    const now = new Date();
+    if (!resuming) {
+      const marked = await Organization.updateOne(
+        { _id: org._id, deletedAt: null },
+        { $set: { deletedAt: now, deletedBy: req.adminUser._id, isDisabled: true } }
+      );
+      if (!marked.matchedCount) {
+        await finishAdminAction(audit, { result: 'failure', errorCode: 'ADMIN_ORG_NOT_FOUND' });
+        return res.status(404).json({ success: false, code: 'ADMIN_ORG_NOT_FOUND', error: 'Organization not found' });
+      }
+    }
     invalidateAllPrincipals();
 
-    console.log(`🗑️ [admin] Organization ${org._id} deleted by ${req.adminUser.email}, ${modifiedCount} member(s) detached`);
+    // 3. Detach members and clean up. Each step is idempotent.
+    const effects = await Promise.allSettled([
+      User.updateMany(
+        { organizationId: org._id },
+        {
+          $set: {
+            organizationId: null,
+            role: 'owner',
+            accountType: 'free',
+            planType: null,
+            billingCycle: null,
+            subscriptionStatus: null,
+            stripeSubscriptionId: null,
+          },
+        }
+      ),
+      ScheduledScan.updateMany({ userId: { $in: memberIds }, enabled: true }, { $set: { enabled: false } }),
+      Invite.updateMany({ organizationId: org._id, status: 'pending' }, { $set: { status: 'expired', expiresAt: now } }),
+    ]);
+    invalidateAllPrincipals();
+    memberIds.forEach(cutRealtime);
 
-    res.json({ success: true, membersDetached: modifiedCount });
+    const failedSteps = ['members', 'schedules', 'invites'].filter((_, i) => effects[i].status === 'rejected');
+    if (failedSteps.length) {
+      effects.forEach((r, i) => {
+        if (r.status === 'rejected') console.error(`❌ [admin] org ${org._id} delete step ${i} failed:`, r.reason && r.reason.message);
+      });
+      await finishAdminAction(audit, {
+        result: 'failure',
+        errorCode: 'ADMIN_DELETE_INCOMPLETE',
+        after: { deletedAt: now, stripe: stripeOutcome, failedSteps },
+      });
+      return res.status(500).json({
+        success: false,
+        code: 'ADMIN_DELETE_INCOMPLETE',
+        error: 'Organization deleted and locked, but clean-up did not finish; repeat the request to resume',
+      });
+    }
+
+    console.log(`🗑️ [admin] Organization ${org._id} soft-deleted by admin ${req.adminUser._id}, ${memberIds.length} member(s) detached`);
+    await finishAdminAction(audit, {
+      result: 'success',
+      after: { deletedAt: org.deletedAt || now, stripe: stripeOutcome, membersDetached: memberIds.length },
+    });
+
+    res.json({ success: true, membersDetached: memberIds.length, stripe: stripeOutcome });
   } catch (err) {
     console.error('❌ [admin/organizations DELETE]', err.message);
     res.status(500).json({ success: false, code: 'ADMIN_ACTION_FAILED', error: 'Failed to delete organization', details: devMsg(err) });
