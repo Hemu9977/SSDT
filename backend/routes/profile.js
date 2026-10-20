@@ -17,7 +17,7 @@ const devMsg = (err) => process.env.NODE_ENV !== 'production' ? err.message : un
 // @access  Private
 router.get('/', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password -otp -otpExpires');
+    const user = await User.findById(req.user.id).select('-password -otp -otpHash -otpExpires -otpAttempts');
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });

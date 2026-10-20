@@ -24,11 +24,21 @@ const UserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  // Legacy plaintext code. No longer written (utils/otp.js stores otpHash);
+  // kept so a code issued before the change still verifies until it expires.
   otp: {
+    type: String,
+  },
+  // HMAC of the emailed code (utils/otp.js) — never the code itself.
+  otpHash: {
     type: String,
   },
   otpExpires: {
     type: Date,
+  },
+  // Wrong guesses spent on the current code; capped by OTP_MAX_ATTEMPTS.
+  otpAttempts: {
+    type: Number,
   },
   resetPasswordToken: {
     type: String,
@@ -156,10 +166,12 @@ const UserSchema = new mongoose.Schema({
     default: Date.now,
     index: true
   },
-  // Last login tracking
+  // Last successful sign-in. Null until the first one: defaulting to Date.now made
+  // every account that never signed in look as if it had, at its creation time.
+  // Written by every token-issuing path (routes/auth.js, routes/orgRoutes.js).
   lastLoginAt: {
     type: Date,
-    default: Date.now
+    default: null
   },
   // Track password reset timestamp for skipping OTP
   passwordResetAt: {

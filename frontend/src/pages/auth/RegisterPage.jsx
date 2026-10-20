@@ -39,8 +39,12 @@ const RegisterPage = () => {
         });
         
         const data = await response.json();
-        
-        if (response.ok) {
+
+        if (response.ok && !data.token && data.code === 'AUTH_OTP_SENT') {
+          // An existing administrator account: confirm with the emailed code.
+          setMessage(getApiErrorLabel(t, data));
+          setTimeout(() => navigate('/verify-otp', { state: { email: data.user.email } }), 2000);
+        } else if (response.ok) {
           localStorage.setItem('token', data.token);
           setMessage(t('googleSignupSuccessful'));
           // UserProvider fetches the profile only on mount and sits above

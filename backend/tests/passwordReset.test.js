@@ -247,8 +247,12 @@ test('resend-otp regenerates and sends a code', async () => {
 
   assert.equal(res.status, 200);
   assert.equal(state.otpEmails.length, 1, 'the stub route never sent anything');
-  assert.equal(state.saved.otp, '654321');
-  assert.equal(state.otpEmails[0].otp, '654321', 'emailed code must match the stored one');
+  assert.equal(state.otpEmails[0].otp, '654321');
+  // Only an HMAC of the code is stored, and it must be the HMAC of the emailed code.
+  const { hashOtp } = require(path.join(BACKEND, 'utils/otp.js'));
+  assert.equal(state.saved.otp, undefined, 'the plaintext code must not be stored');
+  assert.equal(state.saved.otpHash, hashOtp('user-1', '654321'), 'stored hash must match the emailed code');
+  assert.equal(state.saved.otpAttempts, 0, 'a new code gets a fresh attempt budget');
   const ttl = state.saved.otpExpires.getTime() - before;
   assert.ok(ttl > 9 * 60 * 1000 && ttl <= 10 * 60 * 1000 + 1000, `ttl was ${ttl}ms`);
 });

@@ -123,6 +123,7 @@ async function auth(req, res, next) {
     console.log('⚠️ Auth: No token provided for', req.path);
     return res.status(401).json({
       success: false,
+      code: 'UNAUTHORIZED',
       error: 'UNAUTHORIZED',
       message: 'No token, authorization denied'
     });
@@ -132,11 +133,15 @@ async function auth(req, res, next) {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded.user;
+    // Seconds since epoch; requireRecentAuth() reads it.
+    req.tokenIssuedAt = decoded.iat || null;
 
     // Cryptographically valid tokens can still belong to a locked-out account.
-    // On an unexpected DB error we fail OPEN and log: the token itself is still
-    // valid, this is a secondary control, and a transient Mongo blip must not
-    // lock every user out of the platform at once.
+    // On an unexpected DB error, READS fail open and log: the token itself is
+    // still valid, this is a secondary control, and a transient Mongo blip must
+    // not lock every user out of the platform at once. WRITES fail closed — a
+    // disabled or revoked account must not be able to change anything while the
+    // check cannot run, and a write would need the database anyway.
     try {
       const state = await getPrincipalState(decoded.user.id);
 
@@ -163,7 +168,16 @@ async function auth(req, res, next) {
         });
       }
     } catch (dbErr) {
-      console.error('⚠️ Auth: principal-state check failed, allowing request:', dbErr.message);
+      if (!SAFE_METHODS.includes(req.method)) {
+        console.error('⚠️ Auth: principal-state check failed, refusing write:', req.method, req.path, '-', dbErr.message);
+        return res.status(503).json({
+          success: false,
+          code: 'AUTH_UNAVAILABLE',
+          error: 'AUTH_UNAVAILABLE',
+          message: 'Account check unavailable. Please try again shortly.'
+        });
+      }
+      console.error('⚠️ Auth: principal-state check failed, allowing read:', dbErr.message);
     }
 
     next();
@@ -171,11 +185,24 @@ async function auth(req, res, next) {
     console.log('❌ Auth: Invalid token for', req.path, '-', err.message);
     res.status(401).json({
       success: false,
+      code: 'UNAUTHORIZED',
       error: 'UNAUTHORIZED',
       message: 'Token is not valid',
       details: err.message
     });
   }
+}
+
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
+/**
+ * Step-up check for destructive actions: true when the caller signed in within
+ * `maxAgeMs`. Uses the token's own issue time, so it needs no extra state and
+ * works for password, OTP and Google sign-ins alike. Requires `auth` first.
+ */
+function isRecentAuth(req, maxAgeMs) {
+  const issuedMs = req.tokenIssuedAt ? req.tokenIssuedAt * 1000 : 0;
+  return !!issuedMs && Date.now() - issuedMs <= maxAgeMs;
 }
 
 /**
@@ -212,3 +239,4 @@ module.exports.getPrincipalState = getPrincipalState;
 module.exports.isTokenRevoked = isTokenRevoked;
 module.exports.invalidatePrincipal = invalidatePrincipal;
 module.exports.invalidateAllPrincipals = invalidateAllPrincipals;
+module.exports.isRecentAuth = isRecentAuth;

@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { getFrontendBaseUrl } = require('../utils/frontendUrl');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { tokenLifetimeFor, isPlatformAdmin } = require('../utils/sessionPolicy');
 const auth = require('../middleware/auth');
 const { invalidatePrincipal, isPrincipalBlocked } = require('../middleware/auth');
 const requireOrg = require('../middleware/requireOrg');
@@ -234,6 +235,18 @@ router.post('/accept-invite', async (req, res) => {
       }
 
       user = await User.findOne({ email: invite.email.toLowerCase() });
+      // A platform administrator's sign-in always needs the emailed code
+      // (routes/auth.js). This route would hand out a token on Google alone, so
+      // send them through the normal sign-in first; the invite is released and
+      // they accept it with their session (the logged-in path above).
+      if (user && isPlatformAdmin(user)) {
+        await Invite.updateOne({ _id: invite._id, status: 'accepted' }, { $set: { status: 'pending' } });
+        return res.status(409).json({
+          code: 'ORG_ACCOUNT_EXISTS', error: 'An account with this email already exists. Please log in to accept the invite.',
+          requiresLogin: true,
+          email: invite.email
+        });
+      }
       if (user) {
         if (!user.googleId) user.googleId = googleData.googleId;
         if (!user.isVerified) user.isVerified = true;
@@ -346,7 +359,7 @@ router.post('/accept-invite', async (req, res) => {
     }
 
     // ── Issue JWT so frontend can log user in immediately ─────────────────
-    const jwtToken = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const jwtToken = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: tokenLifetimeFor(user) });
 
     res.json({
       success: true,

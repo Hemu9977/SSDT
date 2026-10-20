@@ -108,6 +108,14 @@ const JoinOrganization = () => {
         const data = await res.json();
 
         if (!res.ok) {
+          // Accounts whose sign-in needs the emailed code (platform admins) are
+          // sent to the password + code login, as the register flow does.
+          if (data.requiresLogin) {
+            setError(getApiErrorLabel(t, data));
+            setLoginEmail(inviteInfo.email);
+            setMode('login');
+            return;
+          }
           setError(res.status === 403 && data.invitedEmail
             ? t('inviteEmailMismatch')
             : getApiErrorLabel(t, data, 'googleLoginFailed'));

@@ -26,7 +26,7 @@ const BACKEND = path.join(__dirname, '..');
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 process.env.RATE_LIMIT_ENABLED = 'false';
 
-const state = { invite: null, org: null, user: null, blocked: false, invalidated: [] };
+const state = { invite: null, org: null, user: null, blocked: false, invalidated: [], released: 0 };
 
 // ─── Stub every model the route touches, plus the auth middleware's check ────
 const q = (get) => ({ select: () => q(get), lean: async () => get(), then: (r) => Promise.resolve(get()).then(r) });
@@ -36,8 +36,16 @@ require.cache[path.join(BACKEND, 'models/Invite.js')] = {
   exports: {
     findOne: async () => state.invite,
     findOneAndUpdate: async () => state.invite,
-    updateOne: async () => ({ modifiedCount: 1 }),
+    updateOne: async (filter, update) => {
+      if (update && update.$set && update.$set.status === 'pending') state.released += 1;
+      return { modifiedCount: 1 };
+    },
   },
+};
+// Google sign-in on the join page: the credential is valid for the invited address.
+require.cache[path.join(BACKEND, 'utils/googleAuth.js')] = {
+  id: 'g', filename: 'g', loaded: true,
+  exports: { verifyGoogleCredential: async () => ({ email: 'invitee@example.com', googleId: 'g-1', name: 'Invitee' }) },
 };
 require.cache[path.join(BACKEND, 'models/Organization.js')] = {
   id: 'o', filename: 'o', loaded: true,
@@ -114,6 +122,7 @@ function reset() {
   };
   state.blocked = false;
   state.invalidated = [];
+  state.released = 0;
 }
 
 const tokenFor = (id) => jwt.sign({ user: { id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -179,4 +188,21 @@ test('accept-invite is the only jwt.sign outside routes/auth.js', () => {
     .map((f) => path.relative(BACKEND, f).replace(/\\/g, '/'));
 
   assert.deepEqual(issuers.sort(), ['routes/auth.js', 'routes/orgRoutes.js']);
+});
+
+test('a platform admin cannot get a token from Google on the join page: sent to the OTP sign-in, invite released', async () => {
+  reset();
+  state.user.systemRole = 'superadmin';
+  const res = await acceptInvite({ body: { token: 'invite-token', googleAccessToken: 'g-token' } });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'ORG_ACCOUNT_EXISTS');
+  assert.equal(res.body.requiresLogin, true);
+  assert.equal(res.body.token, undefined, 'no token without the emailed code');
+  assert.equal(state.released, 1, 'the invite must be usable once they sign in');
+  assert.equal(state.user.organizationId, null);
+
+  reset();
+  const customer = await acceptInvite({ body: { token: 'invite-token', googleAccessToken: 'g-token' } });
+  assert.equal(customer.status, 200, 'customers still join with Google alone');
+  assert.ok(customer.body.token);
 });

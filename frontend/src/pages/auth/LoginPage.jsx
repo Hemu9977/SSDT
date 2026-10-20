@@ -39,7 +39,11 @@ const LoginPage = () => {
 
         const data = await response.json();
 
-        if (response.ok) {
+        if (response.ok && !data.token && data.code === 'AUTH_OTP_SENT') {
+          // Administrators confirm every sign-in, Google included, with the emailed code.
+          setMessage(getApiErrorLabel(t, data));
+          setTimeout(() => navigate('/verify-otp', { state: { email: data.user.email } }), 2000);
+        } else if (response.ok) {
           localStorage.setItem('token', data.token);
           syncLanguage();
           setMessage(t('googleLoginSuccessful'));

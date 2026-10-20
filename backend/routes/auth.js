@@ -11,6 +11,8 @@ const { emailSendLimiter } = require('../middleware/rateLimiter');
 const { generateOTP, sendOTPEmail, sendResetPasswordEmail } = require('../services/emailService');
 const crypto = require('crypto');
 const { verifyGoogleCredential } = require('../utils/googleAuth');
+const { tokenLifetimeFor, isPlatformAdmin } = require('../utils/sessionPolicy');
+const { OTP_MAX_ATTEMPTS, issueOtp, hasLiveOtp, otpMatches, OTP_CLEAR } = require('../utils/otp');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -80,6 +82,16 @@ router.post('/google', async (req, res) => {
     }
 
     if (!user.isVerified) user.isVerified = true;
+
+    // A platform administrator's sign-in always needs the emailed code, whichever
+    // way the first factor was proved — Google included. Same step as /login.
+    if (isPlatformAdmin(user)) {
+      const otp = issueOtp(user, generateOTP());
+      await user.save();
+      try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch (e) { console.error('[google] OTP email failed:', e.message); }
+      return res.json({ code: 'AUTH_OTP_SENT', message: 'Check email for OTP', user: { id: user.id, email: user.email } });
+    }
+
     user.lastLoginAt = new Date();
     await user.save();
 
@@ -87,7 +99,7 @@ router.post('/google', async (req, res) => {
     jwt.sign(
       payload,
       process.env.JWT_SECRET,
-      { expiresIn: '7d' },
+      { expiresIn: tokenLifetimeFor(user) },
       (err, jwtToken) => {
         if (err) throw err;
         res.json({
@@ -127,9 +139,7 @@ router.post('/register', async (req, res) => {
     user.password = await bcrypt.hash(password, salt);
     await user.save();
 
-    const otp = generateOTP();
-    user.otp = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    const otp = issueOtp(user, generateOTP());
     await user.save();
 
     // Attempt email, but don't fail registration if email fails
@@ -161,15 +171,17 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ code: 'ACCOUNT_DISABLED', message: DISABLED_MESSAGE });
     }
 
+    // Within 24 h of a password reset the emailed code is skipped — except for
+    // platform administrators, whose accounts always need the second factor.
     const recentlyReset = user.passwordResetAt && (new Date() - user.passwordResetAt) < (86400000);
-    if (recentlyReset) {
-       const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    if (recentlyReset && !isPlatformAdmin(user)) {
+       user.lastLoginAt = new Date();
+       await user.save();
+       const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: tokenLifetimeFor(user) });
        return res.json({ code: 'AUTH_LOGIN_SUCCESS', message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' } });
     }
 
-    const otp = generateOTP();
-    user.otp = otp;
-    user.otpExpires = new Date(Date.now() + 600000);
+    const otp = issueOtp(user, generateOTP());
     await user.save();
     try { await sendOTPEmail(user.email, otp, user.preferredLanguage); } catch(e) { console.error(e); }
     res.json({ code: 'AUTH_OTP_SENT', message: 'Check email for OTP', user: { id: user.id, email: user.email }});
@@ -188,21 +200,46 @@ router.post('/verify-otp', async (req, res) => {
     return res.status(400).json({ code: 'AUTH_OTP_FORMAT', message: 'OTP must be a 6-digit number' });
   }
   try {
+    const invalid = () => res.status(400).json({ code: 'AUTH_OTP_INVALID', message: 'Invalid or expired OTP' });
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user || user.otp !== otp || user.otpExpires < new Date()) {
-      return res.status(400).json({ code: 'AUTH_OTP_INVALID', message: 'Invalid or expired OTP' });
+    if (!user || !hasLiveOtp(user)) return invalid();
+
+    // Spend one attempt BEFORE comparing, atomically and only for this code
+    // (matched by its expiry), so parallel guesses cannot share one budget.
+    // A missing counter (code issued before counting existed) counts as 0.
+    const reserved = await User.findOneAndUpdate(
+      {
+        _id: user._id,
+        otpExpires: user.otpExpires,
+        $or: [{ otpAttempts: { $lt: OTP_MAX_ATTEMPTS } }, { otpAttempts: { $exists: false } }],
+      },
+      { $inc: { otpAttempts: 1 } },
+      { new: true }
+    );
+    if (!reserved) {
+      return res.status(429).json({ code: 'AUTH_OTP_LOCKED', message: 'Too many attempts. Request a new code.' });
+    }
+    if (!otpMatches(user, otp)) {
+      if ((reserved.otpAttempts || 0) >= OTP_MAX_ATTEMPTS) {
+        // Budget spent: end this code outright, so even the right guess fails.
+        await User.updateOne({ _id: user._id, otpExpires: user.otpExpires }, { $unset: OTP_CLEAR });
+        return res.status(429).json({ code: 'AUTH_OTP_LOCKED', message: 'Too many attempts. Request a new code.' });
+      }
+      return invalid();
     }
     if (await isAccountBlocked(user)) {
       return res.status(403).json({ code: 'ACCOUNT_DISABLED', message: DISABLED_MESSAGE });
     }
 
     user.otp = undefined;
+    user.otpHash = undefined;
     user.otpExpires = undefined;
+    user.otpAttempts = undefined;
     user.isVerified = true;
     user.lastLoginAt = new Date();
     await user.save();
 
-    const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ user: { id: user.id } }, process.env.JWT_SECRET, { expiresIn: tokenLifetimeFor(user) });
     res.json({ code: 'AUTH_LOGIN_SUCCESS', message: 'Login successful', token, user: { id: user.id, email: user.email, isVerified: true, systemRole: user.systemRole || 'user' }});
   } catch (err) {
     res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' });
@@ -226,7 +263,6 @@ router.post('/verify-otp', async (req, res) => {
 const hashResetToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
 
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;  // 1 hour — matches the email copy
-const OTP_TTL_MS         = 10 * 60 * 1000;  // matches /register
 
 router.post('/resend-otp', emailSendLimiter, async (req, res) => {
   const { email } = req.body;
@@ -242,12 +278,11 @@ router.post('/resend-otp', emailSendLimiter, async (req, res) => {
     if (!user) return ack();
     if (await isAccountBlocked(user)) return ack();
 
-    user.otp = generateOTP();
-    user.otpExpires = new Date(Date.now() + OTP_TTL_MS);
+    const otp = issueOtp(user, generateOTP());
     await user.save();
 
     try {
-      await sendOTPEmail(user.email, user.otp, user.preferredLanguage);
+      await sendOTPEmail(user.email, otp, user.preferredLanguage);
     } catch (e) {
       console.error('[resend-otp] email failed:', e.message);
     }
@@ -338,7 +373,8 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 router.get('/me', auth, async (req, res) => {
-    try { const user = await User.findById(req.user.id).select('-password'); res.json(user); } 
+    // Never return credential material, not even to its owner.
+    try { const user = await User.findById(req.user.id).select('-password -otp -otpHash -otpExpires -otpAttempts -resetPasswordToken -resetPasswordExpires'); res.json(user); } 
     catch(err) { res.status(500).json({ code: 'SERVER_ERROR', message: 'Server error' }); }
 });
 
