@@ -193,18 +193,24 @@ async function runCleanup() {
             console.error('[CleanupJob] Combining-stuck recovery error:', stuckErr.message);
         }
 
-        // 1. Clean up failed/stopped scans
+        // 1. Failed/stopped scans: purge their heavy artifacts (GridFS reports,
+        //    ZAP alerts, payloads) but keep the lightweight record — status,
+        //    target, failureReason, timestamps — until the 7-day TTL removes it
+        //    like any other scan. Deleting the whole document here (the old
+        //    behaviour) erased every failure within the hour, so support and the
+        //    admin dashboard could never see what had failed.
         const failedScans = await ScanResult.find({
-            status: { $in: ['failed', 'stopped'] }
-        }, { analysisId: 1, userId: 1 }).lean();
+            status: { $in: ['failed', 'stopped'] },
+            artifactsPurgedAt: null
+        }, { analysisId: 1 }).lean();
 
-        console.log(`[CleanupJob] Found ${failedScans.length} failed/stopped scans to clean up`);
+        console.log(`[CleanupJob] Found ${failedScans.length} failed/stopped scans whose artifacts need purging`);
 
         for (const scan of failedScans) {
             try {
-                await cleanupService.cleanupFailedScan(scan.analysisId, scan.userId);
+                await cleanupService.purgeFailedScanArtifacts(scan.analysisId);
             } catch (err) {
-                console.error(`[CleanupJob] Failed to cleanup scan ${scan.analysisId}:`, err.message);
+                console.error(`[CleanupJob] Failed to purge scan ${scan.analysisId}:`, err.message);
             }
         }
 

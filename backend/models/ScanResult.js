@@ -129,6 +129,14 @@ const scanResultSchema = new mongoose.Schema({
     type: String,
     enum: ['subscription', 'credit', null],
     default: null
+  },
+  // Set by the cleanup job once a failed/stopped scan's heavy artifacts (GridFS
+  // reports, ZAP alerts, full payloads) have been deleted. The lightweight record
+  // — status, target, failureReason, timestamps — stays until the 7-day TTL above,
+  // so a failure remains diagnosable instead of vanishing within the hour.
+  artifactsPurgedAt: {
+    type: Date,
+    default: null
   }
 });
 
