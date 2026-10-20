@@ -138,8 +138,10 @@
     animation: badge-pulse 3s infinite;
   }
 
-  // Tablet: 768px – 900px — tighter spacing
-  @media (min-width: 768px) and (max-width: 900px) {
+  // Small laptop / tablet landscape: 901px – 1100px — tighter spacing.
+  // !important because NeonButtons.scss sets these buttons' padding and size
+  // with !important; without it this rule never applied.
+  @media (min-width: 901px) and (max-width: 1100px) {
     padding: 0 1.25rem;
 
     .header-controls { gap: 0.5rem; }
@@ -148,19 +150,17 @@
     .schedules-link,
     .admin-button,
     .profile-button,
-    .logout-button {
-      padding: 0.5rem 0.75rem;
-      font-size: 0.85rem;
-    }
-
+    .logout-button,
     .signup-button {
-      padding: 0.5rem 0.9rem;
-      font-size: 0.85rem;
+      padding: 0.5rem 0.85rem !important;
+      font-size: 0.8rem !important;
+      letter-spacing: 1px !important;
     }
   }
 
-  // Mobile: ≤ 767px — hamburger nav
-  @media (max-width: 767px) {
+  // Mobile and tablet portrait: ≤ 900px — hamburger nav. The signed-in row
+  // (Admin Panel + Profile + Logout + toggles) does not fit inline below this.
+  @media (max-width: 900px) {
     padding: 0 1rem;
 
     .hamburger {

@@ -31,7 +31,7 @@
   color: var(--neon-purple-text) !important;
 
   // Global text color override (but not buttons)
-  *:not(button):not(.btn):not(.btn-edit):not(.btn-save):not(.btn-cancel):not(.btn-upgrade):not(.signup-button):not(.logout-button):not(.profile-button) {
+  *:not(button):not(.btn):not(.btn-edit):not(.btn-save):not(.btn-cancel):not(.btn-upgrade):not(.signup-button):not(.admin-button):not(.logout-button):not(.profile-button) {
     color: var(--neon-purple-text);
   }
 
@@ -59,6 +59,7 @@
   .btn-cancel,
   .btn-upgrade,
   .signup-button,
+  .admin-button,
   .logout-button,
   .profile-button,
   .analyze-form button,
@@ -263,6 +264,7 @@
 
     // Specific override for header buttons
     .signup-button,
+    .admin-button,
     .logout-button,
     .profile-button {
       background: transparent !important;
@@ -675,9 +677,11 @@
   // Force purple on all nav buttons
   // ===================================
   .header-container .signup-button,
+  .header-container .admin-button,
   .header-container .logout-button,
   .header-container .profile-button,
   header .signup-button,
+  header .admin-button,
   header .logout-button,
   header .profile-button {
     background: transparent !important;
@@ -711,12 +715,15 @@
 // These rules have maximum specificity
 // ===================================
 .pro-theme .header-container .signup-button,
+.pro-theme .header-container .admin-button,
 .pro-theme .header-container .logout-button,
 .pro-theme .header-container .profile-button,
 .pro-theme header .signup-button,
+.pro-theme header .admin-button,
 .pro-theme header .logout-button,
 .pro-theme header .profile-button,
 .pro-theme .signup-button,
+.pro-theme .admin-button,
 .pro-theme .logout-button,
 .pro-theme .profile-button {
   background: transparent !important;
@@ -728,12 +735,15 @@
 }
 
 .pro-theme .header-container .signup-button:hover,
+.pro-theme .header-container .admin-button:hover,
 .pro-theme .header-container .logout-button:hover,
 .pro-theme .header-container .profile-button:hover,
 .pro-theme header .signup-button:hover,
+.pro-theme header .admin-button:hover,
 .pro-theme header .logout-button:hover,
 .pro-theme header .profile-button:hover,
 .pro-theme .signup-button:hover,
+.pro-theme .admin-button:hover,
 .pro-theme .logout-button:hover,
 .pro-theme .profile-button:hover {
   background: #c084fc !important;
@@ -746,12 +756,15 @@
 }
 
 .pro-theme .header-container .signup-button:active,
+.pro-theme .header-container .admin-button:active,
 .pro-theme .header-container .logout-button:active,
 .pro-theme .header-container .profile-button:active,
 .pro-theme header .signup-button:active,
+.pro-theme header .admin-button:active,
 .pro-theme header .logout-button:active,
 .pro-theme header .profile-button:active,
 .pro-theme .signup-button:active,
+.pro-theme .admin-button:active,
 .pro-theme .logout-button:active,
 .pro-theme .profile-button:active {
   background: #a855f7 !important;

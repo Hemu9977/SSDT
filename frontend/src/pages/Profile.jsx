@@ -10,6 +10,7 @@ import '../styles/Profile.scss';
 import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
 import { isPlanEntitled } from '../utils/planAccess';
+import { isSystemAdmin } from '../utils/authRedirect';
 
 // Plan definitions live in config/planCatalog.js, shared with MarketingHome and
 // kept in step with the backend catalog by a test — see that file.
@@ -427,6 +428,8 @@ const Profile = () => {
   };
 
   const formatDate = (dateString) => {
+    // lastLoginAt is null until a first real sign-in; new Date(null) is 1970.
+    if (!dateString) return '—';
     return new Date(dateString).toLocaleDateString(currentLang === 'ja' ? 'ja-JP' : 'en-US', {
       year: 'numeric', month: 'long', day: 'numeric'
     });
@@ -460,12 +463,16 @@ const Profile = () => {
   const hasPlan = isPlanEntitled(org);
   const cancellationScheduled = !!(hasPlan && org.cancelAtPeriodEnd);
   const canManageBilling = !!org && ['owner', 'admin'].includes(org.role);
-  const accountTypeClass = hasPlan ? 'paid' : user.accountType;
+  // A platform administrator's badge names the role rather than a plan.
+  const isPlatformAdmin = isSystemAdmin(user);
+  const accountTypeClass = isPlatformAdmin ? user.systemRole : hasPlan ? 'paid' : user.accountType;
   // Plan display is derived from the organization's real plan, never from
   // user.accountType. accountType feeds nothing in the quota system (getAccountLimits
   // keys off planType_billingCycle) and a legacy 'pro' value there would otherwise be
   // shown as if the user had bought the Pro tier.
-  const accountTypeLabel = hasPlan
+  const accountTypeLabel = isPlatformAdmin
+    ? t(user.systemRole === 'superadmin' ? 'adminRoleSuperadmin' : 'adminRoleAdmin')
+    : hasPlan
     ? `${PLAN_NAMES[org.planType] ? t(PLAN_NAMES[org.planType]) : org.planType} (${BILLING_LABELS[org.billingCycle] ? t(BILLING_LABELS[org.billingCycle]) : org.billingCycle})`
     : t('planFree');
 
