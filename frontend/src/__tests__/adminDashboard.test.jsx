@@ -145,7 +145,10 @@ describe('System Health tab', () => {
       svc('mongodb', 'healthy', { critical: true }),
       svc('zap', 'idle', { category: 'scanner', metrics: { desiredCount: 0, runningCount: 0, pendingCount: 0 } }),
       svc('pagespeed', 'configured', { category: 'scanner', basis: 'recent_activity', notes: ['no_recent_activity'], latencyMs: null }),
-      svc('aws_alarms', 'unknown', { category: 'infrastructure', basis: 'aws_api', reason: 'permission_denied' }),
+      svc('email', 'unknown', { category: 'messaging', basis: 'aws_api', reason: 'permission_denied' }),
+      // Reported by the server but hidden on the page.
+      svc('aws_backend', 'unknown', { category: 'infrastructure', basis: 'aws_api', reason: 'not_configured' }),
+      svc('aws_alarms', 'unknown', { category: 'infrastructure', basis: 'aws_api', reason: 'not_configured' }),
       svc('stripe', 'unavailable', { category: 'billing', reason: 'auth_failed' }),
       svc('queues', 'healthy', { metrics: { queues: {
         scan: { reachable: true, waiting: 1, active: 0, delayed: 0, failed: 2, oldestWaitingSec: null, workerRunning: true },
@@ -170,8 +173,10 @@ describe('System Health tab', () => {
     expect(screen.getByText(/adminOnlineCount.*"online":"4".*"total":"7"/)).toBeTruthy();
     expect(within(card('adminHealthSvcPagespeed')).getByText('adminHealthConfigured')).toBeTruthy();
     expect(within(card('adminHealthSvcPagespeed')).getByText('adminHealthNoteNoRecentActivity')).toBeTruthy();
-    expect(within(card('adminHealthSvcAwsAlarms')).getByText('adminHealthUnknown')).toBeTruthy();
-    expect(within(card('adminHealthSvcAwsAlarms')).getByText('adminHealthReasonPermissionDenied')).toBeTruthy();
+    expect(within(card('adminHealthSvcEmail')).getByText('adminHealthUnknown')).toBeTruthy();
+    expect(within(card('adminHealthSvcEmail')).getByText('adminHealthReasonPermissionDenied')).toBeTruthy();
+    expect(screen.queryByText('adminHealthSvcAwsBackend')).toBeNull();
+    expect(screen.queryByText('adminHealthSvcAwsAlarms')).toBeNull();
     expect(within(card('adminHealthSvcZap')).getByText('adminHealthIdle')).toBeTruthy();
     expect(within(card('adminHealthSvcStripe')).getByText('adminHealthReasonAuthFailed')).toBeTruthy();
 
@@ -182,7 +187,7 @@ describe('System Health tab', () => {
     expect(card('adminHealthSvcPagespeed').className).not.toMatch(/--ok|--err/);
 
     expect(screen.getByText('new_thing')).toBeTruthy();
-    expect(document.querySelectorAll('.admin-health-card')).toHaveLength(REPORT.services.length);
+    expect(document.querySelectorAll('.admin-health-card')).toHaveLength(REPORT.services.length - 2);
   });
 
   it('still draws every card for an older backend’s `checks` response, without counting "configured" as online', async () => {

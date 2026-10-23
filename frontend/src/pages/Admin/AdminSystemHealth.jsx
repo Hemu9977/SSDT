@@ -9,10 +9,8 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  FaBell,
   FaBolt,
   FaCamera,
-  FaCloud,
   FaCreditCard,
   FaDatabase,
   FaEnvelope,
@@ -88,9 +86,10 @@ const ICONS = {
   stripe: <FaCreditCard />,
   stripe_webhooks: <FaExchangeAlt />,
   email: <FaEnvelope />,
-  aws_backend: <FaCloud />,
-  aws_alarms: <FaBell />,
 };
+
+// Reported by the server but deliberately not shown on this page.
+const HIDDEN_IDS = new Set(['aws_backend', 'aws_alarms']);
 
 // ── Older backends ───────────────────────────────────────────────────────────
 // A backend that predates the service inventory (production `fortexa-backend:88`,
@@ -238,17 +237,6 @@ const detailsFor = (svc, t, lang) => {
       if (m.transport === 'smtp') add('transport', t('adminHealthSmtp'));
       if (m.transport === 'ses' && m.max24h !== undefined) add('sent', t('adminHealthSesSent', { sent: n(m.sentLast24h), max: n(m.max24h) }));
       break;
-    case 'aws_backend':
-      if (m.ecs) add('ecs', t('adminHealthEcs', { running: n(m.ecs.runningCount), desired: n(m.ecs.desiredCount) }));
-      if (m.ecs && m.ecs.taskDefinition) add('taskdef', m.ecs.taskDefinition);
-      if (m.targets) add('targets', t('adminHealthTargets', { healthy: n(m.targets.healthy), unhealthy: n(m.targets.unhealthy) }));
-      if (m.http15m) add('http', t('adminHealthHttp15m', { requests: n(m.http15m.requests), errors: n(m.http15m.target5xx + m.http15m.lb5xx) }));
-      else if (m.parts && m.parts.http) add('http', t('adminHealthHttpUnavailable'));
-      break;
-    case 'aws_alarms':
-      if (m.total !== undefined) add('counts', t('adminHealthAlarms', { alarm: n(m.alarm), ok: n(m.ok), insufficient: n(m.insufficientData) }));
-      if (m.firing && m.firing.length) add('firing', t('adminHealthFiring', { names: m.firing.join(', ') }), true);
-      break;
     default:
       break;
   }
@@ -352,7 +340,7 @@ const AdminSystemHealth = () => {
     );
   }
 
-  const services = data.services || [];
+  const services = (data.services || []).filter((svc) => !HIDDEN_IDS.has(svc.id));
   const summary = data.summary || { operational: 0, total: services.length };
   const allOperational = summary.total > 0 && summary.operational === summary.total;
 
