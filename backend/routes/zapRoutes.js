@@ -11,7 +11,7 @@ const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId systemRole');
     if (!u) return 'critical-high';
     let org = null;
     if (u.organizationId) {
@@ -167,7 +167,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         // on success instead — the same pattern as pageSpeedRoutes/webCheckRoutes.
         // (This used to live in runZapScanWithDB as a finalizeSuccessfulScan call;
         // it moved here so finalizeSuccessfulScan has exactly one caller.)
-        if (req.organization && req.planUser) {
+        if (req.organization && req.planUser && !req.quotaExempt) {
           const limits = req.planUser.getAccountLimits(req.organization);
           await consumeScan(req.organization._id, {
             target: url,

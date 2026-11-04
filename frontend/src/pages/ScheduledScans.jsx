@@ -162,14 +162,17 @@ const ScheduledScans = () => {
             <div className="usage-stat">
               <span className="usage-label">{t('activeSchedules')}</span>
               <span className="usage-value">
-                {limits.activeSchedules || 0} / {limits.maxSchedules || 0}
+                {/* maxSchedules -1 = unlimited (superadmin) */}
+                {limits.activeSchedules || 0} / {limits.maxSchedules < 0 ? '∞' : (limits.maxSchedules || 0)}
               </span>
             </div>
             <div className="usage-progress">
               <div
                 className="usage-progress-fill"
                 style={{
-                  width: `${Math.min(100, ((limits.activeSchedules || 0) / Math.max(1, limits.maxSchedules || 1)) * 100)}%`
+                  width: limits.maxSchedules < 0
+                    ? '0%'
+                    : `${Math.min(100, ((limits.activeSchedules || 0) / Math.max(1, limits.maxSchedules || 1)) * 100)}%`
                 }}
               />
             </div>

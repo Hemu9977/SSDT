@@ -13,6 +13,16 @@ export const isPlanEntitled = (org) => {
   return typeof org.entitled === 'boolean' ? org.entitled : org.subscriptionStatus === 'active';
 };
 
-/** True when the org can start a scan: a live plan, or purchased scan credits. */
-export const hasScanAccess = (org) =>
-  isPlanEntitled(org) || Boolean(org && org.extraScansRemaining > 0);
+/**
+ * True for an account with no scan limit at all — the backend sends
+ * `limits.scansPerMonth: -1` only for superadmins (backend/utils/quotaExemption.js),
+ * who may scan with no plan and no organization.
+ */
+export const hasUnlimitedScans = (limits) => Boolean(limits && limits.scansPerMonth === -1);
+
+/**
+ * True when the account can start a scan: unlimited, a live plan, or purchased
+ * scan credits. `limits` is GET /api/profile's `limits`.
+ */
+export const hasScanAccess = (org, limits = null) =>
+  hasUnlimitedScans(limits) || isPlanEntitled(org) || Boolean(org && org.extraScansRemaining > 0);

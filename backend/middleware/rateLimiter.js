@@ -51,6 +51,12 @@ const POLL_RATE_LIMIT_WINDOW_MS = getEnvInt('POLL_RATE_LIMIT_WINDOW_MS', 600000)
  */
 const limitKey = (req) => req.authUserId || req.user?.id || ipKeyGenerator(req.ip);
 
+// Superadmins (utils/quotaExemption.js) skip the plan-sized scan budget but are
+// still held to one scan start per minute — see exemptScanLimiter below.
+// `req.quotaExempt` is set by middleware/planCheck.js, which every scan-start route
+// runs BEFORE these limiters; on any route without planCheck it is undefined.
+const isQuotaExemptReq = (req) => req.quotaExempt === true;
+
 // Log rate limit configuration on startup
 console.log('📊 Rate Limit Configuration:');
 console.log(`   - Enabled: ${isRateLimitEnabled}`);
@@ -166,9 +172,25 @@ const loginSetupLimiter = isRateLimitEnabled ? rateLimit({
   }
 }) : createBypassMiddleware();
 
+// 429 for "one scan start per COMBINED window" — shared by combinedScanLimiter and
+// the superadmin limiter so the client sees the same errorCode from either.
+const oneScanPerWindowHandler = (label) => (req, res) => {
+  const identifier = req.authUserId ? `User ${req.authUserId}` : `IP ${req.ip}`;
+  const retryAfterSeconds = Math.ceil(COMBINED_SCAN_RATE_LIMIT_WINDOW_MS / 1000);
+  console.log(`⚠️  ${label} rate limit exceeded for ${identifier} on ${req.path}`);
+  res.status(429).json({
+    // Never name the underlying scan engines: reports are resold and clients
+    // must not learn which third-party scanners are in use.
+    error: `You can only start one scan per ${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}.`,
+    errorCode: 'SCAN_RATE_LIMITED',
+    retryAfter: `${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}`,
+    retryAfterSeconds: retryAfterSeconds
+  });
+};
+
 // Moderate rate limiter for scan-STARTING routes (20 requests per 10 minutes by
 // default). Read-only polling must use pollLimiter instead — see below.
-const scanLimiter = isRateLimitEnabled ? rateLimit({
+const planScanLimiter = isRateLimitEnabled ? rateLimit({
   windowMs: SCAN_RATE_LIMIT_WINDOW_MS,
   max: SCAN_RATE_LIMIT_MAX,
   message: {
@@ -188,7 +210,24 @@ const scanLimiter = isRateLimitEnabled ? rateLimit({
   }
 }) : createBypassMiddleware();
 
-// Strict rate limiter for combined scans (1 scan per minute by default)
+// Superadmins have no plan budget, but one of the external scanners accepts only
+// one request per minute, so they still get one scan start per COMBINED window.
+// This store is shared by EVERY route that uses scanLimiter, so a normal and an
+// authenticated scan (which also calls that scanner) can't start in the same minute.
+const exemptScanLimiter = isRateLimitEnabled ? rateLimit({
+  windowMs: COMBINED_SCAN_RATE_LIMIT_WINDOW_MS,
+  max: COMBINED_SCAN_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: limitKey,
+  handler: oneScanPerWindowHandler('Superadmin scan')
+}) : createBypassMiddleware();
+
+const scanLimiter = (req, res, next) =>
+  (isQuotaExemptReq(req) ? exemptScanLimiter : planScanLimiter)(req, res, next);
+
+// Strict rate limiter for combined scans (1 scan per minute by default), applied
+// to everyone including superadmins.
 // This respects external API limits: Mozilla Observatory (1/min), PageSpeed, Gemini
 const combinedScanLimiter = isRateLimitEnabled ? rateLimit({
   windowMs: COMBINED_SCAN_RATE_LIMIT_WINDOW_MS,
@@ -200,19 +239,7 @@ const combinedScanLimiter = isRateLimitEnabled ? rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: limitKey,
-  handler: (req, res) => {
-    const identifier = req.authUserId ? `User ${req.authUserId}` : `IP ${req.ip}`;
-    const retryAfterSeconds = Math.ceil(COMBINED_SCAN_RATE_LIMIT_WINDOW_MS / 1000);
-    console.log(`⚠️  Combined scan rate limit exceeded for ${identifier} on ${req.path}`);
-    res.status(429).json({
-      // Never name the underlying scan engines: reports are resold and clients
-      // must not learn which third-party scanners are in use.
-      error: `You can only start one scan per ${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}.`,
-      errorCode: 'SCAN_RATE_LIMITED',
-      retryAfter: `${retryAfterSeconds} second${retryAfterSeconds > 1 ? 's' : ''}`,
-      retryAfterSeconds: retryAfterSeconds
-    });
-  }
+  handler: oneScanPerWindowHandler('Combined scan')
 }) : createBypassMiddleware();
 
 // Generous limiter for read-only status polling (600 requests per 10 minutes by

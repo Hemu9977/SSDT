@@ -66,6 +66,7 @@ require.cache[path.join(BACKEND, 'models/ScanResult.js')] = {
     countDocuments: async (q) => state.inFlight.filter((s) =>
       String(s.organizationId) === String(q.organizationId) &&
       q.status.$in.includes(s.status) &&
+      (!q.admittedBy || s.admittedBy !== q.admittedBy.$ne) &&
       s._id < q._id.$lt
     ).length,
   },
@@ -328,6 +329,42 @@ test('claimScanSlot fails open when the database errors', async () => {
   delete state.org;
   state.org = saved;
   assert.equal(allowed, true, 'a Mongo blip must not stop every customer scanning');
+});
+
+// ─── Superadmin: unlimited, never charged ────────────────────────────────────
+
+test('claimScanSlot admits a superadmin scan even with no capacity left', async () => {
+  reset({ scansUsed: 3, scanLimit: 3 });
+  withInFlight(5);
+  state.user.systemRole = 'superadmin';
+  assert.equal(await claimScanSlot('org-1', 'scan-1'), true);
+  assert.equal(state.scan.admittedBy, 'exempt');
+});
+
+test('a plain admin is NOT exempt from the plan', async () => {
+  reset({ scansUsed: 3, scanLimit: 3 });
+  withInFlight(0);
+  state.user.systemRole = 'admin';
+  assert.equal(await claimScanSlot('org-1', 'scan-1'), false);
+});
+
+test("a superadmin's in-flight scans do not take the org's slots", async () => {
+  // One slot left. A superadmin scan already running in the same org must not
+  // push a paying member's scan out of it.
+  reset({ scansUsed: 2, scanLimit: 3 });
+  state.inFlight = [{ _id: 'a0', organizationId: 'org-1', status: 'combining', admittedBy: 'exempt' }];
+  state.scan._id = 'zzz';
+  assert.equal(await claimScanSlot('org-1', 'scan-1'), true);
+});
+
+test('finalizeSuccessfulScan never charges a superadmin scan', async () => {
+  reset({ scansUsed: 3, scanLimit: 3 });
+  state.user.systemRole = 'superadmin';
+  await finalizeSuccessfulScan('scan-1');
+  assert.equal(state.consumeCalls, 0);
+  assert.equal(state.org.scansUsed, 3);
+  assert.equal(state.scan.quotaConsumed, true, 'settled, so no retry tries to charge it later');
+  assert.equal(state.scan.quotaSource, 'exempt');
 });
 
 // ─── availableCapacity: credits count toward concurrency ─────────────────────

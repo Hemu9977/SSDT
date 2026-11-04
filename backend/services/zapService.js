@@ -5,6 +5,7 @@ const axios = require('axios');
 const ScanResult = require('../models/ScanResult');
 const ZapAlert = require('../models/ZapAlert');
 const gridfsService = require('./gridfsService');
+const { loadEvidenceAlerts } = require('./zapDetailedAlerts');
 const cleanupService = require('./cleanupService');
 const { publishScanProgress } = require('./scanProgressService');
 const { getSanitizedAlerts } = require('../utils/vulnFilter');
@@ -596,7 +597,7 @@ async function runZapScanWithUrlTracking(options) {
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId systemRole');
     if (!u) return 'critical-high';
     let org = null;
     if (u.organizationId) {
@@ -611,6 +612,9 @@ async function resolveVulnAccessLevel(userId) {
 /**
  * Express route to download detailed alert report
  * Usage: GET /api/zap/detailed-report/:scanId
+ *        GET /api/zap/detailed-report/:scanId?view=evidence — only the first
+ *        request/response pairs per finding, for the scan page's evidence panel
+ *        (zapDetailedAlerts.loadEvidenceAlerts). The full file can be hundreds of MB.
  */
 async function downloadDetailedReport(req, res) {
   try {
@@ -646,6 +650,10 @@ async function downloadDetailedReport(req, res) {
     // then send filtered JSON — same pattern as the JSON export and auth route.
     const bucket = detailedFile.filename.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
     const accessLevel = await resolveVulnAccessLevel(req.user.id);
+    if (req.query?.view === 'evidence') {
+      const alerts = await loadEvidenceAlerts(detailedFile.fileId, bucket);
+      return res.json(getSanitizedAlerts(alerts, accessLevel));
+    }
     const rawBuf = await gridfsService.downloadFile(detailedFile.fileId, bucket);
     const rawAlerts = JSON.parse(rawBuf.toString('utf-8'));
     const filteredAlerts = getSanitizedAlerts(rawAlerts, accessLevel);

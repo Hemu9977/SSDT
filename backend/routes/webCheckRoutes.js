@@ -47,13 +47,15 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         console.log(`⚡ WebCheck scan request: ${type} for ${url}`);
         const results = await webCheckService.runScan(type, url);
 
-        const limits = req.planUser.getAccountLimits(req.organization);
-        await consumeScan(req.organization._id, {
-            target: url,
-            scansPerTarget: limits.scansPerTarget,
-            targetsPerMonth: limits.targetsPerMonth
-        });
-        console.log(`[Billing] Scan completed - quota deducted: standalone-webcheck-${type}-${url}`);
+        if (!req.quotaExempt) {
+            const limits = req.planUser.getAccountLimits(req.organization);
+            await consumeScan(req.organization._id, {
+                target: url,
+                scansPerTarget: limits.scansPerTarget,
+                targetsPerMonth: limits.targetsPerMonth
+            });
+            console.log(`[Billing] Scan completed - quota deducted: standalone-webcheck-${type}-${url}`);
+        }
 
         res.json({
             success: true,

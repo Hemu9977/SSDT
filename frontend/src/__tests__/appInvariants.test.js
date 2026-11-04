@@ -533,3 +533,27 @@ describe('plan catalog', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe('scan access (Hero gates a scan on this before calling the server)', () => {
+  const { hasScanAccess, hasUnlimitedScans } = require('../utils/planAccess');
+  const UNLIMITED = { scansPerMonth: -1 };
+
+  it('lets an unlimited (superadmin) account scan with no plan or organization', () => {
+    // Before this, Hero sent a superadmin without a paid plan to /profile.
+    expect(hasUnlimitedScans(UNLIMITED)).toBe(true);
+    expect(hasScanAccess(null, UNLIMITED)).toBe(true);
+    expect(hasScanAccess({ planType: null, entitled: false }, UNLIMITED)).toBe(true);
+  });
+
+  it('still requires a plan or credits from everyone else', () => {
+    expect(hasScanAccess(null, { scansPerMonth: 20 })).toBe(false);
+    expect(hasScanAccess(null, null)).toBe(false);
+    expect(hasScanAccess({ planType: 'light', entitled: false }, {})).toBe(false);
+    expect(hasScanAccess({ planType: 'light', entitled: true }, {})).toBe(true);
+    expect(hasScanAccess({ extraScansRemaining: 2 })).toBe(true);
+  });
+
+  it('Hero passes the profile limits to the gate', () => {
+    expect(read('components/Hero.jsx')).toMatch(/hasScanAccess\(organization, limits\)/);
+  });
+});

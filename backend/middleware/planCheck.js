@@ -10,6 +10,8 @@
  *  - Per-target scan quota (annual plans)
  *  - One-time / trial remaining scans
  *
+ * Superadmins (utils/quotaExemption.js) bypass all of the above.
+ *
  * Does NOT increment anything. This middleware only calls checkScanQuota(),
  * which is read-only — the atomic decrement happens later, in consumeScan()
  * via finalizeSuccessfulScan(), when the scan actually completes.
@@ -27,12 +29,23 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const { checkScanQuota } = require('../services/planService');
 const { refreshIfExpired } = require('../services/subscriptionLifecycle');
+const { isQuotaExempt } = require('../utils/quotaExemption');
 
 module.exports = async function planCheck(req, res, next) {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(401).json({ success: false, code: 'USER_NOT_FOUND', error: 'UNAUTHORIZED', message: 'User account not found' });
+    }
+
+    // Superadmins skip every plan check, with or without an organization.
+    // req.quotaExempt also lets the scan-start rate limiters (which run after
+    // this middleware) and the standalone routes' inline charge skip them.
+    if (isQuotaExempt(user)) {
+      req.organization = user.organizationId ? await Organization.findById(user.organizationId) : null;
+      req.planUser = user;
+      req.quotaExempt = true;
+      return next();
     }
 
     if (!user.organizationId) {

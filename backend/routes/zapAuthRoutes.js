@@ -24,6 +24,7 @@ const { requestContainer, releaseContainer } = require('../services/zapContainer
 const ScanResult = require('../models/ScanResult');
 const { checkScanTarget } = require('../utils/scanTargetGuard');
 const gridfsService = require('../services/gridfsService');
+const { loadEvidenceAlerts } = require('../services/zapDetailedAlerts');
 
 // The four fast scanners are no longer started from this file — that moved to
 // services/authFastScanService.js. Only the WebCheck result reader is still needed
@@ -37,7 +38,7 @@ const { scanLimiter, loginSetupLimiter } = require('../middleware/rateLimiter');
 /** Resolve plan-based vulnerability access level; defaults to most restrictive. */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId systemRole');
     if (!u) return 'critical-high';
     let org = null;
     if (u.organizationId) {
@@ -837,6 +838,8 @@ router.get('/scans', auth, async (req, res) => {
 /**
  * GET /api/zap-auth/detailed-report/:scanId
  * Download detailed vulnerability JSON report from GridFS.
+ * ?view=evidence returns only the first request/response pairs per finding, for
+ * the scan page's evidence panel (see zapService.downloadDetailedReport).
  */
 router.get('/detailed-report/:scanId', auth, async (req, res) => {
   try {
@@ -868,6 +871,10 @@ router.get('/detailed-report/:scanId', auth, async (req, res) => {
 
     // Download raw buffer, apply plan filter, then send filtered JSON
     const accessLevel = await resolveVulnAccessLevel(req.user.id);
+    if (req.query.view === 'evidence') {
+      const alerts = await loadEvidenceAlerts(detailedFile.fileId, 'zap_auth_reports');
+      return res.json(getSanitizedAlerts(alerts, accessLevel));
+    }
     const rawBuf = await gridfsService.downloadFile(detailedFile.fileId, 'zap_auth_reports');
     const rawAlerts = JSON.parse(rawBuf.toString('utf-8'));
     const filteredAlerts = getSanitizedAlerts(rawAlerts, accessLevel);

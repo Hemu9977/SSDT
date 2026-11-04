@@ -9,8 +9,9 @@ import '../styles/Profile.scss';
 
 import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
-import { isPlanEntitled } from '../utils/planAccess';
+import { isPlanEntitled, hasUnlimitedScans } from '../utils/planAccess';
 import { isSystemAdmin } from '../utils/authRedirect';
+import { requestTimeout } from '../utils/requestTimeout';
 
 // Plan definitions live in config/planCatalog.js, shared with MarketingHome and
 // kept in step with the backend catalog by a test — see that file.
@@ -19,6 +20,21 @@ import { PLANS, PLAN_NAMES, formatYen } from '../config/planCatalog';
 const BILLING_LABELS = { monthly: 'billingMonthly', annual: 'billingAnnual', onetime: 'billingOneTime' };
 const PAYMENT_POLL_MAX_ATTEMPTS = 12;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
+// Without a deadline, a profile request the server never answered left the page
+// on "Loading profile..." until a proxy gave up.
+const PROFILE_TIMEOUT_MS = 30000;
+
+// Recent Scans shows the scan's state in the UI language; the raw backend enum
+// (e.g. "Combining") is neither translated nor meaningful to a customer.
+const RECENT_SCAN_STATUS_LABELS = {
+  completed: 'completed',
+  failed: 'failed',
+  queued: 'recentScanInProgress',
+  pending: 'recentScanInProgress',
+  combining: 'recentScanInProgress',
+  stopped: 'recentScanStopped',
+  cancelled: 'recentScanStopped',
+};
 
 // PLANS[...].price is the TAX-EXCLUSIVE amount; the matching Stripe Price is set to
 // the same figure. Stripe adds the tax itself via the fixed Tax Rate referenced by
@@ -126,7 +142,10 @@ const Profile = () => {
 
   const isPlanActive = (data) => isPlanEntitled(data?.user?.organization);
 
-  const fetchProfile = async () => {
+  // `syncUser` re-reads the shared UserContext afterwards, which is a second
+  // GET /api/profile. Only needed after something here changed the account; on
+  // first load the context already holds it.
+  const fetchProfile = async ({ syncUser = true } = {}) => {
     const token = localStorage.getItem('token');
 
     if (!token) {
@@ -134,13 +153,14 @@ const Profile = () => {
       return;
     }
 
+    const deadline = requestTimeout(PROFILE_TIMEOUT_MS);
     try {
       const res = await fetch(`${API_BASE}/api/profile`, {
-        headers: { 'x-auth-token': token }
+        headers: { 'x-auth-token': token },
+        signal: deadline.signal
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
         if (res.status === 401) {
           localStorage.removeItem('token');
           setError(t('sessionExpiredLoginAgain'));
@@ -148,20 +168,31 @@ const Profile = () => {
           setLoading(false);
           return;
         }
-        throw new Error(errorData.message || t('failedFetchProfile'));
+        // The backend's `message` is English-only and for logs — never shown.
+        throw Object.assign(new Error(t('failedFetchProfile')), { localized: true });
       }
 
       const data = await res.json();
+      if (!data?.user) throw Object.assign(new Error(t('failedLoadProfile')), { localized: true });
       setProfile(data);
       setFormData({ name: data.user.name, bio: data.user.bio || '' });
-      refreshUser();
+      if (syncUser) refreshUser();
       setLoading(false);
       return data;
     } catch (err) {
-      setError(err.message || t('failedLoadProfile'));
+      // A network error's message is the browser's English text — not shown either.
+      setError(deadline.timedOut ? t('profileLoadTimedOut') : (err.localized ? err.message : t('failedLoadProfile')));
       setLoading(false);
       return null;
+    } finally {
+      deadline.clear();
     }
+  };
+
+  const retryFetchProfile = () => {
+    setError(null);
+    setLoading(true);
+    fetchProfile();
   };
 
   const refreshActivationStatus = async () => {
@@ -225,7 +256,7 @@ const Profile = () => {
   };
 
   useEffect(() => {
-    fetchProfile();
+    fetchProfile({ syncUser: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -450,7 +481,14 @@ const Profile = () => {
       <div className="profile-page">
         <ParticleBackground />
         <Header />
-        <main><div className="profile-container"><div className="error">{error}</div></div></main>
+        <main>
+          <div className="profile-container">
+            <div className="error">{error}</div>
+            <button type="button" className="btn-edit" onClick={retryFetchProfile} style={{ marginTop: '1rem' }}>
+              {t('retryLoad')}
+            </button>
+          </div>
+        </main>
       </div>
     );
   }
@@ -465,6 +503,7 @@ const Profile = () => {
   const canManageBilling = !!org && ['owner', 'admin'].includes(org.role);
   // A platform administrator's badge names the role rather than a plan.
   const isPlatformAdmin = isSystemAdmin(user);
+  const unlimitedScans = hasUnlimitedScans(profile.limits);
   const accountTypeClass = isPlatformAdmin ? user.systemRole : hasPlan ? 'paid' : user.accountType;
   // Plan display is derived from the organization's real plan, never from
   // user.accountType. accountType feeds nothing in the quota system (getAccountLimits
@@ -589,7 +628,7 @@ const Profile = () => {
                 <div className="stat-label">{t('scansUsedLabel')}</div>
               </div>
               <div className="stat-card">
-                <div className="stat-value">{org && org.scanLimit > 0 ? org.scanLimit : t('noPlanScanLimit')}</div>
+                <div className="stat-value">{unlimitedScans ? t('unlimitedScanLimit') : org && org.scanLimit > 0 ? org.scanLimit : t('noPlanScanLimit')}</div>
                 <div className="stat-label">{t('planScanLimitLabel')}</div>
               </div>
               {org && org.extraScansRemaining > 0 && (
@@ -613,14 +652,14 @@ const Profile = () => {
                   <div key={scan._id} className="scan-item clickable"
                     onClick={() => navigate(`/scan/${scan.analysisId}`)}
                     style={{ cursor: 'pointer', transition: 'all 0.2s ease' }}
-                    title={t('clickViewScanResults', { status: scan.status })}>
+                    title={t('clickViewScanResults', { status: t(RECENT_SCAN_STATUS_LABELS[scan.status] || 'recentScanInProgress') })}>
                     <div className="scan-target">{scan.target}</div>
                     <div className="scan-details">
                       {scan.triggerSource === 'scheduled' && (
                         <span className="scan-tag scheduled">{t('scheduledScan')}</span>
                       )}
                       <span className={`scan-status ${scan.status}`}>
-                        {scan.status.charAt(0).toUpperCase() + scan.status.slice(1)}
+                        {t(RECENT_SCAN_STATUS_LABELS[scan.status] || 'recentScanInProgress')}
                       </span>
                       <span className="scan-date">{formatDate(scan.createdAt)}</span>
                       <span className="view-scan-icon" style={{ marginLeft: '0.5rem', opacity: 0.7 }}>→</span>
@@ -723,7 +762,7 @@ const Profile = () => {
               </div>
 
               {/* ── Top-Up: extra scans, purchasable any time while subscribed ────── */}
-              {['owner', 'admin'].includes(org.role) && (
+              {['owner', 'admin'].includes(org.role) && !unlimitedScans && (
                 <div style={{ marginTop: '2.5rem', borderTop: '1px solid rgba(255,107,0,0.3)', paddingTop: '2.5rem' }}>
                   <h2 style={{ marginBottom: '1rem', fontSize: '1.5rem', fontWeight: 800, color: 'var(--accent-light)', textTransform: 'uppercase', letterSpacing: '1px' }}>
                     {t('topUpSectionTitle')}
@@ -843,7 +882,8 @@ const Profile = () => {
           )}
 
           {/* ── Plan Selection (for users without an active plan) ────────────── */}
-          {!hasPlan && (
+          {/* Unlimited (superadmin) accounts have nothing to buy. */}
+          {!hasPlan && !unlimitedScans && (
             <div className="profile-section pro-upgrade-section">
               <h2>{t('choosePlan')}</h2>
 

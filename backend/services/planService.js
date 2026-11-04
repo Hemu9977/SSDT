@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Organization = require('../models/Organization');
 const { isSubscriptionEntitled, entitlementFilter } = require('../utils/entitlement');
+const { isQuotaExempt } = require('../utils/quotaExemption');
 
 /**
  * Normalize a scan target to its lowercase hostname so the same site under
@@ -128,8 +129,18 @@ async function claimScanSlot(orgId, analysisId) {
   try {
     if (!orgId) return true; // no org → nothing to meter against; planCheck already 403s
 
-    const scan = await ScanResult.findOne({ analysisId }, { _id: 1, organizationId: 1 });
+    const scan = await ScanResult.findOne({ analysisId }, { _id: 1, organizationId: 1, userId: 1 });
     if (!scan) return true; // caller order bug, not the customer's problem — let it run
+
+    // A superadmin's scan is admitted unconditionally and tagged so it never
+    // occupies one of the org's slots in other members' rank queries below.
+    const User = require('../models/User');
+    const owner = scan.userId ? await User.findById(scan.userId, { systemRole: 1 }) : null;
+    if (isQuotaExempt(owner)) {
+      await ScanResult.updateOne({ analysisId }, { $set: { admittedBy: 'exempt' } })
+        .catch(err => console.warn(`⚠️  [planService] could not record admittedBy for ${analysisId}:`, err.message));
+      return true;
+    }
 
     const org = await Organization.findById(orgId);
     if (!org) return true;
@@ -139,6 +150,7 @@ async function claimScanSlot(orgId, analysisId) {
     const rank = await ScanResult.countDocuments({
       organizationId: orgId,
       status: { $in: IN_FLIGHT_STATUSES },
+      admittedBy: { $ne: 'exempt' },
       _id: { $lt: scan._id }
     });
 
@@ -463,6 +475,19 @@ async function finalizeSuccessfulScan(scanId) {
     );
     if (!claimed) {
       console.log(`[Billing] Scan ${scanId} already claimed by another finalize call — not charging again.`);
+      return;
+    }
+
+    // Superadmin scans are never charged. Still counted in the all-time total
+    // (admin dashboard), and only after the claim so a repeat finalize can't
+    // count the same scan twice.
+    if (isQuotaExempt(user)) {
+      await Organization.updateOne({ _id: org._id }, { $inc: { totalScansAllTime: 1 } });
+      await ScanResult.updateOne(
+        { analysisId: scanId },
+        { $set: { quotaSource: 'exempt' } }
+      ).catch(() => { /* bookkeeping only */ });
+      console.log(`[Billing] Scan ${scanId} run by a superadmin — not charged.`);
       return;
     }
 

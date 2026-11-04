@@ -235,6 +235,7 @@ UserSchema.methods.checkAndResetMonthlyScans = function () {
 // scans per target. That is a billing-cycle behaviour, not a property of the plan.
 const { PLAN_CATALOG, RECURRING_PLANS, ONETIME_PLANS } = require('../config/planCatalog');
 const { isSubscriptionEntitled } = require('../utils/entitlement');
+const { isQuotaExempt } = require('../utils/quotaExemption');
 
 const PLAN_LIMITS = {};
 
@@ -273,8 +274,22 @@ PLAN_LIMITS.free = {
   maxSchedules: 2
 };
 
+// Superadmins (utils/quotaExemption.js): no caps, every severity. -1 / null are
+// the existing "unlimited" conventions (see PLAN_LIMITS.free.targetsPerMonth).
+const EXEMPT_LIMITS = {
+  scansPerMonth: -1,
+  targetsPerMonth: -1,
+  scansPerTarget: null,
+  vulnerabilityAccessLevel: 'all',
+  maxSchedules: -1
+};
+
 // ─── METHOD: Get account limits (SINGLE SOURCE OF TRUTH) ─────────────────────
 UserSchema.methods.getAccountLimits = function (org = null) {
+  if (isQuotaExempt(this)) {
+    return { ...EXEMPT_LIMITS, scansPerDay: -1, maxFileSize: 100 * 1024 * 1024, priorityQueue: true };
+  }
+
   // Use organization plan if available, otherwise fallback to user plan
   const source = org || this;
 

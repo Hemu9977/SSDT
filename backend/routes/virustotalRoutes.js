@@ -24,7 +24,7 @@ const { PDF_BUCKET, resolvePdfJobResponse, shouldReuseJob } = require('../servic
  */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId systemRole');
     if (!u) return 'critical-high';
     let org = null;
     if (u.organizationId) {
@@ -154,23 +154,12 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
         };
         response.zapData = getSanitizedZapData(rawZapData, accessLevel);
 
-        // Fetch detailed alerts from GridFS if available
-        if (zapSource.reportFiles && Array.isArray(zapSource.reportFiles)) {
-          const detailedAlertsFile = zapSource.reportFiles.find(
-            f => f.filename && f.filename.includes('detailed_alerts')
-          );
-          if (detailedAlertsFile && detailedAlertsFile.fileId) {
-            try {
-              const bucket = (detailedAlertsFile.filename && detailedAlertsFile.filename.includes('zap_auth'))
-                ? 'zap_auth_reports' : 'zap_reports';
-              const buffer = await gridfsService.downloadFile(detailedAlertsFile.fileId, bucket);
-              const rawAlerts = JSON.parse(buffer.toString('utf-8'));
-              response.zapData.detailedAlerts = getSanitizedAlerts(rawAlerts, accessLevel);
-            } catch (gridfsErr) {
-              console.warn(`[LoadScan] Could not fetch ZAP detailed alerts: ${gridfsErr.message}`);
-            }
-          }
-        }
+        // The detailed alerts (every occurrence with raw request/response) are NOT
+        // inlined here. They can be hundreds of MB — a production scan's file was
+        // 287 MB — and inlining them kept Recent Scans on a spinner for minutes
+        // while the browser downloaded and parsed them before showing anything.
+        // ZapReportEnhanced loads them on demand from /detailed-report/:scanId
+        // (same ownership check and plan filter) when an alert is first expanded.
       } else if (zs === 'running' || zs === 'pending') {
         response.zapData = {
           status: zs,

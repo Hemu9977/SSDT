@@ -1,5 +1,6 @@
 // middleware/requireOrg.js
 const User = require('../models/User');
+const { isQuotaExempt } = require('../utils/quotaExemption');
 
 module.exports = async (req, res, next) => {
   try {
@@ -12,7 +13,8 @@ module.exports = async (req, res, next) => {
       });
     }
 
-    if (!user.organizationId) {
+    // Superadmins may scan without an organization (utils/quotaExemption.js).
+    if (!user.organizationId && !isQuotaExempt(user)) {
       return res.status(403).json({
         error: 'ORG_REQUIRED',
         message: 'You must join an organization via invite or create one via payment.',

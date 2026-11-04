@@ -27,20 +27,22 @@ router.post('/analyze', auth, requireOrg, planCheck, async (req, res) => {
   }
 
   try {
-    console.log(`⚡ PageSpeed scan by user ${req.user.id} (Org: ${req.organization._id})`);
+    console.log(`⚡ PageSpeed scan by user ${req.user.id} (Org: ${req.organization?._id || 'none'})`);
 
     // `strategy` is accepted by the API for compatibility but the service does
     // not take it. This route imported `analyzeUrl`, which the service has never
     // exported, so every call threw a TypeError and answered 500.
     const report = await getPageSpeedReport(url);
 
-    const limits = req.planUser.getAccountLimits(req.organization);
-    await consumeScan(req.organization._id, {
-      target: url,
-      scansPerTarget: limits.scansPerTarget,
-      targetsPerMonth: limits.targetsPerMonth
-    });
-    console.log(`[Billing] Scan completed - quota deducted: standalone-pagespeed-${url}`);
+    if (!req.quotaExempt) {
+      const limits = req.planUser.getAccountLimits(req.organization);
+      await consumeScan(req.organization._id, {
+        target: url,
+        scansPerTarget: limits.scansPerTarget,
+        targetsPerMonth: limits.targetsPerMonth
+      });
+      console.log(`[Billing] Scan completed - quota deducted: standalone-pagespeed-${url}`);
+    }
 
     res.json({
       success: true,

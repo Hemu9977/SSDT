@@ -33,7 +33,7 @@ const { recordOutcome } = require('./healthSignals');
  */
 async function resolveVulnAccessLevel(userId) {
   try {
-    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId');
+    const u = await User.findById(userId).select('planType billingCycle accountType proExpiresAt organizationId systemRole');
     if (!u) return 'critical-high';
     let org = null;
     if (u.organizationId) {

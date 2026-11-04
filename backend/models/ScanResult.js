@@ -119,7 +119,8 @@ const scanResultSchema = new mongoose.Schema({
   // you bought in March". Written by finalizeSuccessfulScan after the charge lands.
   quotaSource: {
     type: String,
-    enum: ['subscription', 'credit', 'legacy', null],
+    // 'exempt' = run by a superadmin, never charged (utils/quotaExemption.js).
+    enum: ['subscription', 'credit', 'legacy', 'exempt', null],
     default: null
   },
   // Which pool admitted this scan at start (planService.claimScanSlot). Lets a scan
@@ -127,7 +128,8 @@ const scanResultSchema = new mongoose.Schema({
   // against that subscription instead of spending a purchased credit.
   admittedBy: {
     type: String,
-    enum: ['subscription', 'credit', null],
+    // 'exempt' = superadmin scan; excluded from the org's in-flight rank count.
+    enum: ['subscription', 'credit', 'exempt', null],
     default: null
   },
   // Set by the cleanup job once a failed/stopped scan's heavy artifacts (GridFS

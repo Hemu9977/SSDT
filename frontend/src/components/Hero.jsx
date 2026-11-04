@@ -13,7 +13,7 @@ import '../styles/ScoreCards.scss';
 
 import { API_BASE } from '../config/api';
 import { getApiErrorLabel } from '../utils/apiErrors';
-import { getScanStatusLine } from '../utils/scanStatus';
+import { getScanStatusLine, getCompletedStepCount, SCAN_STEP_COUNT } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
 import { hasScanAccess } from '../utils/planAccess';
@@ -73,7 +73,7 @@ const Hero = ({ historicalScan }) => {
   tRef.current = t;
   const { addScanListener, removeScanListener } = useNotifications();
   const { theme } = useTheme();
-  const { user, organization } = useUser();
+  const { user, organization, limits } = useUser();
 
   // Keep reportRef aligned with `report` after every commit, so setReport() calls made
   // outside the WebSocket handler (completion, historical load, reset) stay reflected.
@@ -215,11 +215,14 @@ const Hero = ({ historicalScan }) => {
       setReport(transformedReport);
       setIsHistorical(true);
       
-      // If scan is still in progress, resume polling
-      if (!['completed', 'failed', 'stopped'].includes(historicalScan.status)) {
+      // If scan is still in progress, resume polling. A scan opened from Recent Scans
+      // right after its scanners finish is usually still generating its report, which
+      // can take minutes — show which step it is on, not "0% Resuming scan".
+      if (!['completed', 'failed', 'stopped', 'cancelled'].includes(historicalScan.status)) {
         console.log(`🔄 Historical scan ${historicalScan.analysisId} is still ${historicalScan.status} - resuming`);
         setLoading(true);
-        setLoadingStage(t('resumingScan'));
+        setLoadingProgress(Math.round((getCompletedStepCount(transformedReport) / SCAN_STEP_COUNT) * 100));
+        setLoadingStage(getScanStatusLine(transformedReport, t));
         stopPollingRef.current = false;
 
         const token = localStorage.getItem('token');
@@ -659,7 +662,8 @@ const Hero = ({ historicalScan }) => {
       attempts++;
       const progressIncrement = 60 / maxAttempts;
       const currentProgress = Math.min(30 + (attempts * progressIncrement), 90);
-      setLoadingProgress(Math.floor(currentProgress));
+      // Never move backwards — a resumed scan may already show more than 30%.
+      setLoadingProgress((prev) => Math.max(prev, Math.floor(currentProgress)));
 
       try {
         // Create new AbortController for this request
@@ -826,9 +830,10 @@ const Hero = ({ historicalScan }) => {
     }
 
     // --- PROACTIVE PLAN GATING (org-based) ---
-    // A live plan or purchased scan credits (credits outlive a cancelled plan).
-    // user.planType is a legacy fallback for accounts with no organization only.
-    const hasActivePlan = hasScanAccess(organization) ||
+    // Unlimited (superadmin), a live plan, or purchased scan credits (credits
+    // outlive a cancelled plan). user.planType is a legacy fallback for accounts
+    // with no organization only.
+    const hasActivePlan = hasScanAccess(organization, limits) ||
                           (!organization && user && user.planType);
 
     if (!hasActivePlan) {

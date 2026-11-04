@@ -28,6 +28,7 @@ const { startAsyncZapScan } = require('./zapService');
 const { startAsyncWebCheckScan } = require('./webCheckService');
 
 const { checkScanQuota, claimScanSlot } = require('./planService');
+const { isQuotaExempt } = require('../utils/quotaExemption');
 const Organization = require('../models/Organization');
 
 /**
@@ -157,15 +158,18 @@ async function executeSingleSchedule(schedule) {
 
   // Validate plan limits before execution. Advisory only — the authoritative check
   // is claimScanSlot inside the trigger functions, which can also refuse.
-  const limits = await limitsForUser(user);
-  const result = await checkScanQuota(user.organizationId, {
-    target: schedule.targetUrl,
-    scansPerTarget: limits.scansPerTarget,
-    targetsPerMonth: limits.targetsPerMonth
-  });
-  if (!result) {
-    await failScheduleOnPlanLimit(schedule, user);
-    return;
+  // Superadmins have no plan limits (utils/quotaExemption.js).
+  if (!isQuotaExempt(user)) {
+    const limits = await limitsForUser(user);
+    const result = await checkScanQuota(user.organizationId, {
+      target: schedule.targetUrl,
+      scansPerTarget: limits.scansPerTarget,
+      targetsPerMonth: limits.targetsPerMonth
+    });
+    if (!result) {
+      await failScheduleOnPlanLimit(schedule, user);
+      return;
+    }
   }
 
   const scheduledFor = schedule.nextRun ? new Date(schedule.nextRun).toISOString() : null;
@@ -621,6 +625,8 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
  * @returns {Promise<{valid:boolean, reason?:string, code?:string}>}
  */
 async function validatePlanLimits(user, targetUrl) {
+  if (isQuotaExempt(user)) return { valid: true };
+
   const limits = await limitsForUser(user);
   const allowed = await checkScanQuota(user.organizationId, {
     target: targetUrl,
