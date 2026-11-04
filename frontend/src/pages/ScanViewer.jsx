@@ -3,9 +3,16 @@ import { useParams, useNavigate } from 'react-router-dom';
 import LandingPage from './LandingPage';
 import Header from '../components/header';
 import ParticleBackground from '../components/ParticleBackground';
+import { useTranslation } from '../contexts/TranslationContext';
+import { requestTimeout } from '../utils/requestTimeout';
 import '../styles/Hero.scss';
 
 import { API_BASE } from '../config/api';
+
+// The response can carry the full stored findings, so this is generous; it exists
+// so a request the server never answers ends in an error with a retry instead of
+// an endless spinner.
+const SCAN_LOAD_TIMEOUT_MS = 90000;
 
 /**
  * ScanViewer - Loads a historical scan and displays it using the same UI as fresh scans.
@@ -14,9 +21,12 @@ import { API_BASE } from '../config/api';
 const ScanViewer = () => {
   const { analysisId } = useParams();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [historicalScan, setHistoricalScan] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  // An i18n key, never a backend string: those are English-only and for logs.
+  const [errorKey, setErrorKey] = useState(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -29,26 +39,23 @@ const ScanViewer = () => {
         return;
       }
 
+      const deadline = requestTimeout(SCAN_LOAD_TIMEOUT_MS, controller.signal);
       try {
         console.log(`Loading historical scan: ${analysisId}`);
         const response = await fetch(`${API_BASE}/api/scan/scan/${analysisId}`, {
           headers: { 'x-auth-token': token },
-          signal: controller.signal
+          signal: deadline.signal
         });
 
         if (cancelled) return;
 
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          if (response.status === 404) {
-            setError('Scan not found or has expired. Scans are automatically deleted after 7 days.');
-          } else if (response.status === 401) {
+          if (response.status === 401) {
             localStorage.removeItem('token');
             navigate('/login');
             return;
-          } else {
-            setError(errorData.error || 'Failed to load scan');
           }
+          setErrorKey(response.status === 404 ? 'scanNotFoundExpired' : 'failedLoadScan');
           setLoading(false);
           return;
         }
@@ -59,12 +66,12 @@ const ScanViewer = () => {
         setHistoricalScan(data);
         setLoading(false);
       } catch (err) {
-        if (err.name === 'AbortError') return;
+        if (cancelled) return; // unmounted or analysisId changed
         console.error('Load scan error:', err);
-        if (!cancelled) {
-          setError('Failed to load scan. Please try again.');
-          setLoading(false);
-        }
+        setErrorKey(deadline.timedOut ? 'scanLoadTimedOut' : 'failedLoadScan');
+        setLoading(false);
+      } finally {
+        deadline.clear();
       }
     };
 
@@ -73,7 +80,13 @@ const ScanViewer = () => {
       cancelled = true;
       controller.abort();
     };
-  }, [analysisId, navigate]);
+  }, [analysisId, navigate, attempt]);
+
+  const retry = () => {
+    setErrorKey(null);
+    setLoading(true);
+    setAttempt((n) => n + 1);
+  };
 
   // Loading state
   if (loading) {
@@ -85,7 +98,7 @@ const ScanViewer = () => {
           <div className="hero-content">
             <div style={{ textAlign: 'center', padding: '3rem' }}>
               <div className="spinner" style={{ margin: '0 auto 1rem' }}></div>
-              <p>Loading scan results...</p>
+              <p>{t('loadingScanResults')}</p>
             </div>
           </div>
         </div>
@@ -94,7 +107,7 @@ const ScanViewer = () => {
   }
 
   // Error state
-  if (error) {
+  if (errorKey) {
     return (
       <div className="landing-page">
         <ParticleBackground />
@@ -102,15 +115,22 @@ const ScanViewer = () => {
         <div className="hero-section">
           <div className="hero-content">
             <div style={{ textAlign: 'center', padding: '3rem' }}>
-              <h2 style={{ color: '#e81123', marginBottom: '1rem' }}>Unable to Load Scan</h2>
-              <p style={{ marginBottom: '2rem' }}>{error}</p>
-              <button
-                className="scan-button"
-                onClick={() => navigate('/profile')}
-                style={{ maxWidth: '200px', margin: '0 auto' }}
-              >
-                Back to Profile
-              </button>
+              <h2 style={{ color: '#e81123', marginBottom: '1rem' }}>{t('unableToLoadScan')}</h2>
+              <p style={{ marginBottom: '2rem' }}>{t(errorKey)}</p>
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+                {errorKey !== 'scanNotFoundExpired' && (
+                  <button className="scan-button" onClick={retry} style={{ maxWidth: '200px' }}>
+                    {t('retryLoad')}
+                  </button>
+                )}
+                <button
+                  className="scan-button"
+                  onClick={() => navigate('/profile')}
+                  style={{ maxWidth: '200px' }}
+                >
+                  {t('backToProfile')}
+                </button>
+              </div>
             </div>
           </div>
         </div>

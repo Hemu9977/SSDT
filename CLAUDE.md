@@ -196,6 +196,24 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   audit rows (incl. fail closed), re-auth, KPI sources, projections, health states.
 - `backend/tests/sessionRules.test.js` — writes fail closed when the account check
   cannot run, admin token lifetime, no OTP bypass for admins, `lastLoginAt` on login.
+- `backend/tests/pdfEnglishReport.test.js` — runs the real `generateSingleLanguagePdf` for a
+  Japanese site and records every drawn string: EN and JA generate in either order (EN used to
+  abort with `EN_CONTENT_NOT_ENGLISH`), the site's Japanese is drawn translated with URLs
+  restored, raw HTTP evidence stays verbatim, EN still generates when Gemini is down, a repeat
+  download reuses `TranslationCache`, and no URL/host/operator name/email reaches Gemini.
+  (The PDF no longer calls `formatScanDataForPdf`: after 19 Aug 2026 it never once beat its
+  35s timeout in production, so every PDF used the deterministic data after waiting 35s.)
+- `backend/tests/zapDetailedAlerts.test.js` — the streaming reader for the ZAP detailed-alerts
+  file (`services/zapDetailedAlerts.js`) matches `JSON.parse` at every chunk size and keeps only
+  what the PDF / evidence panel draws. Never `downloadFile` + `JSON.parse` that file for a
+  report: a 287 MB one took production past its 2 GB heap mid-PDF (26 Oct 2026).
+- `backend/tests/reportTemplateEnglish.test.js` — the EN template text (disclaimer, closing
+  page) comes from `TEMPLATE_ENGLISH` without Gemini, and a Gemini failure falls back to
+  built-in English instead of failing (and caching the failure for) every EN report.
+- `backend/tests/historicalScanLoad.test.js` — runs the real `GET /api/scan/scan/:analysisId`:
+  opening a scan from Recent Scans never inlines the ZAP detailed-alerts file (a production
+  file was 287 MB and kept the page on its spinner for minutes); the evidence is fetched on
+  demand from `/api/zap/detailed-report/:scanId`, which still serves authenticated scans.
 - `backend/tests/failedScanRetention.test.js`, `subscriptionState.test.js`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
@@ -203,6 +221,11 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
 - `frontend/src/__tests__/adminDashboard.test.jsx` — renders the admin tabs with a
   mocked API: role-dependent controls, computed states, health states, adminService
   error codes, and every label-map key present in both locales.
+- `frontend/src/__tests__/loadingStates.test.jsx` — Profile/Recent Scans, ScanViewer and the
+  PDF download always leave their loading state (unanswered requests time out via
+  `utils/requestTimeout.js`), show translated text only, and download JA/EN independently;
+  the scan page's evidence panel asks for `/detailed-report/:id?view=evidence` (first pairs
+  per finding), never the whole file, and a failed load offers a retry.
 
 The build is clean at `CI=true`; `.github/workflows/frontend-deploy.yml` still
 sets `CI: false`, which can now be removed. **That workflow auto-deploys to S3 +
@@ -414,6 +437,18 @@ accounts — see `hasLegacyOneTimeBalance` in `planService.js`.
     (Stripe's delivery bursts must not be answered 429); the signature authenticates it.
 - `ScanResult` documents carry a **7-day TTL**, so they cannot be used to compute monthly
   usage. `Organization.scansUsed` is authoritative.
+- **Superadmins scan without restriction** — `isQuotaExempt(user)` in
+  `utils/quotaExemption.js` (`systemRole === 'superadmin'` only; plain `admin` is not exempt).
+  `planCheck` lets them through with or without an org and sets `req.quotaExempt`, which
+  makes the standalone routes skip their inline charge and swaps `scanLimiter`'s plan budget
+  (20/10 min) for **one scan start per minute** (`exemptScanLimiter`, one store shared by
+  every scan-start route — an external scanner accepts 1 request/min). `combinedScanLimiter`
+  applies to them as to everyone. `claimScanSlot` admits them as `admittedBy: 'exempt'` (excluded from other
+  members' rank count); `finalizeSuccessfulScan` settles them as `quotaSource: 'exempt'`
+  without charging (only `totalScansAllTime` moves). `getAccountLimits` returns
+  `scansPerMonth: -1`, `maxSchedules: -1`, `vulnerabilityAccessLevel: 'all'`. Any
+  `User.findById(...).select(...)` feeding `getAccountLimits` must include `systemRole`.
+  Tests: `backend/tests/quotaExemption.test.js` + the superadmin cases in `billingInvariants`.
 
 ### Other Infrastructure
 - `User.getAccountLimits(org)` also returns legacy `scansPerDay` (derived as
