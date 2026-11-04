@@ -54,69 +54,71 @@ function containsJapanese(text) {
   return /[\u3040-\u30ff\u3400-\u9fff]/.test(String(text || ''));
 }
 
-async function translateTemplateStaticToEnglish(jaTemplate) {
+// The bundled template's text in English (backend/assets/Report Template.docx).
+// The English report used to have Gemini translate it, and any Gemini failure
+// aborted the whole English report; a legal disclaimer should also read the same
+// in every report. Only text not listed here (a changed template) goes to Gemini.
+const TEMPLATE_ENGLISH = new Map([
+  ['\u514d\u8cac\u4e8b\u9805', 'Disclaimer'],
+  ['\u3053\u306e\u30ec\u30dd\u30fc\u30c8\u3067\u5171\u6709\u3055\u308c\u308b\u60c5\u5831\u306f\u6a5f\u5bc6\u60c5\u5831\u3067\u3042\u308a\u3001\u6cd5\u7684\u306b\u7279\u6a29\u3092\u6301\u3064\u5834\u5408\u304c\u3042\u308a\u307e\u3059\u3002\u3053\u308c\u306f\u53d7\u53d6\u4eba\u306e\u307f\u3092\u5bfe\u8c61\u3068\u3057\u3066\u304a\u308a\u3001\u4ed6\u306e\u8ab0\u3067\u3082\u3053\u306e\u30ec\u30dd\u30fc\u30c8\u306b\u30a2\u30af\u30bb\u30b9\u3059\u308b\u3053\u3068\u306f\u8a31\u53ef\u3055\u308c\u3066\u3044\u307e\u305b\u3093\u3002\u304a\u5ba2\u69d8\u304c\u610f\u56f3\u3055\u308c\u305f\u53d7\u9818\u8005\u3067\u306a\u3044\u5834\u5408\u3001\u958b\u793a\u3001\u30b3\u30d4\u30fc\u3001\u8907\u88fd\u3001\u914d\u5e03\u3001\u307e\u305f\u306f\u305d\u308c\u306b\u4f9d\u62e0\u3057\u3066\u53d6\u3089\u308c\u305f\u3001\u307e\u305f\u306f\u53d6\u3089\u308c\u308b\u3053\u3068\u3092\u7701\u7565\u3057\u305f\u884c\u52d5\u306f\u7981\u6b62\u3055\u308c\u3066\u304a\u308a\u3001\u9055\u6cd5\u3068\u306a\u308b\u53ef\u80fd\u6027\u304c\u3042\u308a\u307e\u3059\u3002\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3\u30c1\u30fc\u30e0\u306f\u3001\u5f53\u793e\u306e\u5408\u7406\u7684\u306a\u5236\u5fa1\u304c\u53ca\u3070\u306a\u3044\u4e8b\u8c61\u304b\u3089\u751f\u3058\u308b\u3044\u304b\u306a\u308b\u640d\u5931\u306b\u95a2\u3057\u3066\u3082\u3001\u304a\u5ba2\u69d8\u306b\u5bfe\u3057\u3066\u8cac\u4efb\u3092\u8ca0\u3044\u307e\u305b\u3093\u3002\u5f53\u793e\u306f\u3001\u5229\u76ca\u3001\u53ce\u5165\u3001\u53ce\u76ca\u3001\u4f7f\u7528\u3001\u751f\u7523\u3001\u4e88\u60f3\u3055\u308c\u308b\u8caf\u84c4\u3001\u4e8b\u696d\u3001\u5951\u7d04\u3001\u5546\u696d\u6a5f\u4f1a\u3001\u307e\u305f\u306f\u55b6\u696d\u6a29\u306e\u640d\u5931\u307e\u305f\u306f\u640d\u5bb3\u3092\u542b\u3080\u304c\u3053\u308c\u3089\u306b\u9650\u5b9a\u3055\u308c\u306a\u3044\u3001\u307e\u305f\u306f\u8ab0\u304b\u306b\u3088\u308b\u3053\u306e\u30ec\u30dd\u30fc\u30c8\u306e\u4f7f\u7528\u307e\u305f\u306f\u8aa4\u7528\u306b\u8d77\u56e0\u3059\u308b\u30d3\u30b8\u30cd\u30b9\u4e0a\u306e\u640d\u5931\u306b\u95a2\u3057\u3066\u3001\u304a\u5ba2\u69d8\u306b\u5bfe\u3057\u3066\u8cac\u4efb\u3092\u8ca0\u3044\u307e\u305b\u3093\u3002\u3053\u306e\u30ec\u30dd\u30fc\u30c8\u3067\u63d0\u4f9b\u3055\u308c\u3066\u3044\u308b\u3059\u3079\u3066\u306e\u63a8\u5968\u4e8b\u9805\u3068\u89e3\u6c7a\u7b56\u306f\u73fe\u72b6\u306e\u307e\u307e\u3067\u3042\u308a\u3001\u660e\u793a\u307e\u305f\u306f\u9ed9\u793a\u306e\u4fdd\u8a3c\u306f\u7121\u52b9\u3068\u306a\u308a\u307e\u3059\u3002',
+   'The information shared in this report is confidential and may be legally privileged. It is intended solely for the recipient, and no one else is authorized to access this report. If you are not the intended recipient, any disclosure, copying, reproduction or distribution of this report, or any action taken or omitted in reliance on it, is prohibited and may be unlawful. The security team shall not be liable to you for any loss arising from events beyond our reasonable control. We shall not be liable to you for any loss or damage, including but not limited to loss of profits, income, revenue, use, production, anticipated savings, business, contracts, commercial opportunities or goodwill, or for any business loss arising from the use or misuse of this report by anyone. All recommendations and solutions provided in this report are provided as is, without any warranty, express or implied.'],
+  ['\u8a3a\u65ad\u5c65\u6b74', 'Scan History'],
+  ['\u65e5\u4ed8', 'Date'],
+  ['\u5b9f\u884c\u30e6\u30fc\u30b6\u30fc', 'Executed by'],
+  ['\u30b9\u30c6\u30fc\u30bf\u30b9', 'Status'],
+  ['\u4f01\u696d\u5411\u3051\u306e\u5305\u62ec\u7684\u306a\u30b5\u30a4\u30d0\u30fc\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3\u30bd\u30ea\u30e5\u30fc\u30b7\u30e7\u30f3\u3092\u63d0\u4f9b\u3057\u3066\u3044\u307e\u3059\u3002', 'We provide comprehensive cybersecurity solutions for businesses.'],
+  ['\u5f53\u793e\u306e\u5c02\u9580\u77e5\u8b58\u3067\u304a\u5ba2\u69d8\u306e\u30c7\u30fc\u30bf\u3068\u30b7\u30b9\u30c6\u30e0\u3092\u4fdd\u8b77\u3057\u307e\u3059\u3002', 'We protect your data and systems with our expertise.'],
+  ['\u4fe1\u983c\u3067\u304d\u308b\u30b5\u30fc\u30d3\u30b9\u3067\u30aa\u30f3\u30e9\u30a4\u30f3\u306e\u8105\u5a01\u304b\u3089\u8eab\u3092\u5b88\u308a\u307e\u3057\u3087\u3046\u3002', 'Protect yourself from online threats with a service you can trust.'],
+]);
+
+// Used for template text that has no English above and could not be translated.
+const FALLBACK_DISCLAIMER_EN = 'This report is generated based on automated scan results. Detected findings may be incomplete or may differ from the actual state due to environmental or configuration differences. We do not guarantee the completeness, accuracy, or timeliness of the content of this report. The provider shall not be liable for any damages (direct or indirect) arising from the use of this report.';
+
+/**
+ * The template's static text in English. Never throws: text without a known
+ * English version is translated by Gemini, and if that fails (or comes back with
+ * Japanese) the slot falls back to built-in English \u2014 a closing-page line is
+ * dropped \u2014 rather than failing the report.
+ */
+async function translateTemplateStaticToEnglish(jaTemplate, deps = {}) {
+  const translate = deps.translate || ((texts) => translateText(texts, 'en'));
   const disclaimerParas = splitParagraphs(jaTemplate.disclaimerBody);
   const finalLines = Array.isArray(jaTemplate.finalPageLines) ? jaTemplate.finalPageLines : [];
   const headers = Array.isArray(jaTemplate.diagnosisHeaders) ? jaTemplate.diagnosisHeaders : [];
 
-  const texts = [
-    jaTemplate.disclaimerTitle,
-    ...disclaimerParas,
-    jaTemplate.diagnosisTitle,
-    ...headers,
-    ...finalLines
-  ];
-
-  let translated;
-  try {
-    translated = await translateText(texts, 'en');
-  } catch (e) {
-    const err = new Error('Gemini key is exhausted');
-    err.code = isGeminiKeyExhaustedError(e) ? 'GEMINI_KEY_EXHAUSTED' : 'TEMPLATE_TRANSLATION_FAILED';
-    err.details = e?.message;
-    throw err;
+  const english = new Map();
+  const unknown = [];
+  for (const text of [jaTemplate.disclaimerTitle, ...disclaimerParas, jaTemplate.diagnosisTitle, ...headers, ...finalLines]) {
+    const key = String(text || '').trim();
+    if (!key || english.has(key)) continue;
+    if (!containsJapanese(key)) english.set(key, key);
+    else if (TEMPLATE_ENGLISH.has(key)) english.set(key, TEMPLATE_ENGLISH.get(key));
+    else unknown.push(key);
   }
-  let idx = 0;
-  const disclaimerTitle = translated[idx++];
-  const translatedParas = disclaimerParas.map(() => translated[idx++] ?? '');
-  const diagnosisTitle = translated[idx++];
-  const translatedHeaders = headers.map(() => translated[idx++] ?? '');
-  const translatedFinalLines = finalLines.map(() => translated[idx++] ?? '');
-
-  if (!disclaimerTitle || !diagnosisTitle) {
-    const err = new Error('Gemini template translation returned empty result');
-    err.code = 'GEMINI_KEY_EXHAUSTED';
-    throw err;
+  if (unknown.length) {
+    try {
+      const out = await translate(unknown);
+      unknown.forEach((key, i) => {
+        const t = Array.isArray(out) ? out[i] : null;
+        if (typeof t === 'string' && t.trim() && !containsJapanese(t)) english.set(key, t.trim());
+      });
+    } catch (e) {
+      const kind = isGeminiKeyExhaustedError(e) ? 'quota' : 'error';
+      console.warn(`[reportTemplateDocx] English template translation failed (${kind}: ${e?.message}) \u2014 using built-in English`);
+    }
   }
+  const en = (text) => english.get(String(text || '').trim()) || null;
 
-  const headersOut = translatedHeaders.every(Boolean)
-    ? translatedHeaders
-    : safeDefaultEnglishHeaders(headers.length);
-
-  const out = {
+  const translatedParas = disclaimerParas.map(en);
+  const translatedHeaders = headers.map(en);
+  return {
     ...jaTemplate,
-    disclaimerTitle,
-    disclaimerBody: joinParagraphs(translatedParas),
-    diagnosisTitle,
-    diagnosisHeaders: headersOut,
-    finalPageLines: translatedFinalLines.filter(Boolean)
+    disclaimerTitle: en(jaTemplate.disclaimerTitle) || 'Disclaimer',
+    disclaimerBody: translatedParas.every(Boolean) ? joinParagraphs(translatedParas) : FALLBACK_DISCLAIMER_EN,
+    diagnosisTitle: en(jaTemplate.diagnosisTitle) || 'Scan History',
+    diagnosisHeaders: translatedHeaders.every(Boolean) ? translatedHeaders : safeDefaultEnglishHeaders(headers.length),
+    finalPageLines: finalLines.map(en).filter(Boolean)
   };
-
-  // Hard guard: EN template must not contain Japanese characters.
-  const joined = [
-    out.disclaimerTitle,
-    out.disclaimerBody,
-    out.diagnosisTitle,
-    ...(out.diagnosisHeaders || []),
-    ...(out.finalPageLines || [])
-  ].join('\n');
-  if (containsJapanese(joined)) {
-    const err = new Error('English template translation contains Japanese characters');
-    err.code = 'EN_TEMPLATE_NOT_ENGLISH';
-    throw err;
-  }
-
-  return out;
 }
 
 function getLocalName(node) {
@@ -423,12 +425,20 @@ async function getReportTemplateStaticContent({ forceReload = false, lang = 'ja'
     return translateTemplateStaticToEnglish(jaTemplate);
   })();
 
+  // Never keep a failure: a cached rejection would fail every later report in
+  // this language until the process restarted.
   cachedPromiseByLang.set(resolvedLang, promise);
+  promise.catch(() => {
+    if (cachedPromiseByLang.get(resolvedLang) === promise) cachedPromiseByLang.delete(resolvedLang);
+    cachedJaPromise = null;
+  });
   return promise;
 }
 
 module.exports = {
   getReportTemplateStaticContent,
+  translateTemplateStaticToEnglish,
+  TEMPLATE_ENGLISH,
   TEMPLATE_DIR,
   TEMPLATE_DOCX_PATH_NEW,
   TEMPLATE_DOCX_PATH_LEGACY,

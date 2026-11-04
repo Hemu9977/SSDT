@@ -7,6 +7,11 @@ import '../styles/ZapReportEnhanced.scss';
 
 import { API_BASE } from '../config/api';
 import { useTranslation } from '../contexts/TranslationContext';
+import { requestTimeout } from '../utils/requestTimeout';
+
+// The evidence view streams the scan's detailed file server-side, which takes a
+// few seconds for a very large scan; past this the panel offers a retry.
+const EVIDENCE_TIMEOUT_MS = 120000;
 
 const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLang = 'ja' }) => {
     const { t } = useTranslation();
@@ -20,8 +25,12 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
     const translateFetchedRef = React.useRef(false); // tracks if fetch was initiated for current scan+lang
 
     // Raw request/response evidence (occurrences with request/response), fetched
-    // lazily from the detailed-report endpoint on first alert expansion.
+    // lazily from the detailed-report endpoint on first alert expansion. That view
+    // carries only the first pairs per finding (the full file can be hundreds of
+    // MB); rawTotals holds how many each finding has in all.
     const [detailedMap, setDetailedMap] = useState(null); // { [alertName]: occurrences[] }
+    const [rawTotals, setRawTotals] = useState({}); // { [alertName]: number }
+    const [detailedFailed, setDetailedFailed] = useState(false);
     const [rawExpandedAll, setRawExpandedAll] = useState(new Set()); // alert names showing all pairs
     const detailedFetchedRef = React.useRef(false);
     const RAW_PREVIEW_COUNT = 3;
@@ -95,20 +104,30 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
         if (zapData?.detailedAlerts?.length) return; // already available on props
         if (!scanId) return;
         detailedFetchedRef.current = true;
+        setDetailedFailed(false);
+        const deadline = requestTimeout(EVIDENCE_TIMEOUT_MS);
         try {
-            const res = await fetch(`${API_BASE}${apiPrefix}/detailed-report/${scanId}`, {
-                headers: { 'x-auth-token': localStorage.getItem('token') }
+            const res = await fetch(`${API_BASE}${apiPrefix}/detailed-report/${scanId}?view=evidence`, {
+                headers: { 'x-auth-token': localStorage.getItem('token') },
+                signal: deadline.signal
             });
             if (!res.ok) throw new Error('Failed to load detailed report');
             const data = await res.json();
             const map = {};
+            const totals = {};
             (Array.isArray(data) ? data : []).forEach(a => {
-                if (a && a.alert) map[a.alert] = Array.isArray(a.occurrences) ? a.occurrences : [];
+                if (!a || !a.alert) return;
+                map[a.alert] = Array.isArray(a.occurrences) ? a.occurrences : [];
+                totals[a.alert] = a.rawOccurrenceCount || 0;
             });
+            setRawTotals(totals);
             setDetailedMap(map);
         } catch (err) {
             console.warn('Failed to load ZAP request/response evidence:', err.message);
             detailedFetchedRef.current = false; // allow a later retry
+            setDetailedFailed(true);
+        } finally {
+            deadline.clear();
         }
     };
 
@@ -379,8 +398,16 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                                         return (
                                             <div className="detail-section raw-evidence">
                                                 <h4>🧾 {t('requestResponseEvidence')}</h4>
-                                                {rawOccs === null && (
+                                                {rawOccs === null && !detailedFailed && (
                                                     <p className="raw-loading">{t('loadingEvidence')}</p>
+                                                )}
+                                                {rawOccs === null && detailedFailed && (
+                                                    <p className="raw-empty">
+                                                        {t('evidenceLoadFailed')}{' '}
+                                                        <button type="button" className="raw-toggle-btn" onClick={ensureDetailedLoaded}>
+                                                            {t('retryLoad')}
+                                                        </button>
+                                                    </p>
                                                 )}
                                                 {rawOccs && rawOccs.length === 0 && (
                                                     <p className="raw-empty">{t('noEvidenceCaptured')}</p>
@@ -398,12 +425,14 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                                                                     <div className="raw-pair">
                                                                         <div className="raw-label raw-label-req">{t('evidenceRequest')}</div>
                                                                         <pre className="raw-block">{`${occ.request.header || ''}${occ.request.body || ''}`}</pre>
+                                                                        {occ.request.bodyTruncated && <p className="raw-json-note">{t('evidenceBodyTruncated')}</p>}
                                                                     </div>
                                                                 )}
                                                                 {occ.response && (
                                                                     <div className="raw-pair">
                                                                         <div className="raw-label raw-label-resp">{t('evidenceResponse')}</div>
                                                                         <pre className="raw-block">{`${occ.response.header || ''}${occ.response.body || ''}`}</pre>
+                                                                        {occ.response.bodyTruncated && <p className="raw-json-note">{t('evidenceBodyTruncated')}</p>}
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -414,7 +443,11 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                                                                 className="raw-toggle-btn"
                                                                 onClick={() => toggleRawAll(enName)}
                                                             >
-                                                                {showAll ? t('showLessEvidence') : t('showAllEvidence', { count: rawOccs.length })}
+                                                                {showAll
+                                                                    ? t('showLessEvidence')
+                                                                    : (rawTotals[enName] || 0) > rawOccs.length
+                                                                        ? t('showFirstEvidence', { count: rawOccs.length, total: rawTotals[enName] })
+                                                                        : t('showAllEvidence', { count: rawOccs.length })}
                                                             </button>
                                                         )}
                                                         <p className="raw-json-note">{t('evidenceFullInJson')}</p>

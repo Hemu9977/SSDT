@@ -557,8 +557,10 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 
 /**
  * Translate an array of texts using Gemini AI (JSON key-mapping for reliable 1:1 output).
+ * `opts` is passed to _generate (maxRetries/timeoutMs/maxBackoffMs) for callers
+ * that run inside a deadline, such as PDF generation.
  */
-async function translateText(texts, targetLang) {
+async function translateText(texts, targetLang, opts = {}) {
   if (!texts || texts.length === 0) return [];
 
   const langName  = targetLang === 'ja' ? 'Japanese' : 'English';
@@ -580,11 +582,12 @@ CRITICAL RULES:
 2. Use the SAME numeric keys as the input
 3. Each value should be the translation of the corresponding input value
 4. Preserve emojis and special characters
-5. Do NOT add any text before or after the JSON
+5. Keep placeholders such as {{T0}} exactly as written, each one once
+6. Do NOT add any text before or after the JSON
 
 OUTPUT (JSON object only):`;
 
-  const raw = await _generate(prompt, MODEL_FLASH, 'translateText');
+  const raw = await _generate(prompt, MODEL_FLASH, 'translateText', opts);
   const translatedObj = _parseJson(raw);
 
   return texts.map((orig, i) => {

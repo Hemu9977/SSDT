@@ -141,6 +141,24 @@ function _scrubTokens(value, includeBareDomain) {
   return includeBareDomain ? out.replace(BARE_DOMAIN_PATTERN, REDACTED) : out;
 }
 
+/**
+ * Replace the same tokens _scrubTokens strips (bare hostnames included) with
+ * numbered placeholders `{{T0}}`, `{{T1}}`… instead of REDACTED, so text can be
+ * sent to Gemini and the originals put back afterwards — e.g. translating a
+ * sentence that names a URL without the URL ever leaving. Same pass order.
+ *
+ * @param {string} text
+ * @returns {{ masked: string, tokens: string[] }} tokens[i] is what {{Ti}} replaced
+ */
+function maskIdentityTokens(text) {
+  const tokens = [];
+  let masked = String(text ?? '');
+  for (const pattern of [URL_PATTERN, EMAIL_PATTERN, IPV6_PATTERN, IPV4_PATTERN, BARE_DOMAIN_PATTERN]) {
+    masked = masked.replace(pattern, (m) => `{{T${tokens.push(m) - 1}}}`);
+  }
+  return { masked, tokens };
+}
+
 /** Strip URLs, emails, IPs, and bare hostnames from a single string value. */
 function _scrubIdentityTokens(value) {
   return _scrubTokens(value, true);
@@ -447,6 +465,7 @@ module.exports = {
   sanitizeHistoryRowsForLLM,
   sanitizeTextsForLLM,
   sanitizeRefinedReportForLLM,
+  maskIdentityTokens,
   assertNoLeakage,
   REDACTED,
   // exported for unit tests only

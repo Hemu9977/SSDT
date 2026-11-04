@@ -3,7 +3,7 @@
 /**
  * pdfService.js
  * Generates bilingual (English + Japanese) security scan PDF reports.
- * Depends on: geminiService.js, gridfsService.js, ScanResult model.
+ * Depends on: geminiService.js, zapDetailedAlerts.js (GridFS), ScanResult model.
  *
  * Usage:
  *   const { generateSingleLanguagePdf, generateZapPdf } = require('./pdfService');
@@ -21,10 +21,11 @@ let puppeteer;
 try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
 
 const ScanResult = require('../models/ScanResult');
-const { formatScanDataForPdf, formatScanHistoryForPdf, formatAiAnalysisForPdf, translateAiAnalysisSectionsToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
-const gridfsService = require('./gridfsService');
+const TranslationCache = require('../models/TranslationCache');
+const { formatAiAnalysisForPdf, translateText, translateAiAnalysisSectionsToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
+const { loadReportAlerts, detailedAlertsBucket } = require('./zapDetailedAlerts');
 const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
-const { sanitizeScanForLLM } = require('./geminiSanitizer');
+const { maskIdentityTokens } = require('./geminiSanitizer');
 const { lighthouseScores, formatScore, formatMetric, NOT_AVAILABLE } = require('../utils/scoreFormat');
 
 // ─── Config ────────────────────────────────────────────────────────────────────
@@ -41,6 +42,13 @@ const translateOpts = { maxRetries: 3, timeoutMs: 60000, maxBackoffMs: 15000 };
 // Outer ceiling for the whole (chunked, multi-call) JA translation stage. A final
 // safety net only — `_generate` already enforces per-attempt timeouts and retries.
 const TRANSLATION_CEILING_MS = 200000;
+// English report: Japanese text from the scanned site is translated in batches of
+// this many passages, a few batches at a time, all within EN_TRANSLATION_CEILING_MS.
+// Whatever is not translated by then is drawn in Japanese.
+const EN_TRANSLATION_BATCH = 40;
+const EN_TRANSLATION_CONCURRENCY = 3;
+const EN_TRANSLATION_CEILING_MS = 120000;
+const enTranslateOpts = { maxRetries: 2, timeoutMs: 45000, maxBackoffMs: 5000 };
 // Vulnerabilities are translated in small chunks so one transient failure only
 // costs that chunk (kept English), not the entire findings list.
 const VULN_TRANSLATION_CHUNK_SIZE = 5;
@@ -128,15 +136,8 @@ const TEMPLATE_MARGIN = { top: 60, bottom: 60, left: 55, right: 55 };
 // ─── Small utilities ────────────────────────────────────────────────────────────
 
 function timeout(ms, message) {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
-}
-
-function severityRank(risk) {
-  const r = String(risk || '').toLowerCase();
-  if (r.includes('critical') || r.includes('high') || r.includes('高')) return 4;
-  if (r.includes('medium') || r.includes('中')) return 3;
-  if (r.includes('low') || r.includes('低')) return 2;
-  return 1;
+  // unref: a deadline that lost the race must not keep the process alive.
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms).unref());
 }
 
 function buildAiAnalysisFromRefinedReport(refinedReport) {
@@ -357,16 +358,6 @@ function formatCoverDate(date, lang) {
   return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
-function looksLikeUrl(text) {
-  const s = String(text || '').trim();
-  if (!s) return false;
-  if (/^https?:\/\//i.test(s)) return true;
-  if (/^www\./i.test(s)) return true;
-  // e.g. example.com/path
-  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(s)) return true;
-  return false;
-}
-
 function projectLangValue(val, lang) {
   if (val && typeof val === 'object' && !Array.isArray(val)) {
     if (Object.prototype.hasOwnProperty.call(val, lang)) return val[lang];
@@ -377,51 +368,157 @@ function projectLangValue(val, lang) {
   return val;
 }
 
-function collectStringsForEnglishValidation(value, lang, keyHint = '') {
-  const out = [];
-  const walk = (v, k) => {
-    if (v == null) return;
-    // Raw HTTP evidence (verbatim request/response from the target) may legitimately
-    // contain any language — skip these subtrees entirely for English validation.
-    if (k && ['occurrences', 'request', 'response'].includes(k)) return;
-    const projected = projectLangValue(v, lang);
-    if (typeof projected === 'string') {
-      // Allow URLs/targets/references to contain non-ASCII.
-      if (k && ['target', 'url', 'urls', 'reference'].includes(k)) return;
-      if (looksLikeUrl(projected)) return;
-      out.push(projected);
-      return;
+// ─── English report: translating the scanned site's Japanese ───────────────────
+//
+// A Japanese site puts Japanese into the English report: quoted in the AI analysis,
+// in finding text, in scan values. The English report used to throw
+// EN_CONTENT_NOT_ENGLISH on any of it (while the Japanese report, with no such
+// check, always downloaded) — and the check also walked fields that are never
+// drawn, such as each occurrence's `evidence`, so a Japanese site's own HTML was
+// enough to make the English report impossible. Now that text is translated, and
+// whatever cannot be translated is drawn in Japanese (Noto Sans JP covers it).
+
+// Drawn verbatim in the English report: proof (raw HTTP evidence), links,
+// identifiers, enums, and the Japanese half of bilingual {en, ja} values.
+const EN_VERBATIM_KEYS = new Set([
+  'occurrences', 'request', 'response', 'sampleUrls', 'urls', 'url', 'target',
+  'reference', 'scanId', 'cweid', 'wascid', 'risk', 'ja'
+]);
+
+/**
+ * Every Japanese passage the English report would draw from `roots`, as
+ * `{ text, set }` — `set(english)` writes the translation back in place.
+ *
+ * A passage is a whole line with Japanese in it, less its surrounding whitespace:
+ * Japanese mixed with English ("TLS 1.2を有効にしてください") only translates
+ * into a sentence as a whole. Lines without Japanese are left alone, and each line
+ * is its own passage so text keeps its line structure. The scan-history table is
+ * never passed in: it holds the operator's name, which must not reach Gemini.
+ */
+function collectJapanesePassages(roots) {
+  const passages = [];
+  const visitString = (s, write) => {
+    if (!containsJapanese(s)) return;
+    const lines = s.split('\n');
+    lines.forEach((line, li) => {
+      if (!containsJapanese(line)) return;
+      const start = line.length - line.trimStart().length;
+      const end = line.trimEnd().length;
+      passages.push({
+        text: line.slice(start, end),
+        set: (t) => { lines[li] = line.slice(0, start) + t + line.slice(end); write(lines.join('\n')); }
+      });
+    });
+  };
+  const walk = (node, key, write) => {
+    if (node == null || EN_VERBATIM_KEYS.has(key)) return;
+    if (typeof node === 'string') return visitString(node, write);
+    if (Array.isArray(node)) return node.forEach((v, i) => walk(v, key, (t) => { node[i] = t; }));
+    if (typeof node === 'object') {
+      for (const k of Object.keys(node)) walk(node[k], k, (t) => { node[k] = t; });
     }
-    if (typeof projected === 'number' || typeof projected === 'boolean') return;
-    if (Array.isArray(projected)) {
-      projected.forEach(item => walk(item, k));
-      return;
+  };
+  walk(roots, '', () => {});
+  return passages;
+}
+
+const PLACEHOLDER_RE = /\{\{T\d+\}\}/g;
+
+/** A translation we can draw: non-empty, changed, placeholders intact, nothing redacted. */
+function isUsableTranslation(src, t) {
+  if (typeof t !== 'string' || !t.trim() || t.trim() === src.trim()) return false;
+  if (t.length > src.length * 8 + 200) return false;
+  if (t.includes('REDACTED') && !src.includes('REDACTED')) return false;
+  const want = (src.match(PLACEHOLDER_RE) || []).sort();
+  const got  = (t.match(PLACEHOLDER_RE) || []).sort();
+  return want.length === got.length && want.every((p, i) => p === got[i]);
+}
+
+// Translations persist in TranslationCache (30-day TTL), so downloading the
+// English report again is quick and reads the same. Keys are the masked
+// passages: no URL, email or host is ever stored.
+const translationCacheStore = {
+  async get(texts) {
+    if (!texts.length) return {};
+    try {
+      const byHash = new Map(texts.map(t => [TranslationCache.generateHash(t, 'en'), t]));
+      const rows = await TranslationCache.find({ hash: { $in: [...byHash.keys()] } })
+        .select('hash translatedText').lean();
+      return Object.fromEntries(rows.filter(r => byHash.has(r.hash)).map(r => [byHash.get(r.hash), r.translatedText]));
+    } catch (e) {
+      console.warn('[PDF] Translation cache read failed:', e.message);
+      return {};
     }
-    if (typeof projected === 'object') {
-      for (const kk of Object.keys(projected)) {
-        walk(projected[kk], kk);
+  },
+  put(translations) {
+    for (const [src, t] of Object.entries(translations)) {
+      TranslationCache.saveTranslation(src, 'en', t).catch(() => {});
+    }
+  }
+};
+
+/**
+ * Translate, in place, the Japanese the English report would draw from `roots`
+ * (see collectJapanesePassages). URLs, emails, IPs and hostnames are replaced by
+ * {{Tn}} placeholders before anything is sent and restored after. Never throws:
+ * a passage that is not translated by the deadline, or comes back unusable, stays
+ * Japanese. `deps` lets tests inject the translator and cache.
+ *
+ * @returns {Promise<{ passages: number, translated: number }>}
+ */
+async function translateJapaneseForEnglishReport(roots, deps = {}) {
+  const {
+    translate   = (texts) => translateText(texts, 'en', enTranslateOpts),
+    cache       = translationCacheStore,
+    batchSize   = EN_TRANSLATION_BATCH,
+    concurrency = EN_TRANSLATION_CONCURRENCY,
+    ceilingMs   = EN_TRANSLATION_CEILING_MS,
+    logLabel    = 'PDF'
+  } = deps;
+
+  const items = collectJapanesePassages(roots).map(p => ({ ...p, ...maskIdentityTokens(p.text) }));
+  if (!items.length) return { passages: 0, translated: 0 };
+
+  const sources = [...new Set(items.map(i => i.masked))];
+  const translations = new Map();
+  const cached = await cache.get(sources);
+  for (const src of sources) {
+    if (isUsableTranslation(src, cached[src])) translations.set(src, cached[src]);
+  }
+
+  const todo = sources.filter(s => !translations.has(s));
+  const batches = [];
+  for (let i = 0; i < todo.length; i += batchSize) batches.push(todo.slice(i, i + batchSize));
+  const deadline = Date.now() + ceilingMs;
+  let next = 0;
+  const worker = async () => {
+    while (next < batches.length) {
+      const batch = batches[next++];
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      try {
+        const out = await Promise.race([translate(batch), timeout(remaining, 'English translation deadline reached')]);
+        const fresh = {};
+        batch.forEach((src, i) => {
+          const t = Array.isArray(out) ? out[i] : undefined;
+          if (isUsableTranslation(src, t)) { translations.set(src, t); fresh[src] = t; }
+        });
+        cache.put(fresh);
+      } catch (e) {
+        console.warn(`[${logLabel}] English translation of ${batch.length} passage(s) failed (${e.message}) — drawn in Japanese`);
       }
     }
   };
-  walk(value, keyHint);
-  return out;
-}
+  await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, worker));
 
-function assertEnglishOnlyPdfContent({ scanData, aiAnalysis, vulnerabilities, diagnosisTable }) {
-  const pieces = [];
-  pieces.push(...collectStringsForEnglishValidation(scanData, 'en'));
-  pieces.push(...collectStringsForEnglishValidation(aiAnalysis, 'en'));
-  pieces.push(...collectStringsForEnglishValidation(vulnerabilities, 'en'));
-  pieces.push(...collectStringsForEnglishValidation(diagnosisTable, 'en'));
-
-  for (const s of pieces) {
-    if (containsJapanese(s)) {
-      const err = new Error('English PDF contains non-English (Japanese) characters');
-      err.code = 'EN_CONTENT_NOT_ENGLISH';
-      err.sample = s.slice(0, 120);
-      throw err;
-    }
+  let translated = 0;
+  for (const item of items) {
+    const t = translations.get(item.masked);
+    if (!t) continue;
+    item.set(t.replace(PLACEHOLDER_RE, (p) => item.tokens[Number(p.slice(3, -2))]));
+    translated++;
   }
+  return { passages: items.length, translated };
 }
 
 function executorDisplay(user, lang) {
@@ -440,8 +537,14 @@ function executorDisplay(user, lang) {
 }
 
 function getStatusLabel(status, lang) {
-  if (lang !== 'ja') return status || 'unknown';
   const s = status || '';
+  if (lang !== 'ja') {
+    if (s === 'completed')                            return 'Completed';
+    if (s === 'combining' || s === 'pending' || s === 'queued') return 'Scanning';
+    if (s === 'failed')                               return 'Failed';
+    if (s === 'stopped' || s === 'cancelled')         return 'Cancelled';
+    return s || 'unknown';
+  }
   if (s === 'completed')                            return '診断終了';
   if (s === 'combining' || s === 'pending' || s === 'queued') return 'スキャン中';
   if (s === 'failed')                               return '失敗';
@@ -484,80 +587,28 @@ async function fetchScanHistoryRows(scanResult, limit = 8) {
   }
 }
 
-async function ensureGeminiScanHistory(scanData, scanHistoryRows) {
-  const hasRows = !!(scanData?.scanHistory?.rows?.en?.length || scanData?.scanHistory?.rows?.ja?.length);
-  if (hasRows) return scanData.scanHistory;
-  // If Gemini returned rows but the sanitizer replaced executor fields with
-  // "REDACTED", re-inject the real executedBy/date/status values from the
-  // DB-provided `scanHistoryRows` so the PDF shows actual data.
-  try {
-    const formatted = scanData.scanHistory;
-    if (formatted && formatted.rows && Array.isArray(scanHistoryRows)) {
-      const enRows = Array.isArray(formatted.rows.en) ? formatted.rows.en : [];
-      const jaRows = Array.isArray(formatted.rows.ja) ? formatted.rows.ja : [];
-      for (let i = 0; i < scanHistoryRows.length; i++) {
-        const src = scanHistoryRows[i] || {};
-        if (enRows[i] && Array.isArray(enRows[i])) {
-          for (let c = 0; c < enRows[i].length; c++) {
-            const cell = enRows[i][c];
-            if (typeof cell === 'string' && cell.includes('REDACTED')) {
-              if (c === 0) enRows[i][c] = src.dateEn || cell.replace(/REDACTED/g, 'N/A');
-              else if (c === 1) enRows[i][c] = src.executedByEn || cell.replace(/REDACTED/g, 'N/A');
-              else if (c === 2) enRows[i][c] = src.status || cell.replace(/REDACTED/g, '');
-            }
-          }
-        }
-        if (jaRows[i] && Array.isArray(jaRows[i])) {
-          for (let c = 0; c < jaRows[i].length; c++) {
-            const cell = jaRows[i][c];
-            if (typeof cell === 'string' && cell.includes('REDACTED')) {
-              if (c === 0) jaRows[i][c] = src.dateJa || cell.replace(/REDACTED/g, 'N/A');
-              else if (c === 1) jaRows[i][c] = src.executedByJa || cell.replace(/REDACTED/g, 'N/A');
-              else if (c === 2) jaRows[i][c] = getStatusLabel(src.status, 'ja') || cell.replace(/REDACTED/g, '');
-            }
-          }
-        }
-      }
-      // write back patched rows
-      formatted.rows.en = enRows;
-      formatted.rows.ja = jaRows;
-      scanData.scanHistory = formatted;
+/**
+ * The Scan History table, built from the database rows. Pure.
+ *
+ * It used to be whatever Gemini returned: the rows (with the operator's name and
+ * email) went to Gemini unsanitized, and Gemini could copy the Japanese name or a
+ * Japanese status label into an English row. Nothing in this table needs a model.
+ */
+function buildScanHistoryTable(scanHistoryRows) {
+  const rows = Array.isArray(scanHistoryRows) ? scanHistoryRows : [];
+  return {
+    title: { en: 'Scan History', ja: '診断履歴' },
+    headers: { en: ['Date', 'Executed by', 'Status'], ja: ['日付', '実行ユーザー', 'ステータス'] },
+    rows: {
+      en: rows.map(r => [r.dateEn || '', r.executedByEn || '', getStatusLabel(r.status, 'en')]),
+      ja: rows.map(r => [r.dateJa || '', r.executedByJa || '', getStatusLabel(r.status, 'ja')])
     }
-  } catch (e) {
-    console.warn('[PDF] Failed to patch REDACTED in Gemini scanHistory:', e && e.message);
-  }
-  return scanData.scanHistory;
-  try {
-    const formatted = await formatScanHistoryForPdf(scanHistoryRows);
-    if (scanData && typeof scanData === 'object') {
-      scanData.scanHistory = formatted;
-    }
-    return formatted;
-  } catch (e) {
-    // Gemini unavailable — build a static fallback scan history table so the
-    // PDF is still generated rather than returning a 500 to the user.
-    console.warn('[PDF] ensureGeminiScanHistory: Gemini failed, using static fallback:', e.message);
-    const fallbackHistory = {
-      title: { en: 'Scan History', ja: '診断履歴' },
-      headers: { en: ['Date', 'Executed by', 'Status'], ja: ['日付', '実行ユーザー', 'ステータス'] },
-      rows: {
-        en: (scanHistoryRows || []).map(r => [r.dateEn || '', r.executedByEn || '', r.status || '']),
-        ja: (scanHistoryRows || []).map(r => [r.dateJa || '', r.executedByJa || '', r.status || ''])
-      }
-    };
-    if (scanData && typeof scanData === 'object') {
-      scanData.scanHistory = fallbackHistory;
-    }
-    return fallbackHistory;
-  }
+  };
 }
 
 /**
- * Re-inject real scan metadata into scanData after Gemini formatting.
- *
- * The Gemini sanitizer replaces target/analysisId with "REDACTED" to protect
- * user privacy during LLM calls. This function restores the real values from
- * the original scanResult for PDF rendering.
+ * Fill scanData's header (target, scan ID, date) and threat-reputation items
+ * (domain, server IP, country) from the scan itself.
  *
  * If a value is genuinely unavailable, logs an explicit warning and sets "N/A".
  */
@@ -646,41 +697,16 @@ function injectRealScanMetadata(scanData, scanResult) {
   return scanData;
 }
 
-async function getDiagnosisHistoryTable(scanResult, lang, limit = 8) {
-  // ── 3-column design matching the report template ──
-  const headers = lang === 'ja'
-    ? ['日付', '実行ユーザー', 'ステータス']
-    : ['Date', 'Executed by', 'Status'];
-  const title = lang === 'ja' ? '診断履歴' : 'Scan History';
+// ─── Scan data ──────────────────────────────────────────────────────────────────
 
-  const fallback = [[
-    formatHistoryDate(scanResult?.createdAt, lang) || '',
-    executorDisplay(scanResult?.userId, lang),
-    getStatusLabel(scanResult?.status, lang)
-  ]];
-
-  if (!scanResult?.userId) return { title, headers, rows: fallback };
-
-  try {
-    // Scoped to THIS target — see fetchScanHistoryRows for why.
-    const records = await ScanResult.find({ userId: scanResult.userId, target: scanResult.target })
-      .sort({ createdAt: -1 }).limit(limit)
-      .select('analysisId target createdAt userId status')
-      .populate('userId', 'name email').lean();
-
-    const rows = (records || []).map(r => [
-      formatHistoryDate(r.createdAt, lang),
-      executorDisplay(r.userId, lang),
-      getStatusLabel(r.status, lang)
-    ]);
-
-    return { title, headers, rows: rows.length ? rows : fallback };
-  } catch { return { title, headers, rows: fallback }; }
-}
-
-// ─── Fallbacks when Gemini is unavailable ───────────────────────────────────────
-
-function buildFallbackScanDataForPdf(scanResult) {
+/**
+ * The report's scan-results data, derived from the scan. Pure.
+ *
+ * This used to be Gemini's job (formatScanDataForPdf) with this as the fallback.
+ * After 19 August 2026 that call never once finished inside the PDF's 35s window
+ * in production, so every report already used this — after waiting the 35s.
+ */
+function buildScanDataForPdf(scanResult) {
   const safe = (v, fb = 0) => { const n = Number(v); return isFinite(n) ? n : fb; };
   // null when PageSpeed never returned the category — rendered "N/A", not "0/100".
   const psi = lighthouseScores(scanResult?.pagespeedResult);
@@ -912,31 +938,44 @@ function buildTemplateStaticOverrides(base, { lang, scanData }) {
 
 // ─── GridFS helper ──────────────────────────────────────────────────────────────
 
-async function fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel) {
-  if (!zapSection || !scanResult.zapResult?.reportFiles?.length) return;
-  const file = scanResult.zapResult.reportFiles.find(f => f.filename?.includes('detailed_alerts'));
-  if (!file?.fileId) return;
+/**
+ * The plan-filtered findings from the scan's detailed-alerts file, carrying only
+ * the occurrences a report draws (see zapDetailedAlerts.loadReportAlerts — the
+ * file can be hundreds of MB). null when there is no file or it cannot be read.
+ */
+async function loadReportFindings(scanResult, accessLevel) {
+  const file = scanResult.zapResult?.reportFiles?.find(f => f.filename?.includes('detailed_alerts'));
+  if (!file?.fileId) return null;
   try {
-    const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
-    const buf    = await gridfsService.downloadFile(file.fileId, bucket);
-    const full   = JSON.parse(buf.toString('utf-8'));
-    // Apply plan filter before building the alerts array for the PDF
-    const filtered = getSanitizedAlerts(full, accessLevel);
-    zapSection.detailedAlerts = filtered.map(a => ({
+    const alerts = await loadReportAlerts(file.fileId, detailedAlertsBucket(file));
+    return getSanitizedAlerts(alerts, accessLevel).map(a => ({
       name: a.alert, risk: a.risk, confidence: a.confidence,
       description: a.description || 'No description available',
       solution:    a.solution    || 'No solution provided',
       reference:   a.reference   || '',
       cweid: a.cweid, wascid: a.wascid,
-      totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
-      sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
-      // Preserve full occurrences (incl. raw request/response) for the
-      // proof-of-exploit section rendered below.
-      occurrences: Array.isArray(a.occurrences) ? a.occurrences : []
+      totalOccurrences: a.totalOccurrences || a.occurrenceCount || 0,
+      sampleUrls: a.sampleUrls || a.occurrences.slice(0, 10).map(o => o.uri || o),
+      // The first occurrences with raw request/response, for the proof-of-exploit
+      // section, and how many there are in all.
+      occurrences: a.occurrences,
+      rawOccurrenceCount: a.rawOccurrenceCount
     }));
-    console.log(`✅ Loaded ${zapSection.detailedAlerts.length} plan-filtered alerts from GridFS`);
   } catch (e) {
-    console.warn(`⚠️ GridFS fetch failed: ${e.message}`);
+    console.warn(`⚠️ Detailed alerts read failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel) {
+  if (!zapSection) return;
+  const findings = await loadReportFindings(scanResult, accessLevel);
+  if (findings) {
+    zapSection.detailedAlerts = findings;
+    console.log(`✅ Loaded ${findings.length} plan-filtered alerts from GridFS`);
+  } else {
+    // Summary alerts from the scan document — the plan's severity filter applies here too.
+    zapSection.detailedAlerts = getSanitizedAlerts(zapSection.detailedAlerts, accessLevel);
   }
 }
 
@@ -1546,6 +1585,9 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
     const occWithRaw = Array.isArray(v.occurrences)
       ? v.occurrences.filter(o => o && (o.request || o.response))
       : [];
+    // Report findings carry only the first few occurrences; rawOccurrenceCount is
+    // how many have raw evidence in all.
+    const rawTotal = Math.max(v.rawOccurrenceCount || 0, occWithRaw.length);
     if (occWithRaw.length > 0) {
       const width = ctx.contentWidth;
       const lineH = (font, size, gap = 0) => { doc.font(font).fontSize(size); return doc.currentLineHeight(true) + gap; };
@@ -1583,12 +1625,12 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
         doc.moveDown(0.15);
       });
 
-      if (occWithRaw.length > 3) {
+      if (rawTotal > shown.length) {
         ensureSpace(ctx, 12);
         doc.font('NotoSans').fontSize(7).fillColor(COLORS.textLight)
            .text(lang === 'ja'
-             ? `他 ${occWithRaw.length - 3} 件のリクエスト/レスポンスはJSONエクスポートに含まれます`
-             : `${occWithRaw.length - 3} more request/response pair(s) available in the JSON export`, { width });
+             ? `他 ${rawTotal - shown.length} 件のリクエスト/レスポンスはJSONエクスポートに含まれます`
+             : `${rawTotal - shown.length} more request/response pair(s) available in the JSON export`, { width });
       }
       doc.moveDown(0.2);
     }
@@ -1795,85 +1837,16 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
 
   const isJa = lang === 'ja';
 
-  console.time('[PDF] Total');
-  console.log('[PDF] Loading scan data');
-
-  // Sanitized copy for Gemini calls only.
-  const llmSafeScan = sanitizeScanForLLM(scanResult);
-
-  const pdfSafeScan = JSON.parse(JSON.stringify(llmSafeScan));
-  if (pdfSafeScan.zapResult && Array.isArray(pdfSafeScan.zapResult.alerts)) {
-    pdfSafeScan.zapResult.alerts = pdfSafeScan.zapResult.alerts
-      .sort((a, b) => severityRank(b.risk) - severityRank(a.risk))
-      .slice(0, 50);
-  }
-  if (pdfSafeScan.webCheckResult && pdfSafeScan.webCheckResult.fullResults) {
-    for (const key of Object.keys(pdfSafeScan.webCheckResult.fullResults)) {
-      const res = pdfSafeScan.webCheckResult.fullResults[key];
-      if (res) {
-        delete res.html;
-        delete res.rawResponse;
-        delete res.headersDump;
-      }
-    }
-  }
-  if (pdfSafeScan.pagespeedResult?.lighthouseResult?.categories) {
-    const cats = pdfSafeScan.pagespeedResult.lighthouseResult.categories;
-    pdfSafeScan.pagespeedResult.lighthouseResult.categories = {
-      performance: cats.performance,
-      accessibility: cats.accessibility,
-      'best-practices': cats['best-practices'],
-      seo: cats.seo
-    };
-  }
-  if (pdfSafeScan.urlscanResult) {
-    pdfSafeScan.urlscanResult = {
-      verdicts: pdfSafeScan.urlscanResult.verdicts,
-      page: pdfSafeScan.urlscanResult.page,
-      stats: pdfSafeScan.urlscanResult.stats
-    };
-  }
-  if (pdfSafeScan.observatoryResult) {
-    pdfSafeScan.observatoryResult = {
-      grade: pdfSafeScan.observatoryResult.grade,
-      score: pdfSafeScan.observatoryResult.score,
-      tests_passed: pdfSafeScan.observatoryResult.tests_passed,
-      tests_failed: pdfSafeScan.observatoryResult.tests_failed,
-      tests_quantity: pdfSafeScan.observatoryResult.tests_quantity
-    };
-  }
-
-  const chars = JSON.stringify(pdfSafeScan).length;
-  console.log('[PDF] Prompt trimmed');
-  console.log('[PDF] Prompt size:', chars);
-  console.log('[PDF] Estimated tokens:', Math.ceil(chars / 4));
-  console.log('[PDF] ZAP alerts:', pdfSafeScan.zapResult?.alerts?.length || 0);
+  // Elapsed time, not console.time: overlapping jobs shared one console.time label,
+  // so a second PDF logged a warning and the first one's total came out wrong.
+  const startedAt = Date.now();
+  const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 
   console.log(`[PDF][${analysisId}] Fetching scan history rows…`);
   const scanHistoryRows = await fetchScanHistoryRows(scanResult);
 
-  console.log('[PDF] Starting Gemini formatting');
-  console.time('[PDF] Gemini format');
-  let scanData;
-  try { 
-    scanData = await Promise.race([
-      formatScanDataForPdf(pdfSafeScan, { scanHistoryRows, ...pdfOpts }),
-      timeout(35000, 'formatScanDataForPdf timed out')
-    ]);
-  }
-  catch (e) {
-    console.warn(`[PDF][${analysisId}] Gemini scan data formatting failed, using fallback:`, e.message);
-    scanData = buildFallbackScanDataForPdf(scanResult);
-  }
-  console.timeEnd('[PDF] Gemini format');
-  console.log('[PDF] Gemini formatting completed');
-
-  // Re-inject real scan metadata (target URL, scan ID, date) that was
-  // replaced with "REDACTED" by the Gemini sanitizer.
-  injectRealScanMetadata(scanData, scanResult);
-
-  console.log(`[PDF][${analysisId}] Ensuring scan history…`);
-  await ensureGeminiScanHistory(scanData, scanHistoryRows);
+  const scanData = injectRealScanMetadata(buildScanDataForPdf(scanResult), scanResult);
+  scanData.scanHistory = buildScanHistoryTable(scanHistoryRows);
 
   const zapSection = scanData.sections?.find(s => s.id === 'zap');
   await fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel);
@@ -1898,8 +1871,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   let aiToUse = aiAnalysis, vulnsToUse = vulnsEn;
 
   if (isJa && (aiAnalysis || vulnsEn.length)) {
-    console.log(`[PDF][${analysisId}] Starting JA translation…`);
-    console.time('[PDF] Translate JA');
+    console.log(`[PDF][${analysisId}] Starting JA translation… (${elapsed()})`);
     try {
       const out = await Promise.race([
         translateReportToJapanese({ aiAnalysis, vulnsEn, scanData }, { logLabel: `PDF][${analysisId}` }),
@@ -1915,8 +1887,7 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
       aiToUse    = aiAnalysis ? buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn) : null;
       vulnsToUse = vulnsEn;
     }
-    console.timeEnd('[PDF] Translate JA');
-    console.log('[PDF] JA translation completed');
+    console.log(`[PDF][${analysisId}] JA translation completed (${elapsed()})`);
   }
 
   const disclaimer = getDisclaimerContent(lang);
@@ -1932,12 +1903,14 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   };
 
   if (!isJa) {
-    assertEnglishOnlyPdfContent({
-      scanData,
-      aiAnalysis: aiToUse,
-      vulnerabilities: vulnsToUse,
-      diagnosisTable: diagnosis
-    });
+    // Japanese from the scanned site (quoted in the AI analysis, the findings or
+    // scan values) is translated; what cannot be is drawn in Japanese. Raw HTTP
+    // evidence and URLs stay verbatim, and the scan-history table is not passed.
+    const { passages, translated } = await translateJapaneseForEnglishReport(
+      { scanData, aiAnalysis: aiToUse, vulnerabilities: vulnsToUse },
+      { logLabel: `PDF][${analysisId}` }
+    );
+    if (passages) console.log(`[PDF][${analysisId}] EN: translated ${translated}/${passages} Japanese passage(s) from the scanned site (${elapsed()})`);
   }
 
   if (PDF_RENDERER === 'html') {
@@ -1960,15 +1933,13 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     Subject: 'Security Analysis'
   });
   
-  console.log(`[PDF][${analysisId}] Rendering PDF`);
-  console.time('[PDF] Render');
+  console.log(`[PDF][${analysisId}] Rendering PDF (${elapsed()})`);
   const buf = collectBuffer(doc);
   renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts);
   doc.end();
-  console.timeEnd('[PDF] Render');
-  console.log(`[PDF][${analysisId}] PDF completed`);
-  console.timeEnd('[PDF] Total');
-  return buf;
+  const out = await buf;
+  console.log(`[PDF][${analysisId}] PDF completed in ${elapsed()}`);
+  return out;
 }
 
 /**
@@ -1978,34 +1949,7 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   console.log(`📄 Starting ZAP ${lang.toUpperCase()} PDF generation…`);
   const isJa = lang === 'ja';
 
-  // llmSafeScan used only if a Gemini translation is triggered below.
-  // For English ZAP PDFs no Gemini call is made, so this is a no-op overhead.
-  let vulnerabilities = [];
-
-  if (scanResult.zapResult?.reportFiles?.length) {
-    const file = scanResult.zapResult.reportFiles.find(f => f.filename?.includes('detailed_alerts'));
-    if (file?.fileId) {
-      try {
-        const bucket = file.filename?.includes('zap_auth') ? 'zap_auth_reports' : 'zap_reports';
-        const buf    = await gridfsService.downloadFile(file.fileId, bucket);
-        const full   = JSON.parse(buf.toString('utf-8'));
-        // Apply plan filter before building the vulnerabilities list
-        const filtered = getSanitizedAlerts(full, accessLevel);
-        vulnerabilities = filtered.map(a => ({
-          name: a.alert, risk: a.risk, confidence: a.confidence,
-          description: a.description || 'No description available',
-          solution:    a.solution    || 'No solution provided',
-          reference:   a.reference   || '',
-          cweid: a.cweid, wascid: a.wascid,
-          totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
-          sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
-          // Full occurrences (incl. raw request/response) for the proof-of-exploit section.
-          occurrences: Array.isArray(a.occurrences) ? a.occurrences : [],
-          urls: [] // occurrence URLs contain target domain — stripped before Gemini translation
-        }));
-      } catch (e) { console.warn(`⚠️ GridFS fetch failed: ${e.message}`); }
-    }
-  }
+  let vulnerabilities = (await loadReportFindings(scanResult, accessLevel)) || [];
 
   if (!vulnerabilities.length && scanResult.zapResult?.summaryAlerts) {
     const filtered = getSanitizedAlerts(scanResult.zapResult.summaryAlerts, accessLevel);
@@ -2032,6 +1976,8 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
       console.warn('[PDF] JA vuln translation stage failed:', e.message);
       // vulnsToUse stays as English vulnerabilities — ZAP PDF still includes all findings
     }
+  } else if (!isJa && vulnerabilities.length) {
+    await translateJapaneseForEnglishReport({ vulnerabilities }, { logLabel: 'ZAP-PDF' });
   }
 
   const ts  = await getReportTemplateStaticContent({ lang });
@@ -2050,4 +1996,4 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, buildAiAnalysisFromRefinedReport, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, translateJapaneseForEnglishReport, collectJapanesePassages, buildAiAnalysisFromRefinedReport, buildScanHistoryTable, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts };

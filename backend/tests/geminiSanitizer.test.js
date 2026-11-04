@@ -16,9 +16,24 @@ const {
   sanitizeScanForLLM,
   sanitizeHeadersForLLM,
   assertNoLeakage,
+  maskIdentityTokens,
+  sanitizeTextsForLLM,
   _guardrailMode,
   REDACTED,
 } = require('../services/geminiSanitizer');
+
+test('maskIdentityTokens: everything the scrub removes becomes a placeholder, and comes back', () => {
+  const text = '詳細は https://example.co.jp/company?id=1 または info@example.co.jp、' +
+    'サーバー 192.0.2.10 と fe80::1 と cdn.example.com、nginx/1.19.0 を参照';
+  const { masked, tokens } = maskIdentityTokens(text);
+  assert.deepEqual(tokens, ['https://example.co.jp/company?id=1', 'info@example.co.jp', 'fe80::1', '192.0.2.10', 'cdn.example.com']);
+  for (const t of tokens) assert.ok(!masked.includes(t));
+  assert.ok(masked.includes('nginx/1.19.0'), 'version strings are not hosts');
+  // The scrub finds nothing left to redact, so masked text passes through unchanged.
+  assert.equal(sanitizeTextsForLLM([masked])[0], masked);
+  assert.doesNotThrow(() => assertNoLeakage(masked, 'test'));
+  assert.equal(masked.replace(/\{\{T(\d+)\}\}/g, (_, n) => tokens[n]), text);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Header-value sanitization
