@@ -5,6 +5,12 @@ const ZapAlert = require('../models/ZapAlert');
 
 const WEBCHECK_BUCKET = 'webcheck_results';
 const ZAP_BUCKET = 'zap_reports';
+const ZAP_AUTH_BUCKET = 'zap_auth_reports';
+
+// Authenticated scans store their reports in their own bucket (zapAuthService),
+// named zap_auth_*; the readers pick the bucket the same way.
+const zapBucketFor = (file) =>
+    (file.filename || '').includes('zap_auth') ? ZAP_AUTH_BUCKET : ZAP_BUCKET;
 
 /**
  * Delete a scan's heavy artifacts: its GridFS report files (WebCheck + ZAP) and
@@ -28,18 +34,20 @@ async function deleteScanArtifacts(scan) {
         }
     }
 
-    // 2. Delete ZAP GridFS files (can be multiple)
-    if (scan.zapResult?.reportFiles && Array.isArray(scan.zapResult.reportFiles)) {
-        for (const file of scan.zapResult.reportFiles) {
-            if (file.fileId) {
-                try {
-                    await gridfsService.deleteFile(file.fileId, ZAP_BUCKET);
-                    deletedItems.gridfsFiles++;
-                    console.log(`[Cleanup] Deleted ZAP GridFS file: ${file.fileId}`);
-                } catch (err) {
-                    console.warn(`[Cleanup] Failed to delete ZAP file ${file.fileId}: ${err.message}`);
-                }
-            }
+    // 2. Delete ZAP GridFS files (can be multiple). An authenticated scan lists
+    //    the same files in both zapResult and authScanResult, so dedupe by id.
+    const zapFiles = new Map();
+    for (const file of [...(scan.zapResult?.reportFiles || []), ...(scan.authScanResult?.reportFiles || [])]) {
+        if (file?.fileId) zapFiles.set(String(file.fileId), file);
+    }
+    for (const [fileId, file] of zapFiles) {
+        const bucket = zapBucketFor(file);
+        try {
+            await gridfsService.deleteFile(fileId, bucket);
+            deletedItems.gridfsFiles++;
+            console.log(`[Cleanup] Deleted ZAP GridFS file: ${fileId} (${bucket})`);
+        } catch (err) {
+            console.warn(`[Cleanup] Failed to delete ZAP file ${fileId} from ${bucket}: ${err.message}`);
         }
     }
 
@@ -154,6 +162,15 @@ async function cleanupFailedScan(analysisId, userId = null) {
     }
 }
 
+// Buckets swept for orphans, and the metadata key linking a file to its scan.
+// Normal and authenticated ZAP reports are both uploaded with { scanId }, so
+// they are swept by the same rule.
+const ORPHAN_SWEEP = [
+    { bucket: ZAP_BUCKET, label: 'zap', scanIdOf: (m) => m?.analysisId || m?.scanId },
+    { bucket: ZAP_AUTH_BUCKET, label: 'zapAuth', scanIdOf: (m) => m?.analysisId || m?.scanId },
+    { bucket: WEBCHECK_BUCKET, label: 'webcheck', scanIdOf: (m) => m?.analysisId }
+];
+
 /**
  * Clean up orphaned GridFS files that no longer have a parent ScanResult
  * Should be run periodically (e.g., daily via cron job)
@@ -161,55 +178,31 @@ async function cleanupFailedScan(analysisId, userId = null) {
 async function cleanupOrphanedGridFSFiles() {
     console.log('🧹 [Cleanup] Starting orphaned GridFS cleanup...');
 
-    const stats = {
-        zapFilesChecked: 0,
-        zapFilesDeleted: 0,
-        webcheckFilesChecked: 0,
-        webcheckFilesDeleted: 0,
-        errors: []
-    };
+    const stats = { errors: [] };
+    for (const { label } of ORPHAN_SWEEP) {
+        stats[`${label}FilesChecked`] = 0;
+        stats[`${label}FilesDeleted`] = 0;
+    }
 
     try {
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-        // Clean up ZAP reports bucket
-        const zapBucket = gridfsService.initialize(ZAP_BUCKET);
-        const zapFiles = await zapBucket.find({ uploadDate: { $lt: sevenDaysAgo } }).toArray();
-        stats.zapFilesChecked = zapFiles.length;
+        for (const { bucket: bucketName, label, scanIdOf } of ORPHAN_SWEEP) {
+            const bucket = gridfsService.initialize(bucketName);
+            const files = await bucket.find({ uploadDate: { $lt: sevenDaysAgo } }).toArray();
+            stats[`${label}FilesChecked`] = files.length;
 
-        for (const file of zapFiles) {
-            const analysisId = file.metadata?.analysisId || file.metadata?.scanId;
-            if (analysisId) {
+            for (const file of files) {
+                const analysisId = scanIdOf(file.metadata);
+                if (!analysisId) continue;
                 const scanExists = await ScanResult.exists({ analysisId });
-                if (!scanExists) {
-                    try {
-                        await gridfsService.deleteFile(file._id, ZAP_BUCKET);
-                        stats.zapFilesDeleted++;
-                        console.log(`[Cleanup] Deleted orphaned ZAP file: ${file._id} (analysisId: ${analysisId})`);
-                    } catch (err) {
-                        stats.errors.push(`ZAP ${file._id}: ${err.message}`);
-                    }
-                }
-            }
-        }
-
-        // Clean up WebCheck results bucket
-        const webcheckBucket = gridfsService.initialize(WEBCHECK_BUCKET);
-        const webcheckFiles = await webcheckBucket.find({ uploadDate: { $lt: sevenDaysAgo } }).toArray();
-        stats.webcheckFilesChecked = webcheckFiles.length;
-
-        for (const file of webcheckFiles) {
-            const analysisId = file.metadata?.analysisId;
-            if (analysisId) {
-                const scanExists = await ScanResult.exists({ analysisId });
-                if (!scanExists) {
-                    try {
-                        await gridfsService.deleteFile(file._id, WEBCHECK_BUCKET);
-                        stats.webcheckFilesDeleted++;
-                        console.log(`[Cleanup] Deleted orphaned WebCheck file: ${file._id} (analysisId: ${analysisId})`);
-                    } catch (err) {
-                        stats.errors.push(`WebCheck ${file._id}: ${err.message}`);
-                    }
+                if (scanExists) continue;
+                try {
+                    await gridfsService.deleteFile(file._id, bucketName);
+                    stats[`${label}FilesDeleted`]++;
+                    console.log(`[Cleanup] Deleted orphaned ${bucketName} file: ${file._id} (analysisId: ${analysisId})`);
+                } catch (err) {
+                    stats.errors.push(`${bucketName} ${file._id}: ${err.message}`);
                 }
             }
         }

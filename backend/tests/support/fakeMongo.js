@@ -166,6 +166,11 @@ function makeModel(name, { defaults = () => ({}), refs = {} } = {}) {
     findOne: (filter, projection) => new Query(filter, projection, true),
     findById: (id, projection) => new Query({ _id: id }, projection, true),
     async countDocuments(filter) { fail('countDocuments'); return store.filter(matcher(filter)).length; },
+    async exists(filter) {
+      fail('exists');
+      const doc = store.find(matcher(filter));
+      return doc ? { _id: doc._id } : null;
+    },
     async create(obj) {
       fail('create');
       const doc = { _id: new mongoose.Types.ObjectId(), ...defaults(), ...obj };
