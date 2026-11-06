@@ -12,6 +12,8 @@ import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 
 import { API_BASE } from '../config/api';
+import { screenshotUrl } from '../utils/screenshotUrl';
+import IpAllowlistNote from './IpAllowlistNote';
 import { getApiErrorLabel } from '../utils/apiErrors';
 import { getScanStatusLine, getCompletedStepCount, SCAN_STEP_COUNT } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
@@ -1685,7 +1687,7 @@ const Hero = ({ historicalScan }) => {
           const webCheckScreenshot = webCheckReport?.screenshot?.image && !webCheckReport?.screenshot?.error
             ? `data:image/png;base64,${webCheckReport.screenshot.image}`
             : null;
-          const urlscanScreenshot = report?.urlscanData?.screenshot || null;
+          const urlscanScreenshot = screenshotUrl(report?.urlscanData?.screenshot);
           const screenshotSrc = webCheckScreenshot || urlscanScreenshot;
 
           if (!screenshotSrc) return null;
@@ -1986,6 +1988,14 @@ const Hero = ({ historicalScan }) => {
                   </button>
                 )}
               </div>
+              {!loading && (
+                <div className="scan-note">
+                  <div className="scan-note__title">⚠ {t('authScanNoteTitle')}</div>
+                  <ul className="scan-note__list">
+                    <IpAllowlistNote block="scan-note" />
+                  </ul>
+                </div>
+              )}
             </form>
             {loading && (
               <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: theme === 'light' ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>

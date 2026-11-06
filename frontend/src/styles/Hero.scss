@@ -1,3 +1,5 @@
+@use 'scanNote' as *;
+
 .hero-container {
   padding: 2rem;
   width: 100%;
@@ -38,6 +40,14 @@
     max-width: 900px;
     margin: 0 auto 3rem;
     padding: 0;
+
+    // "Before You Start" notice under the URL field (same panel as the
+    // authenticated scan form).
+    .scan-note {
+      @include scan-note;
+      margin: 1.25rem 0 0;
+      text-align: left;
+    }
 
     label {
       display: block;

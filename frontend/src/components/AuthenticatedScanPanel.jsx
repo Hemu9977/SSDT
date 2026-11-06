@@ -5,12 +5,14 @@ import { useTranslation } from '../contexts/TranslationContext';
 import { useTheme } from '../context/ThemeContext';
 import ZapReportEnhanced from './ZapReportEnhanced';
 import WebCheckDetails from './WebCheckDetails';
+import IpAllowlistNote from './IpAllowlistNote';
 import '../styles/AuthenticatedScan.scss';
 import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
 import { useNotifications } from '../contexts/NotificationContext';
 
 import { API_BASE } from '../config/api';
+import { screenshotUrl } from '../utils/screenshotUrl';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
@@ -919,6 +921,7 @@ const AuthenticatedScanPanel = () => {
                 <li>{t('authScanNoteMFA')}</li>
                 <li>{t('authScanNoteOAuth')}</li>
                 <li>{t('authScanNoteWAF')}</li>
+                <IpAllowlistNote block="auth-scan-note" />
               </ul>
             </div>
 
@@ -1756,7 +1759,7 @@ const AuthenticatedScanPanel = () => {
                   {(() => {
                     const webCheckScreenshot = webCheckReport?.screenshot?.image && !webCheckReport?.screenshot?.error
                       ? `data:image/png;base64,${webCheckReport.screenshot.image}` : null;
-                    const urlscanScreenshot = report?.urlscanData?.screenshot || null;
+                    const urlscanScreenshot = screenshotUrl(report?.urlscanData?.screenshot);
                     const screenshotSrc = webCheckScreenshot || urlscanScreenshot;
                     if (!screenshotSrc) return null;
                     return (

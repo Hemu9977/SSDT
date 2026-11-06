@@ -1,3 +1,5 @@
+@use 'scanNote' as *;
+
 // Progressive Loading Animations (same as Hero.scss)
 @keyframes shimmer {
   0% { background-position: 200% 0; }
@@ -190,38 +192,7 @@
 
   // ========== Pre-scan Limitations Note ==========
   .auth-scan-note {
-    background: linear-gradient(rgba(255, 185, 0, 0.1), rgba(255, 185, 0, 0.1)) var(--panel-bg);
-    border: 1px solid rgba(255, 185, 0, 0.45);
-    border-left: 4px solid #ffb900;
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin-bottom: 1.75rem;
-
-    &__title {
-      font-family: var(--font-mono);
-      font-size: 0.9rem;
-      font-weight: 700;
-      color: #ffb900;
-      margin-bottom: 0.75rem;
-      letter-spacing: 0.5px;
-    }
-
-    &__list {
-      margin: 0;
-      padding-left: 1.25rem;
-      list-style: disc;
-
-      li {
-        font-size: 0.85rem;
-        color: var(--foreground-darker);
-        line-height: 1.6;
-        margin-bottom: 0.5rem;
-
-        &:last-child {
-          margin-bottom: 0;
-        }
-      }
-    }
+    @include scan-note;
   }
 
   .url-input {

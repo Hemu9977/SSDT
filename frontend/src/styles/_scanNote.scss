@@ -1,0 +1,50 @@
+// "Before You Start" warning panel, shared by the authenticated scan form
+// (.auth-scan-note in AuthenticatedScan.scss) and the public scan form
+// (.scan-note in Hero.scss), so both stay identical.
+@mixin scan-note {
+  background: linear-gradient(rgba(255, 185, 0, 0.1), rgba(255, 185, 0, 0.1)) var(--panel-bg);
+  border: 1px solid rgba(255, 185, 0, 0.45);
+  border-left: 4px solid #ffb900;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.75rem;
+
+  &__title {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #ffb900;
+    margin-bottom: 0.75rem;
+    letter-spacing: 0.5px;
+  }
+
+  &__list {
+    margin: 0;
+    padding-left: 1.25rem;
+    list-style: disc;
+
+    li {
+      font-size: 0.85rem;
+      color: var(--foreground-darker);
+      line-height: 1.6;
+      margin-bottom: 0.5rem;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+    }
+  }
+
+  // Values the reader has to copy or act on (the IP address, the ports).
+  &__value {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--foreground);
+    white-space: nowrap;
+  }
+
+  &__para {
+    display: block;
+    margin-top: 0.35rem;
+  }
+}
