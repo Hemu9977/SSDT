@@ -1,11 +1,17 @@
 const axios = require('axios');
+const { runLighthouseAudit } = require('./inHouse/lighthouseAudit');
+const { withInHouseFallback, lighthouseUnusable } = require('./inHouse/fallback');
+
+// PSI usually answers within a minute. Without a limit a hung call would hold the
+// scan and never reach the in-house fallback.
+const PSI_TIMEOUT_MS = Number(process.env.PSI_TIMEOUT_MS) || 120_000;
 
 /**
  * Get PageSpeed Insights report for a given URL
  * @param {string} url - The URL to analyze
  * @returns {Promise<Object>} - PageSpeed Insights report data
  */
-async function getPageSpeedReport(url) {
+async function fetchPageSpeedInsights(url) {
   try {
     const apiKey = process.env.PSI_API_KEY;
 
@@ -31,6 +37,7 @@ async function getPageSpeedReport(url) {
         category: ['performance', 'accessibility', 'best-practices', 'seo'],
         strategy: 'desktop'
       },
+      timeout: PSI_TIMEOUT_MS,
       paramsSerializer: {
         serialize: (params) => {
           const search = new URLSearchParams();
@@ -62,6 +69,24 @@ async function getPageSpeedReport(url) {
       throw new Error(`PageSpeed service error: ${error.message}`);
     }
   }
+}
+
+/**
+ * PageSpeed Insights first, exactly as before. PSI audits the target from
+ * Google's servers; when it cannot — a client's IP allowlist refuses them
+ * ("Lighthouse returned error: ERRORED_DOCUMENT_REQUEST" for a 403), or PSI is
+ * down, out of quota or not configured — the same audit (Lighthouse, PSI's
+ * version and desktop settings) runs in-house from our egress IP.
+ * @param {string} url - The URL to analyze
+ * @returns {Promise<Object>} - PageSpeed Insights-shaped report
+ */
+async function getPageSpeedReport(url) {
+  return withInHouseFallback({
+    name: 'PageSpeed',
+    external: () => fetchPageSpeedInsights(url),
+    inHouse: () => runLighthouseAudit(url, { strategy: 'desktop' }),
+    unusable: lighthouseUnusable
+  });
 }
 
 module.exports = {

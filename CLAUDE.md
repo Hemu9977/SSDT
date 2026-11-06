@@ -63,6 +63,44 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
 5. **urlscan.io** - Screenshot + page analysis
 6. **Gemini AI** - Synthesized security report from all scanner data
 
+### In-house fallbacks for IP-restricted targets (`backend/services/inHouse/`)
+PageSpeed, Observatory and urlscan.io — and WebCheck's `tls` (calls the Observatory
+API) and `quality` (calls PSI) — fetch the target from **third-party** servers. A client
+whose site only admits Fortexa's egress IP (**54.178.209.53**, the NAT gateway every ECS
+task routes through) refuses them. Every other check (ZAP, the rest of WebCheck, login
+detection) fetches from our own IP, so the client's allowlist entry covers it.
+- **External first, always.** `pagespeedService.getPageSpeedReport`,
+  `observatoryService.scanHost`, `urlscanService.runUrlScan` and `webCheckService.runScan`
+  (tls/quality) wrap the unchanged external call in `inHouse/fallback.js`
+  `withInHouseFallback`: a usable external result is returned untouched; only an error or
+  an unusable result (a 4xx/5xx page, a Lighthouse `runtimeError`, a urlscan timeout)
+  runs the in-house check. If ours is refused too, the external outcome stands.
+  A fallback result carries `diagnosticSource: 'in-house'` + `fallbackReason` (never shown).
+- WebCheck `tls`/`quality`: the container gets **one** attempt (a retry only re-asks the
+  refused third party, ~20 s each) and the check a **10-minute** limit instead of 150 s
+  (`WEBCHECK_FALLBACK_SCAN_TIMEOUT_MS`), so a queued in-house run is never cut off.
+- Measured: refused targets make PSI give up in ~18 s, the Observatory API in 1–10 s;
+  urlscan.io never finishes (still "not finished" at 150 s), so its 90 s poll ends and the
+  capture runs. Production before this change stored that timeout as a "Clean" verdict.
+- In-house checks: `lighthouseAudit.js` (Lighthouse 13, PSI's settings; desktop for the
+  card, mobile for `quality`; CrUX field data via `CRUX_API_KEY`/`PSI_API_KEY` if the
+  Chrome UX Report API is enabled), `headerGrade.js` (`@mdn/mdn-http-observatory`, the
+  engine behind the public API — identical grades), `pageCapture.js` (Puppeteer capture +
+  `utils/ipCountry.js` + `threatVerdict.js`, a DNS blocklist verdict queried resolver by
+  resolver). All Chromium work queues on `browserSlot.js` (one at a time, hard timeouts).
+- In-house screenshots live in GridFS bucket `page_screenshots`, served by
+  `GET /api/scan/screenshot/:token.jpg` (no auth; the 256-bit token is the credential) —
+  the UI prefixes `API_BASE` via `frontend/src/utils/screenshotUrl.js`. Deleted with the
+  scan's artifacts and swept after the 7-day TTL (`jobs/cleanupJob.js`).
+- The UI tells customers to allowlist that IP (ports 80/443, plus WAF/bot-rule exemption) in
+  the "Before You Start" notice on **both** scan forms — `components/IpAllowlistNote.jsx`,
+  styled by the shared `styles/_scanNote.scss` mixin. The IP comes only from
+  `frontend/src/config/egress.js` (`REACT_APP_FORTEXA_EGRESS_IP` overrides it at build time).
+- The backend image is **Node 24** (`node:24-bookworm-slim`; the grading engine requires
+  it), with `fonts-noto-cjk` and `NODE_EXTRA_CA_CERTS` set in the Dockerfile.
+- Known WebCheck bug (not used by the fallback): `new/scripts/block-lists.js` passes
+  `{ server }` to `dns.resolve4`, which Node ignores, so every "resolver" is the system one.
+
 ## Key Components
 
 ### Normal Scan Flow (`Hero.jsx`)
@@ -214,6 +252,14 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   opening a scan from Recent Scans never inlines the ZAP detailed-alerts file (a production
   file was 287 MB and kept the page on its spinner for minutes); the evidence is fetched on
   demand from `/api/zap/detailed-report/:scanId`, which still serves authenticated scans.
+- `backend/tests/inHouseDiagnostics.test.js` — the in-house fallbacks: a usable external
+  result is untouched; an error or 403 page runs the in-house check; a site that refuses
+  us too keeps the external outcome; each service's wiring; the in-house results keep
+  every field the report reads; verdict rules; one browser at a time; screenshot route.
+- `backend/tests/inHouseAiPrompt.test.js` — a scan whose results came from the fallbacks,
+  through the real sanitizer and `refineReport`, capturing the request the Gemini SDK
+  sends: all scores/grade/verdict reach the prompt; no host, path, IP, screenshot token or
+  fallback detail does.
 - `backend/tests/failedScanRetention.test.js`, `subscriptionState.test.js`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and

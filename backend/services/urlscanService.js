@@ -1,5 +1,7 @@
 const axios = require('axios');
 const Bottleneck = require('bottleneck');
+const { runPageCapture } = require('./inHouse/pageCapture');
+const { withInHouseFallback, httpErrorReason } = require('./inHouse/fallback');
 
 const URLSCAN_API_KEY = process.env.URLSCAN_API_KEY;
 const URLSCAN_BASE = 'https://urlscan.io/api/v1';
@@ -110,7 +112,7 @@ async function getUrlScanResult(uuid) {
  * @param {number} maxWaitTime - Maximum wait time in ms (default: 90 seconds)
  * @returns {Promise<object>} - Scan results
  */
-async function runUrlScan(targetUrl, maxWaitTime = 90000) {
+async function runExternalUrlScan(targetUrl, maxWaitTime = 90000) {
     console.log(`🔍 [urlscan] Starting scan for: ${targetUrl}`);
 
     try {
@@ -146,7 +148,10 @@ async function runUrlScan(targetUrl, maxWaitTime = 90000) {
                         country: page.country,
                         server: page.server,
                         tlsIssuer: page.tlsIssuer,
-                        tlsValidDays: page.tlsValidDays
+                        tlsValidDays: page.tlsValidDays,
+                        // HTTP status of the captured page; a 4xx/5xx means the
+                        // service captured an error page (e.g. a 403 from an IP allowlist).
+                        status: pageStatus(result)
                     },
                     verdicts: {
                         overall: verdicts.overall || {},
@@ -189,8 +194,42 @@ async function runUrlScan(targetUrl, maxWaitTime = 90000) {
     }
 }
 
+/** Status of the main document, from the page summary or the first request. */
+function pageStatus(result) {
+    const raw = result?.page?.status ?? result?.data?.requests?.[0]?.response?.response?.status;
+    const code = Number(raw);
+    return Number.isFinite(code) && code > 0 ? code : undefined;
+}
+
+/** Why an external result does not describe the site itself, or null. */
+function urlscanUnusable(result) {
+    if (!result) return 'empty';
+    if (result.status === 'timeout') return 'timeout';
+    if (!result.page && !result.verdicts) return 'no_result';
+    return httpErrorReason(result.page?.status);
+}
+
+/**
+ * Page analysis: the external service first, exactly as before. It loads the
+ * target from its own servers; when it cannot (refused by a client's IP
+ * allowlist — failed, timed out or captured the 403 page — or the service is
+ * down / not configured), the page is captured in-house from our egress IP.
+ * @param {string} targetUrl
+ * @param {number} [maxWaitTime] - external polling budget in ms (default 90 s)
+ */
+async function runUrlScan(targetUrl, maxWaitTime = 90000) {
+    return withInHouseFallback({
+        name: 'URLScan',
+        external: () => runExternalUrlScan(targetUrl, maxWaitTime),
+        inHouse: () => runPageCapture(targetUrl),
+        unusable: urlscanUnusable
+    });
+}
+
 module.exports = {
     submitUrlScan,
     getUrlScanResult,
-    runUrlScan  // For combined scan integration
+    runUrlScan,  // For combined scan integration
+    // Exposed for tests.
+    _urlscanUnusable: urlscanUnusable
 };

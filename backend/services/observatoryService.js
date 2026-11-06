@@ -1,4 +1,6 @@
 const axios = require('axios');
+const { gradeHost } = require('./inHouse/headerGrade');
+const { withInHouseFallback, httpErrorReason } = require('./inHouse/fallback');
 
 // Multiple Observatory API endpoints for fallback
 const OBSERVATORY_ENDPOINTS = [
@@ -11,7 +13,7 @@ const OBSERVATORY_ENDPOINTS = [
  * @param {string} host - The hostname to scan (e.g., 'google.com')
  * @returns {Promise<Object>} - Scan results from Mozilla Observatory
  */
-async function scanHost(host) {
+async function requestObservatoryScan(host) {
   console.log(`🔍 Scanning host with Mozilla Observatory: ${host}`);
 
   let lastError = null;
@@ -93,6 +95,34 @@ async function scanHost(host) {
 }
 
 /**
+ * A grade only describes the site if the API actually reached it. It also grades
+ * 401/403 answers — which is what a client's IP allowlist gives Mozilla's servers —
+ * and reports scan failures in `error`.
+ */
+function observatoryUnusable(result) {
+  if (!result) return 'empty';
+  if (result.error) return `error_${result.error}`;
+  if (!result.grade) return 'no_grade';
+  return httpErrorReason(result.status_code);
+}
+
+/**
+ * Grade a hostname: the public Observatory API first, exactly as before; when it
+ * cannot grade the site itself (refused by an IP allowlist, down, rate-limited),
+ * the same engine runs in-house from our egress IP.
+ * @param {string} host - The hostname to scan (e.g., 'google.com')
+ * @returns {Promise<Object>} - Observatory v2 /scan-shaped result
+ */
+async function scanHost(host) {
+  return withInHouseFallback({
+    name: 'Observatory',
+    external: () => requestObservatoryScan(host),
+    inHouse: () => gradeHost(host),
+    unusable: observatoryUnusable
+  });
+}
+
+/**
  * Get detailed test results for a scan
  * @param {string} host - The hostname
  * @returns {Promise<Object>} - Detailed test results
@@ -128,5 +158,7 @@ async function getTestResults(host) {
 
 module.exports = {
   scanHost,
-  getTestResults
+  getTestResults,
+  // Exposed for tests.
+  _observatoryUnusable: observatoryUnusable
 };

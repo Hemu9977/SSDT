@@ -33,6 +33,9 @@ const { withRetry }          = require('../utils/retryUtils');
 const { classifyError }      = require('../utils/errorClassifier');
 const { createConcurrencyLimiter } = require('../utils/concurrencyLimiter');
 const { CircuitBreaker }     = require('../utils/circuitBreaker');
+const { runLighthouseAudit } = require('./inHouse/lighthouseAudit');
+const { getTlsReport }       = require('./inHouse/headerGrade');
+const { withInHouseFallback, httpErrorReason, lighthouseUnusable } = require('./inHouse/fallback');
 const { validateScanResult } = require('../utils/resultValidation');
 const config                 = require('../config/scanConfig');
 
@@ -153,6 +156,55 @@ const getMetrics = () => ({ ..._metrics, active: activeWebCheckScans.size });
 // Core scan runner
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Two container checks hand the target to a third party, which fetches it from
+// its own servers — refused by a client's IP allowlist. For those, when the
+// container's answer does not describe the site, the same check runs in-house
+// from our egress IP and returns the shape the container does. (The container's
+// other checks fetch the target themselves, or only consult public datasets and
+// DNS, so the client's allowlist entry for our IP already covers them.)
+const FALLBACK_SCAN_TIMEOUT_MS = Number(process.env.WEBCHECK_FALLBACK_SCAN_TIMEOUT_MS) || 10 * 60 * 1000;
+const IN_HOUSE_FALLBACKS = {
+  // The container calls the public header-grading API.
+  tls: {
+    inHouse: (url) => getTlsReport(url),
+    unusable: (r) => {
+      if (!r || r.error) return 'error';
+      if (!r.tlsInfo?.grade || r.tlsInfo.grade === 'N/A') return 'no_grade';
+      return httpErrorReason(r.tlsInfo.statusCode ?? r.scan?.status_code);
+    },
+  },
+  // The container calls Google PageSpeed Insights (mobile strategy).
+  quality: {
+    inHouse: (url, signal) => runLighthouseAudit(url, { strategy: 'mobile', signal }),
+    unusable: lighthouseUnusable,
+  },
+};
+
+/**
+ * Execute a single WebCheck scan type; `tls` and `quality` fall back to the
+ * in-house check when the container's third party could not reach the site.
+ */
+const runScan = async (scanType, url, signal) => {
+  const fallback = IN_HOUSE_FALLBACKS[scanType];
+  if (!fallback) return runContainerScan(scanType, url, signal);
+  return withInHouseFallback({
+    name: `WebCheck/${scanType}`,
+    // One attempt: when the third party is refused, the container answers 500 and
+    // a retry only asks the same refused service again (~20 s each), eating the
+    // per-scan time limit the in-house check needs. The fallback is the retry.
+    external: () => runContainerScan(scanType, url, signal, { maxAttempts: 1 }),
+    inHouse: () => {
+      if (signal?.aborted) {
+        const err = new Error(`${scanType} scan aborted`);
+        err.code = 'ERR_ABORTED';
+        throw err;
+      }
+      return fallback.inHouse(url, signal);
+    },
+    unusable: fallback.unusable,
+  });
+};
+
 /**
  * Execute a single WebCheck scan type with retry logic.
  *
@@ -161,7 +213,7 @@ const getMetrics = () => ({ ..._metrics, active: activeWebCheckScans.size });
  * @param {AbortSignal} [signal]    - Optional AbortSignal for cancellation / timeout
  * @returns {Promise<object>}       - Raw scan data from WebCheck container
  */
-const runScan = async (scanType, url, signal) => {
+const runContainerScan = async (scanType, url, signal, { maxAttempts = config.retry.maxAttempts } = {}) => {
   if (!ALLOWED_SCANS.includes(scanType)) {
     throw new Error(`Invalid scan type: ${scanType}. Allowed: ${ALLOWED_SCANS.join(', ')}`);
   }
@@ -207,7 +259,7 @@ const runScan = async (scanType, url, signal) => {
       return data;
     },
     {
-      maxAttempts:    config.retry.maxAttempts,
+      maxAttempts,
       initialDelayMs: config.retry.initialDelayMs,
       maxDelayMs:     config.retry.maxDelayMs,
       backoffFactor:  config.retry.backoffFactor,
@@ -650,7 +702,10 @@ const runWebCheckInBackground = async (url, analysisId, userId, controller) => {
 
       // ── Per-scan-type AbortController (enforces perScanTimeoutMs) ───────
       const perScanController = new AbortController();
-      const poolTimeoutMs = HEAVY_SCANS.includes(scanType) ? config.scan.heavyPerScanTimeoutMs : config.scan.lightPerScanTimeoutMs;
+      const basePoolTimeoutMs = HEAVY_SCANS.includes(scanType) ? config.scan.heavyPerScanTimeoutMs : config.scan.lightPerScanTimeoutMs;
+      // A check with an in-house fallback may wait for the shared browser slot
+      // behind other scans' fallbacks; give it room so it is never cut off there.
+      const poolTimeoutMs = IN_HOUSE_FALLBACKS[scanType] ? Math.max(basePoolTimeoutMs, FALLBACK_SCAN_TIMEOUT_MS) : basePoolTimeoutMs;
       const timeoutHandle     = setTimeout(
         () => perScanController.abort(),
         poolTimeoutMs
