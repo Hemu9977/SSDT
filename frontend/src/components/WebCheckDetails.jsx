@@ -337,7 +337,11 @@ const WebCheckDetails = ({ webCheckReport, theme }) => {
         {webCheckReport.archives && !webCheckReport.archives.error && (
           <div style={cardStyle}>
             <h5 style={h5Style}>{t('webArchiveHistory')}</h5>
-            <p><b>{t('totalSnapshots')}:</b> {webCheckReport.archives.scanCount || webCheckReport.archives.length || t('available')}</p>
+            {webCheckReport.archives.skipped ? (
+              <p style={{ opacity: 0.7 }}>{t('notArchived')}</p>
+            ) : (
+              <p><b>{t('totalSnapshots')}:</b> {webCheckReport.archives.totalScans || webCheckReport.archives.scanCount || webCheckReport.archives.length || t('available')}</p>
+            )}
             {webCheckReport.archives.firstScan && <p><b>{t('firstSnapshot')}:</b> {webCheckReport.archives.firstScan}</p>}
             {webCheckReport.archives.lastScan && <p><b>{t('lastSnapshot')}:</b> {webCheckReport.archives.lastScan}</p>}
           </div>
