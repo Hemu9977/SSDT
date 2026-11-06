@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { runZapScan, stopCombinedScan } = require('../services/zapService');
 const { stopWebCheckScan, getFullResults } = require('../services/webCheckService');
+const { SCREENSHOT_BUCKET } = require('../services/inHouse/pageCapture');
 const gridfsService = require('../services/gridfsService');
 const { generateSingleLanguagePdf } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
@@ -224,6 +225,41 @@ router.get('/scan/:analysisId', auth, async (req, res) => {
       error: 'Failed to load scan',
       details: devMsg(err)
     });
+  }
+});
+
+// Page screenshot from the in-house page capture (services/inHouse/pageCapture.js),
+// used when the external page-analysis service could not reach the site.
+// Shown with a plain <img>, which cannot send x-auth-token, so the URL itself is the
+// credential: a 256-bit random token per screenshot (as the external service's
+// screenshots sit at a public URL). Files go with their scan — see cleanupService.
+// Errors are bare statuses: an <img> shows no response body.
+router.get('/screenshot/:file', async (req, res) => {
+  const match = /^([a-f0-9]{64})\.jpg$/.exec(req.params.file || '');
+  if (!match) return res.status(404).end();
+  try {
+    const bucket = gridfsService.initialize(SCREENSHOT_BUCKET);
+    const [file] = await bucket.find({ filename: `${match[1]}.jpg` }).limit(1).toArray();
+    if (!file) return res.status(404).end();
+
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Content-Length': String(file.length),
+      // The report page is on another origin than the API; helmet's default
+      // same-origin policy would stop the browser from showing the image.
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Robots-Tag': 'noindex'
+    });
+    bucket.openDownloadStream(file._id)
+      .on('error', (err) => {
+        console.error('[Screenshot] Stream failed:', err.message);
+        if (!res.headersSent) res.status(500).end();
+        else res.destroy(err);
+      })
+      .pipe(res);
+  } catch (err) {
+    console.error('[Screenshot] Lookup failed:', err.message);
+    res.status(500).end();
   }
 });
 

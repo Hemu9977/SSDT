@@ -6,6 +6,7 @@ const ZapAlert = require('../models/ZapAlert');
 const WEBCHECK_BUCKET = 'webcheck_results';
 const ZAP_BUCKET = 'zap_reports';
 const ZAP_AUTH_BUCKET = 'zap_auth_reports';
+const SCREENSHOT_BUCKET = 'page_screenshots'; // inHouse/pageCapture.SCREENSHOT_BUCKET
 
 // Authenticated scans store their reports in their own bucket (zapAuthService),
 // named zap_auth_*; the readers pick the bucket the same way.
@@ -13,8 +14,8 @@ const zapBucketFor = (file) =>
     (file.filename || '').includes('zap_auth') ? ZAP_AUTH_BUCKET : ZAP_BUCKET;
 
 /**
- * Delete a scan's heavy artifacts: its GridFS report files (WebCheck + ZAP) and
- * its ZapAlert documents. Leaves the ScanResult document itself alone.
+ * Delete a scan's heavy artifacts: its GridFS report files (WebCheck + ZAP), its
+ * page screenshot and its ZapAlert documents. Leaves the ScanResult document itself alone.
  * @returns {Promise<{gridfsFiles: number, zapAlerts: number}>}
  */
 async function deleteScanArtifacts(scan) {
@@ -62,7 +63,18 @@ async function deleteScanArtifacts(scan) {
         }
     }
 
-    // 3. Delete ZapAlert documents
+    // 3. Delete the page screenshot (only when the in-house page capture took it)
+    if (scan.urlscanResult?.screenshotFileId) {
+        try {
+            await gridfsService.deleteFile(scan.urlscanResult.screenshotFileId, SCREENSHOT_BUCKET);
+            deletedItems.gridfsFiles++;
+            console.log(`[Cleanup] Deleted screenshot GridFS file: ${scan.urlscanResult.screenshotFileId}`);
+        } catch (err) {
+            console.warn(`[Cleanup] Failed to delete screenshot file: ${err.message}`);
+        }
+    }
+
+    // 4. Delete ZapAlert documents
     const zapAlertResult = await ZapAlert.deleteMany({ scanId: scan.analysisId });
     deletedItems.zapAlerts = zapAlertResult.deletedCount;
     if (deletedItems.zapAlerts > 0) {

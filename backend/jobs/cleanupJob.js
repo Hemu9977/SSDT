@@ -232,6 +232,19 @@ async function runCleanup() {
             console.warn('[CleanupJob] PDF report cleanup failed (non-fatal):', pdfErr.message);
         }
 
+        // 5. Page screenshots outlive no scan: a scan document lasts 7 days (TTL),
+        //    so a screenshot older than that has no report left to show it in. This
+        //    also catches one whose scan was stopped before the result was saved.
+        try {
+            const gridfsService = require('../services/gridfsService');
+            const { SCREENSHOT_BUCKET } = require('../services/inHouse/pageCapture');
+            const cutoff = new Date(Date.now() - (7 * 24 + 1) * 60 * 60 * 1000);
+            const deleted = await gridfsService.deleteFilesOlderThan(SCREENSHOT_BUCKET, cutoff);
+            if (deleted) console.log(`[CleanupJob] Deleted ${deleted} expired page screenshot(s) from GridFS`);
+        } catch (shotErr) {
+            console.warn('[CleanupJob] Screenshot cleanup failed (non-fatal):', shotErr.message);
+        }
+
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`[CleanupJob] Cleanup completed in ${duration}s`);
 
