@@ -19,19 +19,8 @@ import { getScanStatusLine, getCompletedStepCount, SCAN_STEP_COUNT } from '../ut
 import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
 import { hasScanAccess } from '../utils/planAccess';
-
-// 🔄 Loading Placeholder Component for progressive loading
-const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
-  <div
-    className="loading-placeholder"
-    style={{
-      height,
-      width,
-      minHeight: height,
-      ...style
-    }}
-  />
-);
+import { getReportToolStates, getAiSummaryState } from '../utils/scanToolState';
+import { ScanToolCard, AiSummaryLoader, LoadedReveal } from './ScanLoadingStates';
 
 const Hero = ({ historicalScan }) => {
   const [report, setReport] = useState(null);
@@ -1069,28 +1058,23 @@ const Hero = ({ historicalScan }) => {
       return map[grade[0]] || '#888';
     };
 
-    // Vulnerability scan helpers - driven by backend zapData status.
+    // Loading / pending / completed / failed for the four tool cards and the AI
+    // summary — shared with AuthenticatedScanPanel via utils/scanToolState.
+    const toolStates = getReportToolStates(report);
+    const aiSummaryState = getAiSummaryState(report);
+
+    // Vulnerability scan result label, used once the card has completed.
+    // Running / queued / failed are card states (ScanToolCard), not labels.
     // Labels are localized and engine-agnostic; the backend `phase` and `message`
     // fields are intentionally never surfaced.
     let zapRiskLabel = t('passed');
     let zapRiskColor = "#00d084";
-    let zapPendingMessage = null;
 
     const backendZapData = report?.zapData;
-    if (backendZapData) {
-      if (backendZapData.status === 'pending' || backendZapData.status === 'running') {
-        zapRiskLabel = t('scanning');
-        zapRiskColor = "#ffb900";
-        zapPendingMessage = `${backendZapData.progress || 0}%`;
-      } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
-        if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = "#e81123"; }
-        else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = "#ff8c00"; }
-        else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = "#ffb900"; }
-      } else if (backendZapData.status === 'failed') {
-        zapRiskLabel = t('scanFailed');
-        zapRiskColor = "#e81123";
-        zapPendingMessage = null;
-      }
+    if (backendZapData?.status === 'completed' && backendZapData.riskCounts) {
+      if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = "#e81123"; }
+      else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = "#ff8c00"; }
+      else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = "#ffb900"; }
     }
 
     // 🔍 WebCheck data - now comes from backend via polling
@@ -1139,100 +1123,62 @@ const Hero = ({ historicalScan }) => {
           <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>{t('aiGeneratedAnalysisSummary')}</h4>
           {refinedReport ? (
             isTranslatingReport ? (
-              <div style={{ textAlign: 'center', padding: '1rem' }}>
-                <p style={{ color: 'var(--accent)' }}>🌐 {t('translatingReportToJapanese')}</p>
-              </div>
+              <AiSummaryLoader translating />
             ) : (
-              <ReactMarkdown>
-                {(() => {
-                  const urlParams = new URLSearchParams(window.location.search);
-                  const forceEn = urlParams.get('lang') === 'en';
-                  return (currentLang === 'ja' && translatedReport && !forceEn) ? translatedReport : refinedReport;
-                })()}
-              </ReactMarkdown>
+              <LoadedReveal>
+                <ReactMarkdown>
+                  {(() => {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const forceEn = urlParams.get('lang') === 'en';
+                    return (currentLang === 'ja' && translatedReport && !forceEn) ? translatedReport : refinedReport;
+                  })()}
+                </ReactMarkdown>
+              </LoadedReveal>
             )
           ) : (
-            <div className="loading-pulse">
-              <LoadingPlaceholder height="1rem" style={{ marginBottom: '0.5rem' }} />
-              <LoadingPlaceholder height="1rem" width="95%" style={{ marginBottom: '0.5rem' }} />
-              <LoadingPlaceholder height="1rem" width="88%" style={{ marginBottom: '0.5rem' }} />
-              <LoadingPlaceholder height="1rem" width="92%" style={{ marginBottom: '0.5rem' }} />
-              <LoadingPlaceholder height="1rem" width="75%" style={{ marginBottom: '0.5rem' }} />
-              <p style={{ color: 'var(--accent)', marginTop: '1rem', textAlign: 'center' }}>
-                ⏳ {t('generatingAiAnalysisWaitingForAllScanData')}
-              </p>
-            </div>
+            <AiSummaryLoader state={aiSummaryState} />
           )}
         </div>
 
         {/* Combined Scores Grid */}
         <div className="score-cards-grid">
-          {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
-          {/* ⚡ OWASP ZAP Score Card - Now uses backend data with async support */}
-          <div className="score-card">
-            <h4 className="score-card__title">⚡ {t('vulnerabilityScan')}</h4>
-            {backendZapData ? (
+          {/* Vulnerability scan */}
+          <ScanToolCard tool="vulnerability" title={t('vulnerabilityScan')} status={toolStates.vulnerability}>
+            {() => (
               <>
                 <span className="score-card__value" style={{ color: zapRiskColor }}>{zapRiskLabel}</span>
-                {zapPendingMessage ? (
-                  <p className="score-card__label" style={{ color: '#ffb900' }}>{zapPendingMessage}</p>
-                ) : backendZapData.status === 'completed' ? (
-                  <p className="score-card__label">{t('alertsCount', { count: backendZapData.alerts ? backendZapData.alerts.length : 0 })}</p>
-                ) : backendZapData.status === 'completed_partial' ? (
+                {backendZapData.status === 'completed_partial' ? (
                   <p className="score-card__label" style={{ color: '#ffb900' }}>{t('alertsCountPartial', { count: backendZapData.alerts ? backendZapData.alerts.length : 0 })}</p>
-                ) : null}
+                ) : (
+                  <p className="score-card__label">{t('alertsCount', { count: backendZapData.alerts ? backendZapData.alerts.length : 0 })}</p>
+                )}
               </>
-            ) : report?.zapResult?.error || (report?.status === 'completed' && !report?.hasZapResult) ? (
-              <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
-            ) : (
-              <div className="score-card__loading loading-pulse">
-                <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
-                <LoadingPlaceholder height="0.85rem" width="40%" />
-              </div>
             )}
-          </div>
+          </ScanToolCard>
 
-          {/* Performance (PSI) */}
-          {/* Performance (PSI) */}
-          <div className="score-card">
-            <h4 className="score-card__title">⚡ {t('performance')}</h4>
-            {psiScores?.performance != null ? (
+          {/* Performance */}
+          <ScanToolCard tool="performance" title={t('performance')} status={toolStates.performance}>
+            {() => (
               <>
                 <span className={`score-card__value ${getScoreClass(psiScores.performance)}`}>{psiScores.performance}</span>
                 <p className="score-card__label">{t('outOf100')}</p>
               </>
-            ) : (
-              <div className="score-card__loading loading-pulse">
-                <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
-                <LoadingPlaceholder height="0.85rem" width="40%" />
-              </div>
             )}
-          </div>
+          </ScanToolCard>
 
-
-
-          {/* Security Config (Observatory) */}
-          {/* Security Config (Observatory) */}
-          <div className="score-card">
-            <h4 className="score-card__title">🔒 {t('securityConfig')}</h4>
-            {observatoryData?.grade ? (
+          {/* Security configuration */}
+          <ScanToolCard tool="securityConfig" title={t('securityConfig')} status={toolStates.securityConfig}>
+            {() => (
               <>
                 <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
                 <p className="score-card__label">{t('securityConfig')}</p>
               </>
-            ) : (
-              <div className="score-card__loading loading-pulse">
-                <LoadingPlaceholder height="1.5rem" width="40%" style={{ marginBottom: '0.5rem' }} />
-                <LoadingPlaceholder height="0.85rem" width="60%" />
-              </div>
             )}
-          </div>
+          </ScanToolCard>
 
-          {/* 🔍 URLScan.io Security Verdict */}
-          {/* 🔍 URLScan.io Security Verdict */}
-          <div className="score-card">
-            <h4 className="score-card__title">🌐 {t('threatIntelligence')}</h4>
-            {report?.hasUrlscanResult && report?.urlscanData ? (
+          {/* Threat intelligence */}
+          <ScanToolCard tool="threatIntel" title={t('threatIntelligence')} status={toolStates.threatIntel}>
+            {() => (
               <>
                 <span className="score-card__value" style={{
                   color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084'
@@ -1243,15 +1189,8 @@ const Hero = ({ historicalScan }) => {
                   {report.urlscanData.verdicts?.overall?.score || 0} {t('threatScore')}
                 </p>
               </>
-            ) : report?.urlscanResult?.error || (report?.status === 'completed' && !report?.hasUrlscanResult) ? (
-              <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
-            ) : (
-              <div className="score-card__loading loading-pulse">
-                <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
-                <LoadingPlaceholder height="0.85rem" width="40%" />
-              </div>
             )}
-          </div>
+          </ScanToolCard>
 
           {/* 🔍 WebCheck: SSL Certificate */}
           {/* 🔍 WebCheck: SSL Certificate */}

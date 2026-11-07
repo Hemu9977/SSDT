@@ -1,0 +1,423 @@
+/* Scan report loading states — components/ScanLoadingStates.jsx.
+   Shared by the normal (Hero) and authenticated report pages.
+
+   Surfaces follow the panel rule in CLAUDE.md: any tinted layer is the tint over
+   var(--panel-bg), never a translucent background, so the particle canvas behind
+   the page cannot show through text. Keyframes are prefixed `scanld-` because
+   CRA bundles every stylesheet globally and `pulse`/`shimmer` are already defined
+   (differently) in three other files. */
+
+$scanld-tint: rgba(255, 107, 0, 0.12);
+$scanld-tint-strong: rgba(255, 107, 0, 0.2);
+
+@keyframes scanld-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes scanld-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes scanld-indeterminate {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
+@keyframes scanld-breathe {
+  0%, 100% { transform: scale(0.92); opacity: 0.75; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes scanld-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes scanld-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.scan-loading-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Tool cards ────────────────────────────────────────────────────────────── */
+
+.scan-tool-card {
+  position: relative;
+  justify-content: flex-start !important; // header pinned to the top in every state
+  gap: 0.75rem;
+
+  .score-card__title {
+    margin: 0;
+  }
+
+  &__head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.55rem;
+  }
+
+  &__icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 50%;
+    font-size: 0.95rem;
+    color: var(--accent);
+    background: linear-gradient($scanld-tint, $scanld-tint) var(--panel-bg);
+    border: 1px solid rgba(255, 107, 0, 0.35);
+    transition: color 0.3s ease, border-color 0.3s ease;
+  }
+
+  &__result {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    justify-content: center;
+    animation: scanld-fade-in 0.45s ease-out both;
+  }
+
+  /* Running: an orbiting arc around the icon and a slow accent sweep on the top edge. */
+  &--loading {
+    border-color: rgba(255, 107, 0, 0.55) !important;
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      opacity: 0.8;
+      animation: scanld-sweep 2.6s ease-in-out infinite;
+    }
+
+    .scan-tool-card__icon::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      border-top-color: var(--accent);
+      border-right-color: rgba(255, 107, 0, 0.35);
+      animation: scanld-spin 1.1s linear infinite;
+    }
+  }
+
+  /* Waiting: calm and neutral — clearly not an error. */
+  &--pending {
+    border-style: dashed !important;
+    border-color: rgba(128, 128, 128, 0.45) !important;
+
+    .scan-tool-card__icon {
+      color: var(--foreground);
+      opacity: 0.55;
+      border-color: rgba(128, 128, 128, 0.4);
+      background: var(--panel-bg);
+    }
+  }
+
+  &--failed .scan-tool-card__icon {
+    opacity: 0.7;
+  }
+}
+
+.tool-status {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  width: 100%;
+  animation: scanld-fade 0.3s ease-out both;
+
+  &__message {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    color: var(--foreground);
+    opacity: 0.85;
+  }
+
+  &__label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+  }
+
+  &__track {
+    position: relative;
+    width: 70%;
+    max-width: 170px;
+    height: 4px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: linear-gradient($scanld-tint-strong, $scanld-tint-strong) var(--panel-bg);
+  }
+
+  &__bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--accent-dark), var(--accent), var(--accent-light));
+    transition: width 0.6s ease;
+
+    &--indeterminate {
+      width: 40%;
+      animation: scanld-indeterminate 1.6s ease-in-out infinite;
+    }
+  }
+
+  &__meta {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &--pending {
+    .tool-status__label {
+      color: var(--foreground);
+      opacity: 0.7;
+      font-weight: 600;
+    }
+
+    .tool-status__message {
+      font-size: 0.8rem;
+      opacity: 0.6;
+    }
+  }
+
+  &--error .tool-status__label { color: #e81123; }
+  &--warning .tool-status__label { color: #ffb900; }
+}
+
+/* ── AI summary ────────────────────────────────────────────────────────────── */
+
+.ai-loader {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 107, 0, 0.25);
+  background: linear-gradient(rgba(255, 107, 0, 0.05), rgba(255, 107, 0, 0.05)) var(--panel-bg);
+  animation: scanld-fade 0.3s ease-out both;
+
+  /* A soft band of light drifting across the panel: "something is being written". */
+  &__sheen {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(100deg, transparent 30%, rgba(255, 107, 0, 0.09) 50%, transparent 70%);
+    animation: scanld-sweep 3.2s ease-in-out infinite;
+  }
+
+  &__orb {
+    position: relative;
+    flex: 0 0 auto;
+    width: 3.5rem;
+    height: 3.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  &__ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    animation: scanld-spin 1.6s linear infinite;
+  }
+
+  &__ring-track,
+  &__ring-arc {
+    fill: none;
+    stroke-width: 3;
+  }
+
+  &__ring-track {
+    stroke: rgba(255, 107, 0, 0.18);
+  }
+
+  &__ring-arc {
+    stroke: var(--accent);
+    stroke-linecap: round;
+    stroke-dasharray: 34 98; // ~quarter arc of a 2πr≈132 circle
+  }
+
+  &__icon {
+    font-size: 1.35rem;
+    color: var(--accent);
+    animation: scanld-breathe 2.4s ease-in-out infinite;
+  }
+
+  &__text {
+    position: relative;
+    min-width: 0;
+    flex: 1;
+  }
+
+  &__message {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--foreground);
+    animation: scanld-fade 0.5s ease-out both;
+  }
+
+  &__hint {
+    margin: 0.25rem 0 0;
+    font-size: 0.82rem;
+    color: var(--foreground);
+    opacity: 0.65;
+  }
+
+  &__inputs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  &__segments {
+    display: flex;
+    gap: 4px;
+  }
+
+  &__segment {
+    width: 1.75rem;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient($scanld-tint-strong, $scanld-tint-strong) var(--panel-bg);
+    transition: background 0.4s ease;
+
+    &.is-done {
+      background: var(--accent);
+    }
+  }
+
+  &__count {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &--unavailable {
+    border-color: rgba(255, 185, 0, 0.35);
+    background: var(--panel-bg);
+
+    .ai-loader__message {
+      font-weight: 500;
+      animation: none;
+    }
+  }
+
+  &__static-icon {
+    flex: 0 0 auto;
+    color: #ffb900;
+    font-size: 1.25rem;
+    display: inline-flex;
+  }
+}
+
+.scan-loaded-reveal {
+  animation: scanld-fade-in 0.5s ease-out both;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────────── */
+
+@media (max-width: 560px) {
+  .ai-loader {
+    flex-direction: column;
+    text-align: center;
+    gap: 0.85rem;
+
+    &__inputs {
+      justify-content: center;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .scan-tool-card {
+    gap: 0.5rem;
+
+    &__icon {
+      width: 1.85rem;
+      height: 1.85rem;
+      font-size: 0.8rem;
+    }
+  }
+
+  .tool-status {
+    gap: 0.4rem;
+
+    &__message { font-size: 0.72rem; }
+    &__label { font-size: 0.8rem; }
+    &__track { width: 85%; }
+  }
+
+  .ai-loader__segment {
+    width: 1.35rem;
+  }
+}
+
+/* ── Reduced motion: keep every state legible, drop the movement. ──────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-tool-card,
+  .scan-tool-card *,
+  .scan-tool-card::before,
+  .scan-tool-card *::after,
+  .tool-status,
+  .tool-status *,
+  .ai-loader,
+  .ai-loader *,
+  .scan-loaded-reveal {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .scan-tool-card--loading::before {
+    transform: none;
+    opacity: 0.6;
+  }
+
+  .tool-status__bar--indeterminate {
+    left: 0;
+    width: 100%;
+    opacity: 0.45;
+  }
+
+  .ai-loader__sheen {
+    display: none;
+  }
+}

@@ -274,26 +274,9 @@ body.dark {
   animation: pulse 2s infinite;
 }
 
-.loading-placeholder {
-  background: linear-gradient(90deg,
-      rgba(0, 0, 0, 0.65) 0%,
-      rgba(255, 107, 0, 0.15) 50%,
-      rgba(0, 0, 0, 0.65) 100%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
-  border-radius: 4px;
-}
-
-.loading-pulse {
-  animation: pulse 1.5s ease-in-out infinite;
-}
-
+/* Report loading states (AI summary, tool cards) live in ScanLoading.scss. */
 .ai-report-section {
   overflow: hidden;
-
-  .loading-placeholder {
-    max-width: 100%;
-  }
 }
 
 .scan-progress-bar {
