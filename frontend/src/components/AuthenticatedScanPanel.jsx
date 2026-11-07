@@ -16,14 +16,8 @@ import { screenshotUrl } from '../utils/screenshotUrl';
 import { getScanStatusLine } from '../utils/scanStatus';
 import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
-
-// Loading placeholder for progressive loading (same as Hero.jsx)
-const LoadingPlaceholder = ({ height = '1.5rem', width = '100%', style = {} }) => (
-  <div
-    className="loading-placeholder"
-    style={{ height, width, minHeight: height, ...style }}
-  />
-);
+import { getReportToolStates, getAiSummaryState } from '../utils/scanToolState';
+import { ScanToolCard, AiSummaryLoader, LoadedReveal } from './ScanLoadingStates';
 
 const LOGIN_ERROR_MESSAGE_KEYS = {
   FIELD_NOT_FOUND: 'loginFieldNotFound',
@@ -1191,7 +1185,7 @@ const AuthenticatedScanPanel = () => {
 
             <div className="step-actions">
               <button className="secondary-btn" onClick={() => setStep(2)}>
-                Back
+                {t('back')}
               </button>
               <button
                 className="primary-btn start-scan-btn"
@@ -1208,12 +1202,21 @@ const AuthenticatedScanPanel = () => {
         {/* Step 4: Scanning  +  Step 5: Results — unified progressive view */}
         {(step === 4 || step === 5) && (
           <div className="step-content">
-            <h2>{step === 5 ? t('scanComplete') : t('scanningInProgress')}</h2>
-            <p className="step-description">
-              {step === 5
-                ? t('securityScanCompletedReviewBelow')
-                : t('runningAuthenticatedWebsiteScan')}
-            </p>
+            <div className="step-header">
+              <div className="step-header__text">
+                <h2>{step === 5 ? t('scanComplete') : t('scanningInProgress')}</h2>
+                <p className="step-description">
+                  {step === 5
+                    ? t('securityScanCompletedReviewBelow')
+                    : t('runningAuthenticatedWebsiteScan')}
+                </p>
+              </div>
+              {step === 4 && (
+                <button type="button" onClick={handleStopScan} className="stop-button">
+                  <span className="button-text">{t('stopScan')}</span>
+                </button>
+              )}
+            </div>
 
             {/* What this scan actually covered. Derived from the structured
                 `authCoverage` field, never from backend prose. */}
@@ -1260,25 +1263,16 @@ const AuthenticatedScanPanel = () => {
               <h4 style={{ marginTop: 0, color: 'var(--accent)' }}>{t('aiGeneratedAnalysisSummary')}</h4>
               {report?.refinedReport ? (
                 isTranslatingReport ? (
-                  <div style={{ textAlign: 'center', padding: '1rem' }}>
-                    <p style={{ color: 'var(--accent)' }}>{t('translatingReportToJapanese')}</p>
-                  </div>
+                  <AiSummaryLoader translating />
                 ) : (
-                  <ReactMarkdown>
-                    {currentLang === 'ja' && translatedReport ? translatedReport : report.refinedReport}
-                  </ReactMarkdown>
+                  <LoadedReveal>
+                    <ReactMarkdown>
+                      {currentLang === 'ja' && translatedReport ? translatedReport : report.refinedReport}
+                    </ReactMarkdown>
+                  </LoadedReveal>
                 )
               ) : (
-                <div className="loading-pulse">
-                  <LoadingPlaceholder height="1rem" style={{ marginBottom: '0.5rem' }} />
-                  <LoadingPlaceholder height="1rem" width="95%" style={{ marginBottom: '0.5rem' }} />
-                  <LoadingPlaceholder height="1rem" width="88%" style={{ marginBottom: '0.5rem' }} />
-                  <LoadingPlaceholder height="1rem" width="92%" style={{ marginBottom: '0.5rem' }} />
-                  <LoadingPlaceholder height="1rem" width="75%" style={{ marginBottom: '0.5rem' }} />
-                  <p style={{ color: 'var(--accent)', marginTop: '1rem', textAlign: 'center' }}>
-                    {t('generatingAiAnalysisWaitingForAllScanData')}
-                  </p>
-                </div>
+                <AiSummaryLoader state={getAiSummaryState(report)} />
               )}
             </div>
 
@@ -1295,21 +1289,18 @@ const AuthenticatedScanPanel = () => {
               // Observatory
               const observatoryData = report?.observatoryData || null;
 
-              // ZAP data
+              // Loading / pending / completed / failed for the four tool cards —
+              // shared with Hero via utils/scanToolState.
+              const toolStates = getReportToolStates(report);
+
+              // ZAP result label, used once the card has completed. Running /
+              // queued / failed are card states (ScanToolCard), not labels.
               const backendZapData = report?.zapData;
-              let zapRiskLabel = t('passed'); let zapRiskColor = '#00d084'; let zapPendingMessage = null;
-              if (backendZapData) {
-                if (backendZapData.status === 'pending' || backendZapData.status === 'running') {
-                  zapRiskLabel = t('scanning'); zapRiskColor = '#ffb900';
-                  zapPendingMessage = `${backendZapData.progress || 0}%`;
-                } else if (backendZapData.status === 'completed' && backendZapData.riskCounts) {
-                  if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = '#e81123'; }
-                  else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = '#ff8c00'; }
-                  else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = '#ffb900'; }
-                } else if (backendZapData.status === 'failed') {
-                  zapRiskLabel = t('scanFailed'); zapRiskColor = '#e81123';
-                  zapPendingMessage = null;
-                }
+              let zapRiskLabel = t('passed'); let zapRiskColor = '#00d084';
+              if (backendZapData?.status === 'completed' && backendZapData.riskCounts) {
+                if (backendZapData.riskCounts.High > 0) { zapRiskLabel = t('vulnerableHigh'); zapRiskColor = '#e81123'; }
+                else if (backendZapData.riskCounts.Medium > 0) { zapRiskLabel = t('vulnerableMedium'); zapRiskColor = '#ff8c00'; }
+                else if (backendZapData.riskCounts.Low > 0) { zapRiskLabel = t('vulnerableLow'); zapRiskColor = '#ffb900'; }
               }
 
               // WebCheck data
@@ -1333,81 +1324,51 @@ const AuthenticatedScanPanel = () => {
                   <h3 className="report-title">{t('combinedScanReport')}{report?.target ? t('combinedScanReportTarget', { target: report.target }) : ''}</h3>
 
                   <div className="score-cards-grid">
-                    {/* OWASP ZAP (Authenticated) */}
-                    <div className="score-card">
-                      <h4 className="score-card__title">{t('vulnerabilityScanAuth')}</h4>
-                      {backendZapData ? (
+                    {/* Vulnerability scan (authenticated) */}
+                    <ScanToolCard tool="vulnerability" title={t('vulnerabilityScanAuth')} status={toolStates.vulnerability}>
+                      {() => (
                         <>
                           <span className="score-card__value" style={{ color: zapRiskColor }}>{zapRiskLabel}</span>
-                          {zapPendingMessage ? (
-                            <p className="score-card__label" style={{ color: '#ffb900' }}>{zapPendingMessage}</p>
-                          ) : backendZapData.status === 'completed' ? (
-                            <p className="score-card__label">{backendZapData.alerts ? backendZapData.alerts.length : 0} {t('alerts')}</p>
-                          ) : backendZapData.status === 'completed_partial' ? (
+                          {backendZapData.status === 'completed_partial' ? (
                             <p className="score-card__label" style={{ color: '#ffb900' }}>{backendZapData.alerts ? backendZapData.alerts.length : 0} {t('alerts')} ({t('partial')})</p>
-                          ) : null}
+                          ) : (
+                            <p className="score-card__label">{backendZapData.alerts ? backendZapData.alerts.length : 0} {t('alerts')}</p>
+                          )}
                         </>
-                      ) : report?.zapResult?.error || (report?.status === 'completed' && !report?.hasZapResult) ? (
-                        <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
-                      ) : (
-                        <div className="score-card__loading loading-pulse">
-                          <LoadingPlaceholder height="1.5rem" width="60%" style={{ marginBottom: '0.5rem' }} />
-                          <LoadingPlaceholder height="0.85rem" width="40%" />
-                        </div>
                       )}
-                    </div>
+                    </ScanToolCard>
 
-                    {/* Performance (PSI) */}
-                    <div className="score-card">
-                      <h4 className="score-card__title">{t('performance')}</h4>
-                      {psiScores?.performance != null ? (
+                    {/* Performance */}
+                    <ScanToolCard tool="performance" title={t('performance')} status={toolStates.performance}>
+                      {() => (
                         <>
                           <span className={`score-card__value ${getScoreClass(psiScores.performance)}`}>{psiScores.performance}</span>
                           <p className="score-card__label">{t('outOf100')}</p>
                         </>
-                      ) : (
-                        <div className="score-card__loading loading-pulse">
-                          <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
-                          <LoadingPlaceholder height="0.85rem" width="40%" />
-                        </div>
                       )}
-                    </div>
+                    </ScanToolCard>
 
-                    {/* Security Config (Observatory) */}
-                    <div className="score-card">
-                      <h4 className="score-card__title">{t('securityConfig')}</h4>
-                      {observatoryData?.grade ? (
+                    {/* Security configuration */}
+                    <ScanToolCard tool="securityConfig" title={t('securityConfig')} status={toolStates.securityConfig}>
+                      {() => (
                         <>
                           <span className="score-card__value" style={{ color: getObservatoryGradeColor(observatoryData.grade) }}>{observatoryData.grade}</span>
                           <p className="score-card__label">{t('securityConfig')}</p>
                         </>
-                      ) : (
-                        <div className="score-card__loading loading-pulse">
-                          <LoadingPlaceholder height="1.5rem" width="40%" style={{ marginBottom: '0.5rem' }} />
-                          <LoadingPlaceholder height="0.85rem" width="60%" />
-                        </div>
                       )}
-                    </div>
+                    </ScanToolCard>
 
-                    {/* URLScan.io */}
-                    <div className="score-card">
-                      <h4 className="score-card__title">{t('threatIntelligence')}</h4>
-                      {report?.hasUrlscanResult && report?.urlscanData ? (
+                    {/* Threat intelligence */}
+                    <ScanToolCard tool="threatIntel" title={t('threatIntelligence')} status={toolStates.threatIntel}>
+                      {() => (
                         <>
                           <span className="score-card__value" style={{ color: report.urlscanData.verdicts?.overall?.malicious ? '#e81123' : '#00d084' }}>
                             {report.urlscanData.verdicts?.overall?.malicious ? t('malicious') : t('clean')}
                           </span>
                           <p className="score-card__label">{report.urlscanData.verdicts?.overall?.score || 0} {t('threatScore')}</p>
                         </>
-                      ) : report?.urlscanResult?.error || (report?.status === 'completed' && !report?.hasUrlscanResult) ? (
-                        <div style={{ color: '#ffb900', marginTop: '10px' }}>{t('unavailable')}</div>
-                      ) : (
-                        <div className="score-card__loading loading-pulse">
-                          <LoadingPlaceholder height="1.5rem" width="50%" style={{ marginBottom: '0.5rem' }} />
-                          <LoadingPlaceholder height="0.85rem" width="40%" />
-                        </div>
                       )}
-                    </div>
+                    </ScanToolCard>
 
                     {/* SSL Certificate (WebCheck) */}
                     <div className="score-card">
@@ -1962,19 +1923,14 @@ const AuthenticatedScanPanel = () => {
               );
             })()}
 
-            {/* Action Buttons */}
-            <div className="step-actions" style={{ marginTop: '2rem' }}>
-              {step === 4 && (
-                <button className="stop-btn" onClick={handleStopScan}>
-                  Stop Scan
-                </button>
-              )}
-              {step === 5 && (
+            {/* Action Buttons (Stop Scan lives in the header above) */}
+            {step === 5 && (
+              <div className="step-actions" style={{ marginTop: '2rem' }}>
                 <button className="primary-btn new-scan-btn" onClick={handleNewScan}>
-                  Start New Scan
+                  {t('startNewScan')}
                 </button>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -8,8 +8,11 @@
 
 /* ========================================
    ANALYZE URL BUTTON - Hollow to Fill
+   Also the authenticated scan page's Stop Scan button, so it is drawn by the
+   same rules as the public scan page's Stop Scan (which sits in .analyze-form).
    ======================================== */
-.analyze-form button {
+.analyze-form button,
+.auth-scan-panel .step-header .stop-button {
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 1rem !important;
   color: var(--accent) !important;
@@ -60,19 +63,22 @@
   transform: translateY(-2px) !important;
 }
 
-.analyze-form button:hover:not(:disabled) {
+.analyze-form button:hover:not(:disabled),
+.auth-scan-panel .step-header .stop-button:hover:not(:disabled) {
   color: #000 !important;
   background: var(--accent) !important;
   border-color: var(--accent) !important;
   transform: translateY(-2px) !important;
 }
 
-.analyze-form button:active:not(:disabled) {
+.analyze-form button:active:not(:disabled),
+.auth-scan-panel .step-header .stop-button:active:not(:disabled) {
   transform: translateY(0) !important;
   background: var(--accent-dark) !important;
 }
 
-.analyze-form button:disabled {
+.analyze-form button:disabled,
+.auth-scan-panel .step-header .stop-button:disabled {
   color: var(--foreground) !important;
   border-color: #555 !important;
   opacity: 0.4 !important;
@@ -123,12 +129,18 @@
 
 /* ========================================
    HEADER BUTTONS - Hollow to Fill
+   Also every action button in the authenticated scan flow (.auth-scan-panel),
+   so those match the navbar buttons exactly.
    ======================================== */
 .signup-button,
 .about-button,
 .admin-button,
 .logout-button,
-.profile-button {
+.profile-button,
+.auth-scan-panel .primary-btn,
+.auth-scan-panel .secondary-btn,
+.auth-scan-panel .download-section .download-btn,
+.auth-scan-panel .dismiss-btn {
   font-family: 'Orbitron', var(--font-sans) !important;
   font-size: 0.9rem !important;
   color: var(--accent) !important;
@@ -152,7 +164,11 @@
 .about-button:hover,
 .admin-button:hover,
 .logout-button:hover,
-.profile-button:hover {
+.profile-button:hover,
+.auth-scan-panel .primary-btn:hover:not(:disabled),
+.auth-scan-panel .secondary-btn:hover:not(:disabled),
+.auth-scan-panel .download-section .download-btn:hover:not(:disabled),
+.auth-scan-panel .dismiss-btn:hover:not(:disabled) {
   color: #000 !important;
   background: var(--accent) !important;
   border-color: var(--accent) !important;
@@ -164,9 +180,34 @@
 .about-button:active,
 .admin-button:active,
 .logout-button:active,
-.profile-button:active {
+.profile-button:active,
+.auth-scan-panel .primary-btn:active:not(:disabled),
+.auth-scan-panel .secondary-btn:active:not(:disabled),
+.auth-scan-panel .download-section .download-btn:active:not(:disabled),
+.auth-scan-panel .dismiss-btn:active:not(:disabled) {
   transform: translateY(0) !important;
   background: var(--accent-dark) !important;
+}
+
+/* What the navbar buttons never need: room for the in-button spinner
+   ("Analyzing…", "Testing login…") and a disabled state. */
+.auth-scan-panel .primary-btn,
+.auth-scan-panel .secondary-btn,
+.auth-scan-panel .download-section .download-btn,
+.auth-scan-panel .dismiss-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0.5rem !important;
+}
+
+.auth-scan-panel .primary-btn:disabled,
+.auth-scan-panel .secondary-btn:disabled,
+.auth-scan-panel .download-section .download-btn:disabled,
+.auth-scan-panel .dismiss-btn:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+  transform: none !important;
 }
 
 /* ========================================
@@ -272,7 +313,12 @@ body.light .signup-button,
 body.light .about-button,
 body.light .admin-button,
 body.light .logout-button,
-body.light .profile-button {
+body.light .profile-button,
+body.light .auth-scan-panel .step-header .stop-button,
+body.light .auth-scan-panel .primary-btn,
+body.light .auth-scan-panel .secondary-btn,
+body.light .auth-scan-panel .download-section .download-btn,
+body.light .auth-scan-panel .dismiss-btn {
   color: var(--accent-dark) !important;
   border-color: var(--accent-dark) !important;
   background: transparent !important;
@@ -284,7 +330,12 @@ body.light .signup-button:hover,
 body.light .about-button:hover,
 body.light .admin-button:hover,
 body.light .logout-button:hover,
-body.light .profile-button:hover {
+body.light .profile-button:hover,
+body.light .auth-scan-panel .step-header .stop-button:hover:not(:disabled),
+body.light .auth-scan-panel .primary-btn:hover:not(:disabled),
+body.light .auth-scan-panel .secondary-btn:hover:not(:disabled),
+body.light .auth-scan-panel .download-section .download-btn:hover:not(:disabled),
+body.light .auth-scan-panel .dismiss-btn:hover:not(:disabled) {
   color: white !important;
   background: var(--accent-dark) !important;
   border-color: var(--accent-dark) !important;
@@ -297,7 +348,12 @@ body.dark .signup-button,
 body.dark .about-button,
 body.dark .admin-button,
 body.dark .logout-button,
-body.dark .profile-button {
+body.dark .profile-button,
+body.dark .auth-scan-panel .step-header .stop-button,
+body.dark .auth-scan-panel .primary-btn,
+body.dark .auth-scan-panel .secondary-btn,
+body.dark .auth-scan-panel .download-section .download-btn,
+body.dark .auth-scan-panel .dismiss-btn {
   color: var(--accent) !important;
   border-color: var(--accent) !important;
   background: transparent !important;
@@ -309,7 +365,12 @@ body.dark .signup-button:hover,
 body.dark .about-button:hover,
 body.dark .admin-button:hover,
 body.dark .logout-button:hover,
-body.dark .profile-button:hover {
+body.dark .profile-button:hover,
+body.dark .auth-scan-panel .step-header .stop-button:hover:not(:disabled),
+body.dark .auth-scan-panel .primary-btn:hover:not(:disabled),
+body.dark .auth-scan-panel .secondary-btn:hover:not(:disabled),
+body.dark .auth-scan-panel .download-section .download-btn:hover:not(:disabled),
+body.dark .auth-scan-panel .dismiss-btn:hover:not(:disabled) {
   color: #000 !important;
   background: var(--accent) !important;
   border-color: var(--accent) !important;
