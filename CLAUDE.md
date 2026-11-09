@@ -118,6 +118,38 @@ detection) fetches from our own IP, so the client's allowlist entry covers it.
 - Same 26 score cards + ZAP Report + WebCheck Analysis
 - Uses ZAP instance on port 8081
 
+### HTTP Basic authentication (authenticated scans, manual-only)
+Second auth method beside the login form (radio choice in step 1 of `AuthenticatedScanPanel.jsx`;
+form login is the default and unchanged). Design and evidence: `docs/BASIC_AUTH_IMPLEMENTATION.md`.
+- `POST /api/zap-auth/test-basic` → `services/basicAuthProbe.js`: HTTPS only; anonymous request
+  must get `401` + `WWW-Authenticate: Basic`, then ONE authenticated attempt (no lockout loops);
+  credentials only ever sent to the exact origin; SSRF guard on every redirect hop. Returns a
+  `tempSessionId` (15-min TTL), never the credential. Codes `BASIC_*` map in `utils/apiErrors.js`.
+- `POST /scan` (Basic branch) binds the session to the verified origin (`BASIC_ORIGIN_MISMATCH`)
+  and moves the credential to `services/scanCredentialVault.js` — **in memory only**, holders
+  `zap` + `fast`, purged on cancel/provisioning failure/watchdog, 25 h TTL. Never in MongoDB,
+  Redis, GridFS or logs; a lost entry fails the scan closed. Single backend process assumed.
+- ZAP: `services/zapCredentialRules.js`. Replacer rule `auth_basic_<scanId>` by **POST**,
+  `url=(?i)^https://<host>(:<port>)?(/.*)?$` (ZAP does a whole-URL match), `initiators=2,3,6,10`
+  (never the proxy initiator 1). Passive rule 10105 disabled during Basic scans (it logs decoded
+  passwords). **Revocation on every exit = stop all scans → remove rules → newSession**; removing
+  the rule alone does not revoke (the active scanner replays stored headers). Leftover credential
+  rules are purged at scan start (they survive newSession).
+- Browser checks (page capture, performance audit) use `services/inHouse/scopedBasicAuth.js`
+  (CDP `Fetch.authRequired`, target origin only, one attempt). **Never `page.authenticate()` or
+  Lighthouse `extraHeaders`** — both send the credential to other origins (Phase 0 evidence).
+  The external PSI/urlscan services are skipped for Basic scans; the header grade (Observatory)
+  and WebCheck stay **unauthenticated** — disclosed in the UI and both PDFs (`renderAuthScopeNote`).
+- Schedules refuse Basic (`BASIC_AUTH_MANUAL_ONLY`). `checkScanTarget` refuses any URL with
+  embedded credentials (`URL_HAS_CREDENTIALS`).
+- Redaction (`utils/credentialRedaction.js`): credential header values are redacted at capture
+  (`fetchZapMessage`, both services) and again at every output (`getSanitizedAlerts`, PDF
+  `buildEvidenceText`), so legacy evidence is covered too; exact secrets (Basic variants, or the
+  injected session cookie values for form scans) are scrubbed from alerts and the ZAP HTML report.
+- ZAP API key is required (`ZAP_API_KEY` / `ZAP_AUTH_API_KEY`, same secret); images pinned to
+  `ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47…` (what production actually ran). `zap-sg` already
+  limits :8080 to `fortexa-backend-sg`.
+
 ### Shared Components
 - **`WebCheckDetails.jsx`** - Renders all 29 WebCheck scan types. Props: `{ webCheckReport, theme }`. Used by both Hero.jsx and AuthenticatedScanPanel.jsx.
 - **`ZapReportEnhanced.jsx`** - ZAP vulnerability report with severity filtering. Props include `apiPrefix` (different for auth vs normal).
@@ -260,7 +292,20 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   through the real sanitizer and `refineReport`, capturing the request the Gemini SDK
   sends: all scores/grade/verdict reach the prompt; no host, path, IP, screenshot token or
   fallback detail does.
+- `backend/tests/authScanStop.test.js` — the authenticated Stop button, end to end (real worker,
+  stop, start guard, fast scanners, ZAP lock; fake ZAP): a stop wakes the worker at once and
+  revokes ZAP before answering; a scan with no running worker sends nothing to the shared auth
+  ZAP; a scan stopped while provisioning/queueing never starts (it used to be reset to
+  `pending`, scanned and billed); a stop during the report save is not overwritten by
+  `combining`; browser checks are aborted and WebCheck never starts; the lock is not leaked.
 - `backend/tests/failedScanRetention.test.js`, `subscriptionState.test.js`.
+- HTTP Basic auth: `credentialRedaction.test.js` (redaction + vault), `zapCredentialRules.test.js`,
+  `basicAuthProbe.test.js` (local HTTPS servers, `tests/fixtures/tls` test-only cert),
+  `basicAuthScanLifecycle.test.js` (the real scan worker against a fake ZAP: revocation on every
+  exit, no stored secrets, concurrent isolation), `basicAuthOutputs.test.js` (PDF EN/JA, JSON
+  export, Gemini inputs), `basicAuthRoutes.test.js`, and `scopedBasicAuth.browser.test.js` (real
+  Chromium: iframes, workers, redirects, real capture + Lighthouse; skips without Chromium).
+  Frontend: `src/__tests__/basicAuthInvariants.test.js`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.
