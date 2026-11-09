@@ -7,7 +7,9 @@ services:
   # OWASP ZAP Scanner - Production Configuration (v4.0)
   # Handles 15K+ URLs, prevents video file loops, eliminates crashes
   zap:
-    image: ghcr.io/zaproxy/zaproxy:stable
+    # Pinned: `:stable` moves without a deploy (production silently stayed on the
+    # 2026-08-07 build while `:stable` advanced). Change the digest deliberately.
+    image: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
     container_name: zap-scanner
     restart: unless-stopped
     ports:
@@ -28,17 +30,21 @@ services:
         exec zap.sh -daemon -host 0.0.0.0 -port 8080
         -config api.addrs.addr.name=.*
         -config api.addrs.addr.regex=true
-        -config api.disablekey=true
+        -config api.key=$${ZAP_API_KEY}
         -config database.responseBodyMaxSize=52428800
         -config spider.maxDepth=20
         -config spider.maxDuration=120
         -config spider.threadCount=10
         -config scanner.threadPerHost=10
         -config scanner.hostPerScan=10
+    # The API (and its credential rules) require this key; the backend sends it as
+    # ZAP_API_KEY (normal) / ZAP_AUTH_API_KEY (auth). Set it in the root .env.
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY:?Set ZAP_API_KEY in .env - the same value as the backend ZAP_API_KEY and ZAP_AUTH_API_KEY}
     networks:
       - app-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/" ]
+      test: [ "CMD-SHELL", "curl -f -H \"X-ZAP-API-Key: $${ZAP_API_KEY}\" http://localhost:8080/JSON/core/view/version/" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -47,7 +53,9 @@ services:
   # OWASP ZAP Authenticated Scanner - Separate instance for authenticated scans
   # Uses same image but on port 8081, dedicated to authenticated scanning
   zap-auth:
-    image: ghcr.io/zaproxy/zaproxy:stable
+    # Pinned: `:stable` moves without a deploy (production silently stayed on the
+    # 2026-08-07 build while `:stable` advanced). Change the digest deliberately.
+    image: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
     container_name: zap-auth-scanner
     restart: unless-stopped
     ports:
@@ -62,17 +70,21 @@ services:
         exec zap.sh -daemon -host 0.0.0.0 -port 8080
         -config api.addrs.addr.name=.*
         -config api.addrs.addr.regex=true
-        -config api.disablekey=true
+        -config api.key=$${ZAP_API_KEY}
         -config database.responseBodyMaxSize=52428800
         -config spider.maxDepth=20
         -config spider.maxDuration=120
         -config spider.threadCount=10
         -config scanner.threadPerHost=10
         -config scanner.hostPerScan=10
+    # The API (and its credential rules) require this key; the backend sends it as
+    # ZAP_API_KEY (normal) / ZAP_AUTH_API_KEY (auth). Set it in the root .env.
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY:?Set ZAP_API_KEY in .env - the same value as the backend ZAP_API_KEY and ZAP_AUTH_API_KEY}
     networks:
       - app-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/" ]
+      test: [ "CMD-SHELL", "curl -f -H \"X-ZAP-API-Key: $${ZAP_API_KEY}\" http://localhost:8080/JSON/core/view/version/" ]
       interval: 30s
       timeout: 10s
       retries: 5

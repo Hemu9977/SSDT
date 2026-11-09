@@ -39,8 +39,12 @@ const INSTANCES = {
 
     service: () => process.env.ECS_ZAP_SERVICE || 'zap-scan-ec2',
     baseUrl: () => process.env.ZAP_API_URL || 'http://127.0.0.1:8080',
-    // Mirrors createZapClient in zapService.js — no special headers.
-    probeConfig: () => ({})
+    // Mirrors createZapClient in zapService.js — no Host override, but the API key
+    // when one is configured: with the key enabled, ZAP refuses every API call
+    // without it, including the readiness and recycle probes.
+    probeConfig: () => (process.env.ZAP_API_KEY
+      ? { headers: { 'X-Zap-Api-Key': process.env.ZAP_API_KEY }, params: { apikey: process.env.ZAP_API_KEY } }
+      : {})
   },
 
   auth: {

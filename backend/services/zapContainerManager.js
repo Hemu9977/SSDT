@@ -173,7 +173,10 @@ async function waitForTaskReady(taskArn, maxWaitMs = 300000) {
 
       if (privateIp) {
         const zapUrl = `http://${privateIp}:8080`;
-        await waitForZapApi(zapUrl);
+        // With the API key enabled ZAP refuses an unkeyed probe, which would read
+        // as "never ready". Same key the scan clients send.
+        const key = process.env.ZAP_AUTH_API_KEY || process.env.ZAP_API_KEY;
+        await waitForZapApi(zapUrl, undefined, key ? { headers: { 'X-Zap-Api-Key': key } } : {});
         return zapUrl;
       }
     }

@@ -10,7 +10,7 @@
   "containerDefinitions": [
     {
       "name": "zap-scanner",
-      "image": "ghcr.io/zaproxy/zaproxy:stable",
+      "image": "ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef",
       "essential": true,
       "cpu": 3072,
       "memory": 14080,
@@ -29,14 +29,14 @@
         "-c"
       ],
       "command": [
-        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.key=\"$ZAP_API_KEY\" -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
       "environment": [],
       "stopTimeout": 30,
       "healthCheck": {
         "command": [
           "CMD-SHELL",
-          "curl -f http://localhost:8080/JSON/core/view/version/ || exit 1"
+          "curl -f -H \"X-ZAP-API-Key: $ZAP_API_KEY\" http://localhost:8080/JSON/core/view/version/ || exit 1"
         ],
         "interval": 30,
         "timeout": 5,
@@ -51,7 +51,13 @@
           "awslogs-stream-prefix": "ecs",
           "awslogs-create-group": "true"
         }
-      }
+      },
+      "secrets": [
+        {
+          "name": "ZAP_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:459181228792:secret:fortexa-backend-secrets-NxEnZI:ZAP_AUTH_API_KEY::"
+        }
+      ]
     }
   ],
   "taskRoleArn": "arn:aws:iam::459181228792:role/fortexa-zap-task-role"
