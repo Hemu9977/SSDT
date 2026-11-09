@@ -107,6 +107,12 @@ function checkScanTarget(rawUrl, options = {}) {
     return { ok: false, code: 'UNSUPPORTED_SCHEME', error: 'Only HTTP and HTTPS URLs are allowed' };
   }
 
+  // `https://user:password@host/` would put a credential into the stored scan
+  // target, the logs and every report. Credentials go in their own fields.
+  if (parsed.username || parsed.password) {
+    return { ok: false, code: 'URL_HAS_CREDENTIALS', error: 'URLs must not contain credentials' };
+  }
+
   if (options.allowInternal) return { ok: true, url: parsed };
 
   const host = normaliseHost(parsed.hostname);

@@ -143,8 +143,45 @@ async function fetchLoadingExperience(url, formFactor) {
  *   card (as before); mobile for WebCheck's quality section (PSI's mobile run).
  * @param {AbortSignal} [opts.signal]
  */
-async function runLighthouseAudit(url, { strategy = 'desktop', signal } = {}) {
+/**
+ * HTTP Basic scans: Lighthouse audits a Puppeteer page that answers Basic
+ * challenges for the target origin only (scopedBasicAuth). chrome-launcher gives
+ * Lighthouse a bare port, with no way to scope a credential, and Lighthouse's own
+ * `extraHeaders` sends it to every third party the page loads.
+ */
+async function auditWithBasicAuth(url, { strategy, basicAuth, lighthouse, desktopConfig, signal }) {
+  const puppeteer = require('puppeteer');
+  const { installScopedBasicAuth } = require('./scopedBasicAuth');
+  return runInBrowserSlot(`Lighthouse (${strategy}, HTTP Basic)`, async ({ signal: jobSignal }) => {
+    const browser = await puppeteer.launch({ headless: true, executablePath: chromiumPath(), args: LAUNCH_ARGS });
+    const close = () => browser.close().catch(() => {});
+    jobSignal.addEventListener('abort', close, { once: true });
+    try {
+      const page = await browser.newPage();
+      await installScopedBasicAuth(page, basicAuth);
+      const result = await lighthouse(url, {
+        output: 'json',
+        logLevel: 'error',
+        onlyCategories: CATEGORIES,
+        maxWaitForLoad: 45_000
+      }, strategy === 'desktop' ? desktopConfig : undefined, page);
+      if (!result?.lhr) throw new Error('Lighthouse returned no report');
+      return toPsiShape(result.lhr);
+    } finally {
+      jobSignal.removeEventListener('abort', close);
+      await close();
+    }
+  }, { timeoutMs: AUDIT_TIMEOUT_MS, signal });
+}
+
+async function runLighthouseAudit(url, { strategy = 'desktop', signal, basicAuth = null } = {}) {
   const { lighthouse, chromeLauncher, desktopConfig } = await loadLighthouse();
+
+  if (basicAuth) {
+    // No field-data (CrUX) lookup: it would send the protected URL to an external
+    // API, and there is no public real-user data for a page behind a login anyway.
+    return auditWithBasicAuth(url, { strategy, basicAuth, lighthouse, desktopConfig, signal });
+  }
 
   const report = await runInBrowserSlot(`Lighthouse (${strategy})`, async ({ signal: jobSignal }) => {
     const chrome = await chromeLauncher.launch({

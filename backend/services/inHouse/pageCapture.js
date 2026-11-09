@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 const { LAUNCH_ARGS, chromiumPath, runInBrowserSlot } = require('./browserSlot');
 const { countryOf } = require('../../utils/ipCountry');
 const { lookupVerdict } = require('./threatVerdict');
+const { installScopedBasicAuth } = require('./scopedBasicAuth');
 
 /**
  * In-house page capture — the fallback for the external page-analysis service
@@ -81,7 +82,7 @@ function buildCaptureResult({ requestedUrl, finalUrl, main, responses, requestCo
 }
 
 /** Load the page, observe its traffic, and take a screenshot. */
-async function capturePage(url, { signal }) {
+async function capturePage(url, { signal, basicAuth = null }) {
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: chromiumPath(),
@@ -93,6 +94,9 @@ async function capturePage(url, { signal }) {
 
   try {
     const page = await browser.newPage();
+    // HTTP Basic scans only: answer challenges from the target origin and nothing
+    // else. Installed before the first navigation so no request goes unanswered.
+    if (basicAuth) await installScopedBasicAuth(page, basicAuth);
     await page.setViewport({ width: 1280, height: 800 });
     // A headless user agent is refused by many WAFs; present as the Chrome it is.
     await page.setUserAgent((await browser.userAgent()).replace('HeadlessChrome', 'Chrome'));
@@ -179,14 +183,16 @@ async function storeScreenshot(buffer) {
  * Run the complete page analysis.
  * @param {string} targetUrl
  * @param {number} [maxWaitTime] - overall capture budget in ms
+ * @param {object} [opts]
+ * @param {AbortSignal} [opts.signal] - caller cancellation (skips a queued capture, closes a running one)
  * @returns {Promise<object>} Page analysis result (see buildCaptureResult + verdicts/screenshot)
  */
-async function runPageCapture(targetUrl, maxWaitTime = CAPTURE_TIMEOUT_MS) {
-  console.log(`🔍 [PageCapture] Starting for: ${targetUrl}`);
+async function runPageCapture(targetUrl, maxWaitTime = CAPTURE_TIMEOUT_MS, { basicAuth = null, signal } = {}) {
+  console.log(`🔍 [PageCapture] Starting for: ${targetUrl}${basicAuth ? ' (HTTP Basic, target origin only)' : ''}`);
 
   // The verdict is DNS-only, so it runs beside the capture rather than in the slot.
   const [captured, verdicts] = await Promise.all([
-    runInBrowserSlot('Page capture', ctx => capturePage(targetUrl, ctx), { timeoutMs: maxWaitTime }),
+    runInBrowserSlot('Page capture', ctx => capturePage(targetUrl, { ...ctx, basicAuth }), { timeoutMs: maxWaitTime, signal }),
     lookupVerdict(targetUrl)
   ]);
 
@@ -217,5 +223,6 @@ module.exports = {
   runPageCapture,
   SCREENSHOT_BUCKET,
   // Exposed for tests.
-  _buildCaptureResult: buildCaptureResult
+  _buildCaptureResult: buildCaptureResult,
+  _capturePage: capturePage
 };
