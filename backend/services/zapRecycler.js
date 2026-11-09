@@ -184,7 +184,7 @@ async function tryAcquire(lockKey, token) {
  * holder dies, which is less than the recycle the next scan performs anyway. Six missed
  * renewals of slack absorbs Redis blips.
  */
-async function acquireZapLock(key, scanId, { waitMs } = {}) {
+async function acquireZapLock(key, scanId, { waitMs, isCancelled = null } = {}) {
   const inst = getInstance(key);
   const lockKey = inst.lockKey;
   const token = `${os.hostname()}:${process.pid}:${scanId}:${crypto.randomUUID()}`;
@@ -192,6 +192,12 @@ async function acquireZapLock(key, scanId, { waitMs } = {}) {
 
   let waited = false;
   while (Date.now() < deadline) {
+    // A scan stopped while it queues for the instance must leave the queue at once:
+    // otherwise it waits up to ZAP_LOCK_WAIT_MS, then takes the lock and recycles ZAP
+    // for nothing, delaying whoever is queued behind it.
+    if (isCancelled && await isCancelled()) {
+      throw new ZapRecycleError('CANCELLED', `Scan ${scanId} was stopped while waiting for ${lockKey}`);
+    }
     if (await tryAcquire(lockKey, token)) {
       const handle = { key, lockKey, token, scanId, lost: false, timer: null };
       startHeartbeat(handle);
@@ -541,11 +547,30 @@ async function resolveColdStart(key, capacity) {
  * @param {'normal'|'auth'} key
  * @param {string} scanId
  * @param {Function} fn
- * @param {{recycle?: boolean}} opts
+ * @param {{recycle?: boolean, isCancelled?: () => Promise<boolean>}} opts
+ *   isCancelled: checked while queueing for the lock, after taking it and after the
+ *   recycle. When it reports true the scan is abandoned — `fn` never runs, the lock is
+ *   released, and this resolves to undefined. An error from it counts as "not
+ *   cancelled": a failed status read must never abandon a live scan.
  */
-async function withZapInstance(key, scanId, fn, { recycle = true } = {}) {
-  const lock = await acquireZapLock(key, scanId);
+async function withZapInstance(key, scanId, fn, { recycle = true, isCancelled = null } = {}) {
+  const cancelled = isCancelled
+    ? async () => { try { return Boolean(await isCancelled()); } catch (_) { return false; } }
+    : null;
+  const abandon = (stage) => {
+    console.log(`[ZapLock] instance=${key} scanId=${scanId} result=cancelled stage=${stage} — scan was stopped`);
+  };
+
+  let lock;
   try {
+    lock = await acquireZapLock(key, scanId, { isCancelled: cancelled });
+  } catch (err) {
+    if (err.code === 'CANCELLED') { abandon('lock-wait'); return undefined; }
+    throw err;
+  }
+  try {
+    if (cancelled && await cancelled()) { abandon('lock-acquired'); return undefined; }
+
     // Capacity before recycle, and inside the lock. Before, because there is nothing
     // to recycle on a service scaled to zero — the recycler's ListTasks would return
     // empty and its step 4 would wait out NEW_TASK_WAIT_MS for a replacement that
@@ -613,6 +638,8 @@ async function withZapInstance(key, scanId, fn, { recycle = true } = {}) {
         }
       }
     }
+    // The capacity wait and the recycle can take minutes; a stop may have landed meanwhile.
+    if (cancelled && await cancelled()) { abandon('after-recycle'); return undefined; }
     return await fn();
   } finally {
     await releaseZapLock(lock);

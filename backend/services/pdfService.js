@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { getSanitizedAlerts } = require('../utils/vulnFilter');
+const { redactHeaderBlock } = require('../utils/credentialRedaction');
 
 let puppeteer;
 try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
@@ -66,7 +67,10 @@ const EVIDENCE_HEADER_MAX_CHARS = 4000; // generous safety net; real headers fit
  * Pure — exported for tests.
  */
 function buildEvidenceText(header, body, lang = 'en') {
-  let hdr = String(header || '');
+  // Credential headers (Authorization, Cookie, Set-Cookie values) are never drawn,
+  // whatever the caller passed in. Findings normally arrive already redacted
+  // (getSanitizedAlerts); this is the last line for anything that did not.
+  let hdr = redactHeaderBlock(String(header || ''));
   let bdy = String(body || '');
   let trimmed = false;
   const binary = isBinaryBody(bdy);
@@ -1756,7 +1760,27 @@ function drawTablePaged(ctx, startX, startY, colWidths, rows, { allowPageBreaks 
 
 // ─── Template report orchestrator ───────────────────────────────────────────────
 
-function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, ts) {
+// HTTP Basic scans: say exactly which checks ran signed in. Neutral wording — the
+// report never names the scan engines.
+const AUTH_SCOPE_TEXT = {
+  en: {
+    title: 'Assessment scope',
+    body: 'This assessment signed in to the site with HTTP Basic authentication. The vulnerability scan, the page capture and the performance audit ran as the signed-in user, and the credentials were sent only to the site itself. The security-header grade and the site configuration checks ran without credentials: they reflect the public response the site gives before sign-in.'
+  },
+  ja: {
+    title: '評価範囲',
+    body: '本診断では、HTTPベーシック認証でサイトにサインインしました。脆弱性診断、ページキャプチャ、パフォーマンス監査はサインイン済みのユーザーとして実施し、認証情報は対象サイトにのみ送信しました。セキュリティヘッダーの評価とサイト構成のチェックは認証情報を使用せずに実施しており、サインイン前にサイトが返す公開の応答を反映しています。'
+  }
+};
+
+function renderAuthScopeNote(ctx, lang) {
+  const t = AUTH_SCOPE_TEXT[lang === 'ja' ? 'ja' : 'en'];
+  addTemplateSectionHeader(ctx, t.title);
+  writeFlowText(ctx, sanitizeTextForPdf(t.body, lang), { lineGap: 4, fontSize: 10, color: COLORS.text });
+  ctx.doc.moveDown(0.6);
+}
+
+function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, ts, { authScope = null } = {}) {
   renderCoverPage(doc, scanData, lang, ts);
   doc.addPage();
 
@@ -1771,6 +1795,7 @@ function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, 
   // Page 3+: All scan results (Gemini-driven), as before
   ctx.addFramedPage();
   renderExecutiveSummarySection(ctx, scanData, lang);
+  if (authScope === 'basic') renderAuthScopeNote(ctx, lang);
   renderAiAnalysisSection(ctx, aiAnalysis, lang);
   renderScanResultsSection(ctx, scanData, lang);
   renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
@@ -1780,9 +1805,10 @@ function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, 
   renderFinalPage(ctx);
 }
 
-function renderTemplateZapReport(doc, vulnerabilities, lang, ts) {
+function renderTemplateZapReport(doc, vulnerabilities, lang, ts, { authScope = null } = {}) {
   const ctx = createCtx(doc, ts);
   ctx.initFramedPage();
+  if (authScope === 'basic') renderAuthScopeNote(ctx, lang);
   renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
   ctx.addFramedPage();
   renderFinalPage(ctx);
@@ -1935,7 +1961,9 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   
   console.log(`[PDF][${analysisId}] Rendering PDF (${elapsed()})`);
   const buf = collectBuffer(doc);
-  renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts);
+  renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts, {
+    authScope: scanResult.authScanResult?.authMethod === 'basic' ? 'basic' : null
+  });
   doc.end();
   const out = await buf;
   console.log(`[PDF][${analysisId}] PDF completed in ${elapsed()}`);
@@ -1991,9 +2019,11 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
     Subject: 'Detailed Vulnerability Analysis'
   });
   const buf = collectBuffer(doc);
-  renderTemplateZapReport(doc, vulnsToUse, lang, tsFinal);
+  renderTemplateZapReport(doc, vulnsToUse, lang, tsFinal, {
+    authScope: (scanResult.authScanResult || scanResult.zapResult)?.authMethod === 'basic' ? 'basic' : null
+  });
   doc.end();
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, translateJapaneseForEnglishReport, collectJapanesePassages, buildAiAnalysisFromRefinedReport, buildScanHistoryTable, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, translateJapaneseForEnglishReport, collectJapanesePassages, buildAiAnalysisFromRefinedReport, buildScanHistoryTable, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts, renderAuthScopeNote, AUTH_SCOPE_TEXT };

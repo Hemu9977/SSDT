@@ -403,7 +403,7 @@ async function triggerPublicScan(scanId, targetUrl, userId, meta, organizationId
  * Trigger an authenticated scan
  */
 async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, meta, organizationId = null) {
-  const { startAsyncAuthScan } = require('./zapAuthService');
+  const { startAsyncAuthScan, isAuthScanCancelled } = require('./zapAuthService');
 
   // Unlike triggerPublicScan, the start event is emitted before the slot claim: the
   // background login below runs first and the ScanResult (which the claim needs) only
@@ -567,14 +567,16 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
       () => resolve(),  // onComplete fires from the background scan's .finally()
       authState         // marker + login recipe, so the scan can re-check and re-login
     )
-      // 'already_running' never fires onComplete, so resolve explicitly or the lock
+      // Only a started scan fires onComplete ('already_running' and 'not_started' — a
+      // scan stopped before it began — never do), so resolve explicitly or the lock
       // sits until its TTL expires.
-      .then((r) => { if (r?.status === 'already_running') resolve(); })
+      .then((r) => { if (r?.status !== 'started') resolve(); })
       .catch((err) => {
         console.error(`[Scheduler] startAsyncAuthScan failed for ${scanId}: ${err.message}`);
         resolve();
       });
-  })).catch(async (err) => {
+    // A scan stopped while it queues for the instance leaves without scanning.
+  }), { isCancelled: () => isAuthScanCancelled(scanId) }).catch(async (err) => {
     console.error(`[Scheduler] auth scan could not start for ${scanId}: ${err.message}`);
     // errorCode is machine-readable so the UI can render a localized explanation;
     // the English message stays server-side only (CLAUDE.md).

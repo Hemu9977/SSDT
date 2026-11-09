@@ -344,7 +344,8 @@ test('the orchestration lives in a service, not in the route module', () => {
     'both the route and the scheduler need it, so it cannot live inside a route');
   const src = fs.readFileSync(svc, 'utf8');
   assert.ok(/async function ensureAuthFastScans/.test(src));
-  assert.ok(/module\.exports\s*=\s*\{\s*ensureAuthFastScans\s*\}/.test(src));
+  // stopAuthFastScans is exported beside it, for the authenticated stop path.
+  assert.ok(/module\.exports\s*=\s*\{[^}]*\bensureAuthFastScans\b[^}]*\}/.test(src));
 });
 
 test('scheduled authenticated scans start the fast scanners', () => {

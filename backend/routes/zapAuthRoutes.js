@@ -18,7 +18,8 @@ const {
   checkZapAuthHealth,
   startAsyncAuthScan,
   getAuthScanStatus,
-  stopAuthScan
+  stopAuthScan,
+  isAuthScanCancelled
 } = require('../services/zapAuthService');
 const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
@@ -32,6 +33,8 @@ const { loadEvidenceAlerts } = require('../services/zapDetailedAlerts');
 const { getFullResults } = require('../services/webCheckService');
 const User = require('../models/User');
 const { getSanitizedAlerts, getSanitizedZapData } = require('../utils/vulnFilter');
+const { probeBasicAuth, CODES: BASIC_CODES } = require('../services/basicAuthProbe');
+const credentialVault = require('../services/scanCredentialVault');
 const { lighthouseScores } = require('../utils/scoreFormat');
 const { scanLimiter, loginSetupLimiter } = require('../middleware/rateLimiter');
 
@@ -58,12 +61,25 @@ async function resolveVulnAccessLevel(userId) {
 
 const authSessions = new Map();
 
+// Form-login sessions keep their original 24 h lifetime. An HTTP Basic session
+// holds the customer's password in memory, so it lives only long enough to press
+// "Start scan" (15 min), and is checked on read as well as swept.
+const FORM_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const BASIC_SESSION_TTL_MS = 15 * 60 * 1000;
+const sessionTtl = (session) => (session && session.authMethod === 'basic' ? BASIC_SESSION_TTL_MS : FORM_SESSION_TTL_MS);
+function getLiveSession(id) {
+  const session = authSessions.get(id);
+  if (!session) return null;
+  if (Date.now() - session.createdAt > sessionTtl(session)) { authSessions.delete(id); return null; }
+  return session;
+}
+
 // Cleanup expired sessions every 5 minutes
 const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
   for (const [key, session] of authSessions) {
-    if (now - session.createdAt > 24 * 60 * 60 * 1000) { // 24 hour TTL
+    if (now - session.createdAt > sessionTtl(session)) {
       authSessions.delete(key);
       cleaned++;
     }
@@ -251,6 +267,61 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
 });
 
 /**
+ * POST /api/zap-auth/test-basic
+ * Verify HTTP Basic credentials against a protected page, without a login form.
+ *
+ * Body: { targetUrl, username, password, realm?, verifyUrl? }
+ * Returns: { success, authConfirmed: 'confirmed'|'failed', errorCode?, warnings[], tempSessionId? }
+ *
+ * The credential is held in memory for 15 minutes (until the scan is started) and
+ * is never stored, logged or returned. HTTPS only. Manual scans only — schedules
+ * refuse Basic Auth (scheduleRoutes).
+ */
+router.post('/test-basic', auth, loginSetupLimiter, async (req, res) => {
+  try {
+    const { targetUrl, username, password, realm, verifyUrl } = req.body || {};
+    const probe = await probeBasicAuth({ targetUrl, verifyUrl, username, password, realm });
+
+    // Never the credential, never a URL from the target: code + counts only.
+    console.log(`[ZAP-AUTH] Basic auth verification: ${probe.code} (requests=${probe.requests}, authenticated=${probe.authenticatedRequests})`);
+
+    if (probe.code !== BASIC_CODES.CONFIRMED) {
+      const clientError = [BASIC_CODES.INVALID_INPUT, BASIC_CODES.INVALID_URL, BASIC_CODES.URL_HAS_CREDENTIALS,
+        BASIC_CODES.REQUIRES_HTTPS, BASIC_CODES.VERIFY_URL_OFF_ORIGIN, 'INVALID_URL', 'UNSUPPORTED_SCHEME', 'BLOCKED_TARGET'].includes(probe.code);
+      return res.status(clientError ? 400 : 200).json({
+        success: !clientError,
+        authenticated: false,
+        authConfirmed: 'failed',
+        errorCode: probe.code,
+        code: probe.code,
+        warnings: probe.warnings || []
+      });
+    }
+
+    const tempSessionId = uuidv4();
+    authSessions.set(tempSessionId, {
+      authMethod: 'basic',
+      origin: probe.origin,
+      verifyUrl: probe.verifyUrl,
+      basic: { username, password },
+      authConfirmed: 'confirmed',
+      createdAt: Date.now()
+    });
+
+    return res.json({
+      success: true,
+      authenticated: true,
+      authConfirmed: 'confirmed',
+      warnings: probe.warnings || [],
+      tempSessionId
+    });
+  } catch (error) {
+    console.error('[ZAP-AUTH] Basic auth verification error:', error.message);
+    res.status(500).json({ error: 'Failed to verify credentials', code: 'BASIC_VERIFY_FAILED' });
+  }
+});
+
+/**
  * POST /api/zap-auth/scan
  * Start an authenticated ZAP scan.
  * Retrieves session cookies from the in-memory store using tempSessionId.
@@ -289,7 +360,7 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
     }
 
     // Retrieve stored session cookies
-    const session = authSessions.get(tempSessionId);
+    const session = getLiveSession(tempSessionId);
     if (!session) {
 
       return res.status(400).json({
@@ -298,20 +369,37 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
       });
     }
 
-    const cookies = session.cookies;
-    const resolvedLoginUrl = loginUrl || session.loginUrl;
+    const isBasic = session.authMethod === 'basic';
+
+    // HTTP Basic: the credential was verified for one https origin, and is only
+    // ever used against that origin.
+    if (isBasic && new URL(targetUrl).origin !== session.origin) {
+      return res.status(400).json({ error: 'Target does not match the verified site', code: 'BASIC_ORIGIN_MISMATCH' });
+    }
+
+    const cookies = isBasic ? [] : session.cookies;
+    const resolvedLoginUrl = isBasic ? null : (loginUrl || session.loginUrl);
 
     // Captured before the session entry is deleted below. Held only in this
     // request's closure for the duration of the scan — never persisted, and
-    // never sent to the browser.
-    const authState = {
-      marker: session.marker || null,
-      markerCheckableInBody: Boolean(session.markerCheckableInBody),
-      markerConfidence: session.markerConfidence || 'low',
-      recipe: session.recipe || null,
-      authConfirmed: session.authConfirmed || 'unconfirmed',
-      reloginAttempts: 0
-    };
+    // never sent to the browser. (The Basic credential itself goes to the
+    // in-memory vault below, not into this object.)
+    const authState = isBasic
+      ? {
+        method: 'basic',
+        origin: session.origin,
+        verifyUrl: session.verifyUrl,
+        authConfirmed: 'confirmed',
+        reloginAttempts: 0
+      }
+      : {
+        marker: session.marker || null,
+        markerCheckableInBody: Boolean(session.markerCheckableInBody),
+        markerConfidence: session.markerConfidence || 'low',
+        recipe: session.recipe || null,
+        authConfirmed: session.authConfirmed || 'unconfirmed',
+        reloginAttempts: 0
+      };
 
     // Generate scan ID
     const scanId = `zap-auth-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -339,7 +427,8 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
             // when in-scan verification cannot apply (a single-page app serves
             // the same HTML signed in or out, so a response body proves
             // nothing either way).
-            loginOutcome: authState.authConfirmed === 'confirmed' ? 'confirmed' : 'unconfirmed'
+            loginOutcome: authState.authConfirmed === 'confirmed' ? 'confirmed' : 'unconfirmed',
+            ...(isBasic ? { authMethod: 'basic' } : {})
           },
           createdAt: new Date(),
           updatedAt: new Date()
@@ -368,6 +457,13 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
 
     // Delete session after use (one-time use)
     authSessions.delete(tempSessionId);
+
+    // HTTP Basic: hand the credential to the in-memory vault for this scan only.
+    // Read by the ZAP leg and the in-house page checks; released when both are
+    // done, purged on cancel/failure, expired by TTL. Never persisted.
+    if (isBasic) {
+      credentialVault.put(scanId, { username: session.basic.username, password: session.basic.password, origin: session.origin });
+    }
 
     // Warm ZAP capacity up before responding, so the scale-from-zero overlaps the
     // client's first poll rather than being added to the scan. Not awaited and never
@@ -404,10 +500,19 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         zapUrl = container.zapUrl;
       } catch (err) {
         console.error(`[ZAP-AUTH] Container provisioning failed for scan ${scanId}:`, err.message);
+        credentialVault.purge(scanId);
         await ScanResult.updateOne(
           { analysisId: scanId },
           { $set: { status: 'failed', 'authScanResult.status': 'failed', 'authScanResult.error': 'Container provisioning failed', updatedAt: new Date() } }
         );
+        return;
+      }
+
+      // Stopped while the container was being provisioned: give it back, scan nothing.
+      if (await isAuthScanCancelled(scanId).catch(() => false)) {
+        console.log(`[ZAP-AUTH] Scan ${scanId} was stopped during provisioning — not starting`);
+        credentialVault.purge(scanId);
+        await releaseContainer(scanId);
         return;
       }
 
@@ -416,8 +521,12 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         // startAsyncAuthScan is internally fire-and-forget, so releasing the lock when it
         // returns would release it seconds after acquiring. Bridge through the onComplete
         // callback instead — it fires from the background scan's .finally(), i.e. on true
-        // completion. The 'already_running' early return never fires onComplete, so it is
-        // resolved explicitly; without that the lock would sit until its TTL expires.
+        // completion. Every other outcome ('already_running', or 'not_started' for a scan
+        // stopped before it began) never fires onComplete, so it is resolved explicitly;
+        // without that the lock would sit until its TTL expires.
+        //
+        // isCancelled: a scan stopped while it queues for the instance, or during the
+        // capacity wait / recycle, leaves without scanning (withZapInstance).
         await withZapInstance('auth', scanId, () => new Promise((resolve) => {
           startAsyncAuthScan(
             targetUrl,
@@ -429,14 +538,21 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
             (id) => { releaseContainer(id); resolve(); },
             authState
           )
-            .then((r) => { if (r?.status === 'already_running') resolve(); })
+            .then((r) => { if (r?.status !== 'started') resolve(); })
             .catch((err) => {
               console.error(`[ZAP-AUTH] startAsyncAuthScan failed for ${scanId}:`, err.message);
+              credentialVault.purge(scanId);
               resolve();
             });
-        }));
+        }), { isCancelled: () => isAuthScanCancelled(scanId) });
+        // Abandoned (stopped) scans never reach startAsyncAuthScan; release what they held.
+        if (await isAuthScanCancelled(scanId).catch(() => false)) {
+          credentialVault.purge(scanId);
+          await releaseContainer(scanId);
+        }
       } catch (err) {
         console.error(`[ZAP-AUTH] Pre-scan recycle failed for ${scanId}:`, err.message);
+        credentialVault.purge(scanId);
         await ScanResult.updateOne(
           { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
           {
@@ -479,7 +595,7 @@ router.get('/status/:scanId', auth, async (req, res) => {
     }
 
     // --- EARLY EXIT: If scan is in a terminal state, don't trigger anything ---
-    if (['stopped', 'completed', 'failed'].includes(scan.status)) {
+    if (['stopped', 'cancelled', 'completed', 'failed'].includes(scan.status)) {
       console.log(`🛑 Auth Scan ${scanId} is in terminal state (${scan.status}), returning early.`);
       return res.json({
         success: true,
@@ -493,6 +609,7 @@ router.get('/status/:scanId', auth, async (req, res) => {
         webCheckPending: false,
         hasRefinedReport: !!scan.refinedReport,
         refinedReport: scan.refinedReport || null,
+        authMethod: scan.authScanResult?.authMethod === 'basic' ? 'basic' : 'form',
         createdAt: scan.createdAt,
         updatedAt: scan.updatedAt
       });
@@ -522,6 +639,9 @@ router.get('/status/:scanId', auth, async (req, res) => {
       const authZapAge = now - new Date(scan.authScanResult.startedAt).getTime();
       if (authZapAge > AUTH_ZAP_STALE_TIMEOUT_MS) {
         console.error(`[ZAP-AUTH] ❌ Auth ZAP scan timed out (${Math.round(authZapAge / 60000)}min). Failing entire scan.`);
+        // Drop any Basic credential now; the worker revokes it from ZAP when it
+        // next sees the failed status.
+        credentialVault.purge(scanId);
         await ScanResult.updateOne(
           { analysisId: scanId },
           { $set: { 'authScanResult.status': 'failed', 'authScanResult.error': 'Scan timed out (exceeded 24 hour limit)', status: 'failed', updatedAt: new Date() } }
@@ -755,6 +875,9 @@ router.get('/status/:scanId', auth, async (req, res) => {
       phase,
       progress,
       authCoverage,
+      // 'basic' | 'form'. For Basic scans the UI states that the header grade and
+      // the site configuration checks ran without credentials.
+      authMethod: scan.authScanResult?.authMethod === 'basic' ? 'basic' : 'form',
       message: scan.authScanResult?.message || '',
       // Partial data indicators (same as combined-analysis)
       hasPsiResult: !!scan.pagespeedResult && !scan.pagespeedResult.error,
@@ -798,7 +921,10 @@ router.get('/status/:scanId', auth, async (req, res) => {
 
 /**
  * POST /api/zap-auth/stop/:scanId
- * Stop a running authenticated scan.
+ * Stop an authenticated scan at any stage — provisioning, queued for ZAP, scanning,
+ * or combining. Idempotent: a repeat request answers `alreadyStopped: true`.
+ * Responds once the scan's ZAP worker has revoked its credentials and released the
+ * instance (bounded wait; see stopAuthScan).
  */
 router.post('/stop/:scanId', auth, async (req, res) => {
   try {
@@ -807,10 +933,10 @@ router.post('/stop/:scanId', auth, async (req, res) => {
     res.json(result);
   } catch (error) {
     if (error.message === 'Scan not found or access denied') {
-      return res.status(404).json({ error: error.message });
+      return res.status(404).json({ success: false, code: 'SCAN_NOT_FOUND', error: error.message });
     }
     console.error('[ZAP-AUTH] Stop error:', error.message);
-    res.status(500).json({ error: 'Failed to stop scan' });
+    res.status(500).json({ success: false, code: 'SCAN_STOP_FAILED', error: 'Failed to stop scan' });
   }
 });
 

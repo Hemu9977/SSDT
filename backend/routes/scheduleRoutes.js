@@ -21,6 +21,12 @@ const { isValidTimeZone, formatInTimeZone, DEFAULT_TIME_ZONE } = require('../uti
  * POST /api/schedules
  * Create a new scheduled scan
  */
+// HTTP Basic Auth is manual-only: a schedule would have to store the customer's
+// password, and Basic credentials are never persisted.
+const isBasicAuthConfig = (authConfig) => Boolean(authConfig && typeof authConfig === 'object' &&
+  (authConfig.authMethod === 'basic' || authConfig.basic || authConfig.password !== undefined));
+const BASIC_MANUAL_ONLY = { success: false, error: 'HTTP Basic authentication cannot be scheduled', code: 'BASIC_AUTH_MANUAL_ONLY' };
+
 router.post('/', auth, async (req, res) => {
   // Set once the row is committed; the presentation work below the try reads it.
   let savedSchedule = null;
@@ -49,6 +55,9 @@ router.post('/', auth, async (req, res) => {
     const targetGuard = checkScanTarget(targetUrl);
     if (!targetGuard.ok) {
       return res.status(400).json({ success: false, error: 'Invalid or refused URL', code: targetGuard.code });
+    }
+    if (isBasicAuthConfig(authConfig)) {
+      return res.status(400).json(BASIC_MANUAL_ONLY);
     }
     if (authConfig && authConfig.loginUrl) {
       const loginGuard = checkScanTarget(authConfig.loginUrl);
@@ -357,6 +366,9 @@ router.put('/:id', auth, async (req, res) => {
       schedule.timezone = timezone;
     }
     if (authConfig !== undefined) {
+      if (isBasicAuthConfig(authConfig)) {
+        return res.status(400).json(BASIC_MANUAL_ONLY);
+      }
       if (authConfig && authConfig.loginUrl) {
         const loginGuard = checkScanTarget(authConfig.loginUrl);
         if (!loginGuard.ok) {

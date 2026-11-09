@@ -11,6 +11,9 @@ const http = require('http');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('./gridfsService');
 const { markerPresentInBody } = require('../utils/loginSignals');
+const { redactHeaderBlock, scrubSecrets, scrubText, MIN_SCRUB_LENGTH } = require('../utils/credentialRedaction');
+const credentialRules = require('./zapCredentialRules');
+const credentialVault = require('./scanCredentialVault');
 
 // ============================================================================
 // ZAP AUTH API CONFIGURATION
@@ -41,7 +44,9 @@ const AUTH_HEALTH_KEYS = [
   'reloginAttempts',
   'authRepaired',
   'authDegraded',
-  'authDegradedReason'
+  'authDegradedReason',
+  'authMethod',
+  'authEvidence'
 ];
 
 const httpAgent = new http.Agent({
@@ -78,6 +83,59 @@ function createZapAuthClient(zapUrl) {
 const zapAuthApi = createZapAuthClient(ZAP_AUTH_URL);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// A scan in any of these states is over: nothing may start, resume or overwrite it.
+const TERMINAL_SCAN_STATES = ['stopped', 'cancelled', 'failed', 'completed'];
+
+// ============================================================================
+// RUNNING WORKERS (stop support)
+// ============================================================================
+//
+// scanId → the live background worker in THIS process.
+//
+// Why it exists: stopping used to be a status write plus `stopAllScans` sent to the
+// module-level client. The worker noticed the write only at its next progress update
+// (up to 5 s in the scan loops, 2 min in the passive-scan wait, never inside the AJAX
+// phase, whose catch swallowed the signal), and the `stopAllScans` went to whichever
+// scan held the auth ZAP at that moment — for a scan still queueing for the instance,
+// another customer's. Now a stop wakes this worker's sleeps at once and talks only to
+// this scan's own ZAP client; a scan with no running worker sends nothing to ZAP.
+// Single backend process assumed (as for the credential vault); a stop that reaches a
+// different process still lands, via the status check in updateProgress.
+const runningWorkers = new Map();
+
+function registerWorker(scanId, client) {
+  let markDone;
+  const entry = {
+    client,
+    stopRequested: false,
+    wakers: new Set(),
+    done: new Promise(resolve => { markDone = resolve; })
+  };
+  entry.markDone = markDone;
+  runningWorkers.set(scanId, entry);
+  return entry;
+}
+
+/** Signal a running worker to stop. Returns its entry, or null if none runs here. */
+function signalWorkerStop(scanId) {
+  const entry = runningWorkers.get(scanId);
+  if (!entry) return null;
+  entry.stopRequested = true;
+  for (const wake of [...entry.wakers]) wake();
+  return entry;
+}
+
+/**
+ * True when the scan must not (or no longer) run: stopped, cancelled, failed,
+ * completed — or gone. Used by the start paths' withZapInstance `isCancelled` hook.
+ */
+async function isAuthScanCancelled(scanId) {
+  const entry = runningWorkers.get(scanId);
+  if (entry && entry.stopRequested) return true;
+  const scan = await ScanResult.findOne({ analysisId: scanId }).select('status').lean();
+  return !scan || TERMINAL_SCAN_STATES.includes(scan.status);
+}
 
 // ============================================================================
 // RETRY LOGIC
@@ -220,9 +278,11 @@ async function fetchZapMessage(client, messageId) {
     const res = await client.get('/JSON/core/view/message/', { params: { id: messageId } });
     const m = (res && res.data && res.data.message) ? res.data.message : (res ? res.data : null);
     if (!m) return null;
+    // The stored request carries whatever the Replacer injected (Authorization for
+    // Basic, the session Cookie for form login). Redacted before it is stored.
     return {
-      request: { header: m.requestHeader || '', body: m.requestBody || '' },
-      response: { header: m.responseHeader || '', body: m.responseBody || '' }
+      request: { header: redactHeaderBlock(m.requestHeader || ''), body: m.requestBody || '' },
+      response: { header: redactHeaderBlock(m.responseHeader || ''), body: m.responseBody || '' }
     };
   } catch (err) {
     console.warn(`⚠️ Failed to fetch ZAP message ${messageId}: ${err.message}`);
@@ -280,12 +340,17 @@ async function enrichOccurrencesWithMessages(grouped, client) {
   console.log(`📩 Enriched ZAP auth occurrences with raw request/response for ${messageMap.size}/${ids.length} unique messages`);
 }
 
-async function createDualVersionAlerts(alerts, client = null) {
-  const grouped = groupAlertsByUrl(alerts);
+async function createDualVersionAlerts(alerts, client = null, secrets = []) {
+  // Exact-secret scrub before anything is grouped or stored: ZAP's own alert text
+  // can quote the credential (rule 10105 writes the decoded Basic password).
+  const grouped = groupAlertsByUrl(scrubSecrets(alerts, secrets));
 
   // Best-effort: attach raw HTTP request/response to each occurrence.
   if (client) {
     await enrichOccurrencesWithMessages(grouped, client);
+    if (secrets.length) {
+      for (const g of grouped) g.occurrences = scrubSecrets(g.occurrences, secrets);
+    }
   }
 
   const summaryAlerts = grouped.map(alert => ({
@@ -367,6 +432,21 @@ async function checkZapAuthHealth() {
  * @returns {Promise<{verified:boolean|null, reason:string}>}
  */
 async function verifySignedIn({ zapClient, targetUrl, authState }) {
+  // HTTP Basic: the server answers a protected URL with 401 unless the credential
+  // is accepted, so the status code is the evidence — no page marker needed.
+  if (authState && authState.method === 'basic') {
+    const url = authState.verifyUrl || targetUrl;
+    try {
+      await zapClient.get('/JSON/core/action/accessUrl/', { params: { url, followRedirects: 'false' } });
+    } catch (_) {
+      return { verified: null, reason: 'basic_probe_failed' };
+    }
+    const status = await credentialRules.latestStatusFor(zapClient, url);
+    if (status === null) return { verified: null, reason: 'no_response_captured' };
+    if (status === 401) return { verified: false, reason: 'basic_unauthorized' };
+    if (status >= 200 && status < 400) return { verified: true, reason: 'basic_accepted' };
+    return { verified: null, reason: `basic_status_${status}` };
+  }
   if (!authState || !authState.marker) {
     return { verified: null, reason: 'no_marker' };
   }
@@ -394,6 +474,12 @@ async function verifySignedIn({ zapClient, targetUrl, authState }) {
  * @returns {Promise<{ok:boolean, cookies:Array, reason:string}>}
  */
 async function reAuthenticate({ zapClient, authState, scanId }) {
+  // Basic is stateless: there is no session to renew. A 401 mid-scan means the
+  // credential was revoked or the account locked; retrying would only add failed
+  // attempts against the customer's account.
+  if (authState && authState.method === 'basic') {
+    return { ok: false, cookies: [], reason: 'basic_credentials_rejected' };
+  }
   if (!authState || !authState.recipe || !authState.recipe.loginUrl) {
     return { ok: false, cookies: [], reason: 'no_recipe' };
   }
@@ -527,23 +613,24 @@ async function applyCookieReplacerRule(zapClient, cookies) {
     // Nothing to remove.
   }
 
+  // POST, so the session cookie is never part of a URL. Scanner initiators only:
+  // with the default (all initiators) the rule also applies to proxy traffic, and
+  // anything able to reach ZAP's port could browse the target with this session.
   await zapAuthApiWithRetry(
-    () => zapClient.get('/JSON/replacer/action/addRule/', {
-      params: {
-        description: 'auth_cookie',
-        enabled: 'true',
-        matchType: 'REQ_HEADER',
-        matchRegex: 'false',
-        matchString: 'Cookie',
-        replacement: cookieString,
-        initiators: ''
-      }
+    () => credentialRules.zapPost(zapClient, '/JSON/replacer/action/addRule/', {
+      description: credentialRules.COOKIE_RULE,
+      enabled: 'true',
+      matchType: 'REQ_HEADER',
+      matchRegex: 'false',
+      matchString: 'Cookie',
+      replacement: cookieString,
+      initiators: credentialRules.SCANNER_INITIATORS
     }),
     3, 1000, 'Add cookie replacer rule'
   );
 }
 
-async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
+async function configureAuthContext({ targetUrl, cookies, scanId, zapClient, basic = null }) {
   const contextName = `auth_scan_${scanId}`;
   const targetUrlObj = new URL(targetUrl);
   const targetDomain = targetUrlObj.hostname;
@@ -604,6 +691,28 @@ async function configureAuthContext({ targetUrl, cookies, scanId, zapClient }) {
     params: { contextName, booleanInScope: 'true' }
   });
 
+  // HTTP Basic: one rule, exact https origin, scanner traffic only. Rule 10105 is
+  // switched off first — it logs the decoded password if it ever sees Basic over
+  // HTTP (the rule cannot match http://, this is the second safeguard).
+  if (basic) {
+    try {
+      await credentialRules.setInsecureAuthRule(zapClient, false);
+    } catch (err) {
+      console.warn(`[ZAP-AUTH] Could not disable passive rule 10105: ${err.message}`);
+    }
+    try {
+      await zapAuthApiWithRetry(
+        () => credentialRules.applyBasicAuthRule(zapClient, { scanId, origin: basic.origin, authorization: basic.authorization }),
+        3, 1000, 'Add Basic auth replacer rule'
+      );
+      console.log(`[ZAP-AUTH] Basic auth rule configured for ${basic.origin}`);
+    } catch (err) {
+      // Never fall through to an unauthenticated scan labelled as authenticated.
+      console.error(`[ZAP-AUTH] Failed to configure Basic auth rule: ${err.message}`);
+      throw new Error('Failed to configure authentication in ZAP');
+    }
+  }
+
   // Inject cookies via Replacer API
   if (cookies && cookies.length > 0) {
     console.log(`[ZAP-AUTH] Injecting ${cookies.length} cookies via Replacer API`);
@@ -661,16 +770,46 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
 
   let contextName = null;
 
+  // HTTP Basic: the credential lives only in the in-memory vault, keyed by scan.
+  // It is read here, used to build the Replacer rule, and never stored.
+  const isBasic = Boolean(authState && authState.method === 'basic');
+  const basicCred = isBasic ? credentialVault.get(scanId) : null;
+  // What must never appear in stored output: the Basic credential in all its forms,
+  // or — for a form-login scan — the session cookie values it injected (ZAP's
+  // cookie findings can quote them in alert evidence and in the HTML report).
+  const secrets = basicCred
+    ? basicCred.secrets
+    : [...new Set((cookies || []).map(c => c && c.value).filter(v => typeof v === 'string' && v.length >= MIN_SCRUB_LENGTH))];
+
   // Accumulated sign-in health across the scan. Carried into the final write
   // below, which replaces `authScanResult` wholesale.
-  const authHealth = {};
+  const authHealth = isBasic ? { authMethod: 'basic' } : {};
+
+  // Registered synchronously, before the first await, so a stop that lands at any
+  // point after startAsyncAuthScan hands over is seen by this worker.
+  const worker = registerWorker(scanId, zapAuthApi);
+  const assertRunning = () => {
+    if (worker.stopRequested) throw new Error('STOPPED_BY_USER');
+  };
+  // Polling wait that a stop cuts short: the loops below sleep 1–5 s between polls,
+  // and a stop must not wait out the interval (or a 2-minute passive-scan wait).
+  const pause = async (ms) => {
+    assertRunning();
+    await new Promise(resolve => {
+      const wake = () => { clearTimeout(timer); worker.wakers.delete(wake); resolve(); };
+      const timer = setTimeout(wake, ms);
+      worker.wakers.add(wake);
+    });
+    assertRunning();
+  };
 
   const updateProgress = async (phase, progress, additionalData = {}) => {
+    assertRunning();
     try {
       const currentScan = await ScanResult.findOne({ analysisId: scanId });
 
       // --- TERMINAL STATE CHECK: If scan was stopped/failed, EXIT BACKGROUND PROCESS ---
-      if (currentScan && ['stopped', 'failed'].includes(currentScan.status)) {
+      if (currentScan && ['stopped', 'cancelled', 'failed'].includes(currentScan.status)) {
         console.log(`🛑 [ZAP-AUTH] Scan ${scanId} detected as ${currentScan.status}. Terminating background worker.`);
         throw new Error('STOPPED_BY_USER');
       }
@@ -710,6 +849,16 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
   };
 
   try {
+    if (isBasic && !basicCred) {
+      // The vault entry is gone (process restart, or the scan was cancelled before
+      // it started). Never run an unauthenticated scan labelled as authenticated.
+      throw new Error('Basic credentials unavailable for this scan');
+    }
+
+    // Credential rules survive newSession, so a scan that died without cleaning
+    // up would otherwise lend its credential to this one. Swept first.
+    await credentialRules.purgeCredentialRules(zapAuthApi).catch(() => []);
+
     // Clear state left by a previous scan on this ZAP instance — see the matching
     // reset in zapService.js. Must run before configureAuthContext below, since
     // newSession discards contexts (including the auth context it creates).
@@ -742,7 +891,8 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       targetUrl,
       cookies,
       scanId,
-      zapClient: zapAuthApi
+      zapClient: zapAuthApi,
+      basic: isBasic ? { origin: basicCred.origin, authorization: basicCred.authorization } : null
     });
     contextName = ctxName;
 
@@ -761,13 +911,16 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       // Continue anyway - spider will try to access it
     }
 
-    // Also access the login URL to ensure ZAP knows the session
-    try {
-      await zapAuthApi.get('/JSON/core/action/accessUrl/', {
-        params: { url: loginUrl, followRedirects: 'true' }
-      });
-    } catch (_) {
-      // Non-critical
+    // Also access the login URL to ensure ZAP knows the session (form login only:
+    // HTTP Basic has no login page).
+    if (!isBasic && loginUrl) {
+      try {
+        await zapAuthApi.get('/JSON/core/action/accessUrl/', {
+          params: { url: loginUrl, followRedirects: 'true' }
+        });
+      } catch (_) {
+        // Non-critical
+      }
     }
 
     // Before crawling anything, confirm the injected session is actually being
@@ -831,7 +984,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     const spiderMaxIterations = spiderConfig.maxDuration * 60 / 3; // check every 3 seconds
 
     for (let i = 0; i < spiderMaxIterations && !spiderComplete; i++) {
-      await sleep(3000);
+      await pause(3000);
 
       try {
         const statusResponse = await zapAuthApi.get('/JSON/spider/view/status/', {
@@ -859,6 +1012,13 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
           spiderComplete = true;
         }
       } catch (statusError) {
+        // A cancellation (or the watchdog failing the scan) must end the worker, as
+        // it does in the AJAX and active-scan loops. Swallowing it here kept a
+        // cancelled scan polling for up to the spider's 2 h limit — holding the
+        // auth-ZAP lock and leaving its credentials in ZAP the whole time.
+        if (statusError.message === 'STOPPED_BY_USER') {
+          throw statusError;
+        }
         console.warn(`[ZAP-AUTH] Spider status error: ${statusError.message}`);
       }
     }
@@ -899,7 +1059,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       // Wait for AJAX spider to complete with timeout
       const ajaxMaxIterations = 30 * 60 / 5; // 30 min / 5s intervals
       for (let i = 0; i < ajaxMaxIterations; i++) {
-        await sleep(5000);
+        await pause(5000);
 
         try {
           const ajaxStatusResponse = await zapAuthApi.get('/JSON/ajaxSpider/view/status/');
@@ -927,6 +1087,9 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         // May already be stopped
       }
     } catch (ajaxError) {
+      // The AJAX phase is best-effort, but a cancellation is not an AJAX error: this
+      // catch used to swallow it, so a stop during the AJAX spider was ignored.
+      if (ajaxError.message === 'STOPPED_BY_USER') throw ajaxError;
       console.warn(`[ZAP-AUTH] AJAX spider error: ${ajaxError.message}`);
     }
 
@@ -947,7 +1110,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     console.log(`[ZAP-AUTH] Waiting for passive scan to complete`);
 
     for (let i = 0; i < 120; i++) { // Max 2 minutes
-      await sleep(1000);
+      await pause(1000);
       try {
         const passiveResponse = await zapAuthApi.get('/JSON/pscan/view/recordsToScan/');
         const recordsToScan = parseInt(passiveResponse.data.recordsToScan || 0);
@@ -1012,7 +1175,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     const activeMaxIterations = 180 * 60 / 5; // 3 hours / 5s intervals
 
     for (let i = 0; i < activeMaxIterations; i++) {
-      await sleep(5000);
+      await pause(5000);
 
       try {
         const scanStatusResponse = await zapAuthApi.get('/JSON/ascan/view/status/', {
@@ -1088,8 +1251,22 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       responseType: 'arraybuffer'
     });
 
-    // Process alerts
-    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapAuthApi);
+    // HTTP Basic: did the scan reach the application or only the login prompt?
+    // Judged from the status codes ZAP recorded for the target origin, because a
+    // scan that only ever saw 401 still "completes" with a plausible report.
+    if (isBasic) {
+      const coverage = await credentialRules.measureAuthCoverage(zapAuthApi, basicCred.origin);
+      authHealth.authEvidence = coverage;
+      if (coverage.verdict === 'failed' || coverage.verdict === 'degraded') {
+        authHealth.authDegraded = true;
+        authHealth.authDegradedReason = coverage.verdict === 'failed' ? 'basic_only_unauthorized' : 'basic_mostly_unauthorized';
+        if (coverage.verdict === 'failed') authHealth.authVerified = false;
+      }
+      console.log(`[ZAP-AUTH] Basic coverage for ${scanId}: ok=${coverage.ok} 401=${coverage.unauthorized} 403=${coverage.forbidden} verdict=${coverage.verdict}`);
+    }
+
+    // Process alerts (credentials scrubbed from alert text and raw evidence)
+    const { summaryAlerts, detailedAlerts } = await createDualVersionAlerts(rawAlerts, zapAuthApi, secrets);
     console.log(`[ZAP-AUTH] Grouped into ${summaryAlerts.length} unique alert types`);
 
     const riskCounts = summaryAlerts.reduce((acc, alert) => {
@@ -1100,7 +1277,11 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     // Store reports in GridFS
     await updateProgress('saving', 95, { message: 'Saving reports...' });
 
-    const htmlBuffer = Buffer.from(htmlReportResponse.data);
+    // ZAP's HTML report quotes alert text (and so anything rule 10105 captured);
+    // scrubbed of the scan's secrets before it is stored.
+    const htmlBuffer = secrets.length
+      ? Buffer.from(scrubText(Buffer.from(htmlReportResponse.data).toString('utf8'), secrets), 'utf8')
+      : Buffer.from(htmlReportResponse.data);
     const htmlFileId = await gridfsService.uploadFile(
       htmlBuffer,
       `zap_auth_report_${scanId}.html`,
@@ -1141,7 +1322,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       // Recorded when the scan was created, then refined while it ran.
       ...carriedAuth,
       ...authHealth,
-      loginUrl,
+      loginUrl: isBasic ? null : loginUrl,
       urlsFound,
       alerts: summaryAlerts,
       riskCounts,
@@ -1167,9 +1348,12 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       completedAt: new Date()
     };
 
-    // Update final scan result
-    await ScanResult.updateOne(
-      { analysisId: scanId },
+    // Update final scan result. Conditional: a stop that landed during alert
+    // processing or the uploads above must stand. Unconditionally, this write put a
+    // stopped scan back to 'combining', from where it completed and was billed.
+    assertRunning();
+    const finalWrite = await ScanResult.updateOne(
+      { analysisId: scanId, status: { $nin: TERMINAL_SCAN_STATES } },
       {
         $set: {
           status: 'combining',
@@ -1179,6 +1363,13 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         }
       }
     );
+    if (finalWrite && finalWrite.matchedCount === 0) {
+      // Stopped meanwhile: the report files just stored belong to nothing.
+      await Promise.allSettled([htmlFileId, detailedAlertsFileId].map(id =>
+        gridfsService.deleteFile ? gridfsService.deleteFile(id, 'zap_auth_reports') : null
+      ));
+      throw new Error('STOPPED_BY_USER');
+    }
 
     // Quota is NOT charged here. The scan is only in "combining" at this point —
     // geminiCompletionService charges it when the report is finished, which is the
@@ -1200,46 +1391,20 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       }
     });
 
-    // Cleanup: Remove context and replacer rule
-    if (contextName) {
-      try {
-        await zapAuthApi.get('/JSON/context/action/removeContext/', {
-          params: { contextName }
-        });
-        console.log(`[ZAP-AUTH] Cleaned up context: ${contextName}`);
-      } catch (_) {}
-    }
-    try {
-      await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
-        params: { description: 'auth_cookie' }
-      });
-    } catch (_) {}
-
+    // Credentials are revoked in the `finally` below, on every exit path.
     return { success: true, scanId };
 
   } catch (error) {
-    if (error.message === 'STOPPED_BY_USER') {
+    // A stop makes the ZAP calls in flight fail (scans halted, session discarded), so
+    // any error after a stop request is the stop, not a scan failure.
+    if (error.message === 'STOPPED_BY_USER' || worker.stopRequested) {
       console.log(`🛑 [ZAP-AUTH] Authenticated scan for ${scanId} was successfully terminated due to user cancellation.`);
-      // Cleanup: Remove context and replacer rule
-      if (contextName) {
-        try {
-          await zapAuthApi.get('/JSON/context/action/removeContext/', {
-            params: { contextName }
-          });
-          console.log(`[ZAP-AUTH] Cleaned up context: ${contextName}`);
-        } catch (_) {}
-      }
-      try {
-        await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
-          params: { description: 'auth_cookie' }
-        });
-      } catch (_) {}
       return { success: false, reason: 'stopped' };
     }
 
     console.error(`[ZAP-AUTH] Scan failed: ${error.message}`);
 
-    // Update database with failure
+    // Update database with failure — never over a stop or a finished scan.
     try {
       const zapResultCopy = {
         status: 'failed',
@@ -1248,7 +1413,7 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         completedAt: new Date()
       };
       await ScanResult.updateOne(
-        { analysisId: scanId },
+        { analysisId: scanId, status: { $nin: ['stopped', 'cancelled', 'completed'] } },
         {
           $set: {
             status: 'failed',
@@ -1270,21 +1435,29 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       console.error('[ZAP-AUTH] Failed to update failure status:', updateError.message);
     }
 
-    // Cleanup context on failure
-    if (contextName) {
-      try {
-        await zapAuthApi.get('/JSON/context/action/removeContext/', {
-          params: { contextName }
-        });
-      } catch (_) {}
-    }
-    try {
-      await zapAuthApi.get('/JSON/replacer/action/removeRule/', {
-        params: { description: 'auth_cookie' }
-      });
-    } catch (_) {}
-
     throw error;
+  } finally {
+    // Every exit — success, cancellation, watchdog, failure — revokes the scan's
+    // credentials from ZAP. Removing the Replacer rule is not enough on its own:
+    // the active scanner replays stored request headers, and the stored requests
+    // stay readable through the API until the session is discarded.
+    try {
+      const { steps } = await credentialRules.revokeScanCredentials(zapAuthApi, {
+        scanId,
+        contextName,
+        reEnableInsecureAuthRule: isBasic
+      });
+      const failed = Object.entries(steps).filter(([, ok]) => !ok).map(([name]) => name);
+      if (failed.length) {
+        console.warn(`[ZAP-AUTH] Credential revocation for ${scanId} incomplete: ${failed.join(', ')} (container recycle before the next scan removes the rest)`);
+      } else {
+        console.log(`[ZAP-AUTH] Credentials revoked from ZAP for ${scanId}`);
+      }
+    } finally {
+      if (isBasic) credentialVault.release(scanId, 'zap');
+      if (runningWorkers.get(scanId) === worker) runningWorkers.delete(scanId);
+      worker.markDone();
+    }
   }
 }
 
@@ -1310,14 +1483,24 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, 
     };
   }
 
+  // Stopped (or otherwise finished) while it was provisioning or queueing for ZAP.
+  // This used to set the status back to 'pending' and run the whole scan anyway —
+  // after the UI had told the customer it was stopped — and then bill it.
+  if (existing && TERMINAL_SCAN_STATES.includes(existing.status)) {
+    console.log(`[ZAP-AUTH] Scan ${scanId} is ${existing.status} — not starting`);
+    return { scanId, status: 'not_started', reason: existing.status };
+  }
+
   // Create or update the scan result in database
   if (existing) {
     // Dotted paths, not a wholesale replacement. Both callers write the login
     // outcome into the skeleton record immediately before calling this, and
     // replacing the whole object erased it every time — leaving the report
     // unable to say whether the sign-in had been confirmed.
-    await ScanResult.updateOne(
-      { analysisId: scanId },
+    //
+    // Conditional, so a stop landing between the read above and this write still wins.
+    const claimed = await ScanResult.updateOne(
+      { analysisId: scanId, status: { $nin: TERMINAL_SCAN_STATES } },
       {
         $set: {
           status: 'pending',
@@ -1333,6 +1516,10 @@ async function startAsyncAuthScan(targetUrl, loginUrl, cookies, scanId, userId, 
         }
       }
     );
+    if (claimed && claimed.matchedCount === 0) {
+      console.log(`[ZAP-AUTH] Scan ${scanId} was stopped before it started — not starting`);
+      return { scanId, status: 'not_started', reason: 'stopped' };
+    }
   } else {
     const scanResult = new ScanResult({
       analysisId: scanId,
@@ -1397,7 +1584,31 @@ async function getAuthScanStatus(scanId, userId) {
   };
 }
 
-async function stopAuthScan(scanId, userId) {
+// How long a stop waits for the worker to finish revoking credentials and hand the
+// ZAP instance back. Beyond this the stop still holds: the worker exits at its next
+// check and the revocation runs in its `finally`.
+const STOP_WORKER_WAIT_MS = () => Number(process.env.ZAP_AUTH_STOP_WAIT_MS) || 20000;
+
+/**
+ * Stop an authenticated scan, whatever stage it is in.
+ *
+ * Order matters:
+ *   1. Mark the scan stopped — atomically and conditionally. This is the claim (a
+ *      repeat click or a second tab finds it already stopped and does nothing), and it
+ *      is what every start path checks, so a scan still provisioning or queueing for
+ *      ZAP can no longer start (startAsyncAuthScan, withZapInstance's isCancelled).
+ *   2. Drop the Basic credential, so nothing can use it from here on.
+ *   3. Halt the fast scanners (in-house browser checks, WebCheck).
+ *   4. If this scan's ZAP worker runs here: wake it, halt ITS ZAP at once, and wait for
+ *      it to revoke credentials (stop scans → remove rules → newSession) and release
+ *      the instance lock — so when this returns, ZAP is clean and free for the next
+ *      scan. A scan with no running worker sends nothing to ZAP: the auth ZAP is
+ *      shared, and whatever it is doing belongs to another scan.
+ *
+ * Nothing is charged: quota is only charged when a report completes, and the
+ * completion service refuses a stopped scan.
+ */
+async function stopAuthScan(scanId, userId, { waitMs = STOP_WORKER_WAIT_MS() } = {}) {
   const scanResult = await ScanResult.findOne({
     analysisId: scanId,
     userId
@@ -1407,64 +1618,98 @@ async function stopAuthScan(scanId, userId) {
     throw new Error('Scan not found or access denied');
   }
 
-  // Stop all active scans in ZAP
-  try {
-    await zapAuthApi.get('/JSON/ascan/action/stopAllScans/');
-  } catch (_) {}
-  try {
-    await zapAuthApi.get('/JSON/spider/action/stopAllScans/');
-  } catch (_) {}
-  try {
-    await zapAuthApi.get('/JSON/ajaxSpider/action/stop/');
-  } catch (_) {}
-
-  // Cancel active/waiting BullMQ job if present
-  try {
-    const { getZapQueue } = require('../queues/zapQueue');
-    const zapQueue = getZapQueue();
-    if (zapQueue) {
-      const job = await zapQueue.getJob(`zap-${scanId}`);
-      if (job) {
-        console.log(`[BullMQ] Found job zap-${scanId} in zap-queue for authenticated scan. Canceling.`);
-        try {
-          if (typeof job.discard === 'function') {
-            await job.discard();
-          }
-        } catch (_) {}
-        try {
-          await job.remove();
-        } catch (e) {
-          console.error(`[BullMQ] Failed to remove job zap-${scanId}:`, e.message);
-        }
-      }
-    }
-  } catch (err) {
-    console.error(`[BullMQ] Error canceling zap-queue job for ${scanId}:`, err.message);
-  }
-
-  // Release AWS Fargate dynamic container
-  try {
-    const { releaseContainer } = require('./zapContainerManager');
-    await releaseContainer(scanId);
-  } catch (err) {
-    console.warn(`[zapAuthService] Failed to release container for ${scanId}:`, err.message);
-  }
-
-  // Update database
-  await ScanResult.updateOne(
-    { analysisId: scanId },
+  const stoppedAt = new Date();
+  const claim = await ScanResult.updateOne(
+    { analysisId: scanId, userId, status: { $nin: TERMINAL_SCAN_STATES } },
     {
       $set: {
         status: 'stopped',
         'authScanResult.status': 'stopped',
         'authScanResult.phase': 'stopped',
-        'authScanResult.completedAt': new Date(),
-        updatedAt: new Date()
+        'authScanResult.completedAt': stoppedAt,
+        stoppedAt,
+        updatedAt: stoppedAt
       }
     }
   );
+  if (!claim || claim.matchedCount === 0) {
+    // Already finished, or another request stopped it first. Still make sure no
+    // credential lingers — purge is idempotent.
+    credentialVault.purge(scanId);
+    const current = await ScanResult.findOne({ analysisId: scanId }).select('status').lean().catch(() => null);
+    return {
+      success: true,
+      alreadyStopped: true,
+      status: (current && current.status) || scanResult.status,
+      message: 'Scan already in a terminal state'
+    };
+  }
+  console.log(`🛑 [ZAP-AUTH] Stopping authenticated scan ${scanId} (was ${scanResult.status})`);
 
-  return { success: true, message: 'Authenticated scan stopped' };
+  // The credential is dropped at once; the worker revokes it from ZAP on exit.
+  credentialVault.purge(scanId);
+
+  // Fast scanners. Lazily required: both modules are heavier than this path needs at load.
+  let fastScansStopped = false;
+  let webCheckStopped = false;
+  try {
+    fastScansStopped = require('./authFastScanService').stopAuthFastScans(scanId);
+  } catch (err) {
+    console.warn(`[ZAP-AUTH] Could not halt fast scanners for ${scanId}: ${err.message}`);
+  }
+  try {
+    webCheckStopped = require('./webCheckService').stopWebCheckScan(scanId);
+  } catch (err) {
+    console.warn(`[ZAP-AUTH] Could not halt WebCheck for ${scanId}: ${err.message}`);
+  }
+
+  // The ZAP leg.
+  const worker = signalWorkerStop(scanId);
+  let workerStopped = !worker;
+  if (worker) {
+    // Halt the attack traffic now, on this scan's own ZAP, rather than when the worker
+    // next gets control — it may be inside a long ZAP call (alerts, report, accessUrl).
+    const halt = { timeout: 10000 };
+    await Promise.allSettled([
+      worker.client.get('/JSON/ascan/action/stopAllScans/', halt),
+      worker.client.get('/JSON/spider/action/stopAllScans/', halt),
+      worker.client.get('/JSON/ajaxSpider/action/stop/', halt)
+    ]);
+    let timer;
+    workerStopped = await Promise.race([
+      worker.done.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), waitMs); })
+    ]);
+    clearTimeout(timer);
+    if (!workerStopped) {
+      console.warn(`[ZAP-AUTH] Worker for ${scanId} still unwinding after ${waitMs}ms — it exits at its next check`);
+    }
+  } else {
+    // Provisioning, queueing for the lock, or running in another process: the start
+    // paths see the stopped status and give the instance up without scanning.
+    try {
+      const { releaseContainer } = require('./zapContainerManager');
+      await releaseContainer(scanId);
+    } catch (err) {
+      console.warn(`[zapAuthService] Failed to release container for ${scanId}:`, err.message);
+    }
+  }
+
+  // Other tabs watching this scan.
+  try {
+    const { publishScanProgress } = require('./scanProgressService');
+    publishScanProgress(scanId, userId, { status: 'stopped', scanId, analysisId: scanId }).catch(() => {});
+  } catch (_) {}
+
+  console.log(`✅ [ZAP-AUTH] Scan ${scanId} stopped (worker=${worker ? (workerStopped ? 'exited' : 'unwinding') : 'none'} fast=${fastScansStopped} webcheck=${webCheckStopped})`);
+  return {
+    success: true,
+    message: 'Authenticated scan stopped',
+    scanId,
+    workerStopped,
+    fastScansStopped,
+    webCheckStopped
+  };
 }
 
 module.exports = {
@@ -1476,5 +1721,11 @@ module.exports = {
   startAsyncAuthScan,
   getAuthScanStatus,
   stopAuthScan,
-  runAuthenticatedScanBackground
+  isAuthScanCancelled,
+  runAuthenticatedScanBackground,
+  // Exposed for tests.
+  _runningWorkers: runningWorkers,
+  _createDualVersionAlerts: createDualVersionAlerts,
+  _fetchZapMessage: fetchZapMessage,
+  _createZapAuthClient: createZapAuthClient
 };
