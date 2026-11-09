@@ -1,5 +1,7 @@
 'use strict';
 
+const { redactAlertsEvidence } = require('./credentialRedaction');
+
 /**
  * vulnFilter.js — Centralized plan-based vulnerability filter.
  *
@@ -71,7 +73,11 @@ function getSanitizedAlerts(alerts, accessLevel) {
   if (!Array.isArray(alerts)) return [];
   const level   = normaliseAccessLevel(accessLevel);
   const allowed = ALLOWED_SEVERITIES[level];
-  return alerts.filter(a => allowed.includes(normaliseRisk(a?.risk)));
+  // Every route that hands stored alerts to a user (JSON export, the evidence
+  // panel, the detailed-report download, the PDF) passes through here, so this is
+  // where credential headers are redacted on the way out — including evidence
+  // stored before redaction-at-capture existed.
+  return redactAlertsEvidence(alerts.filter(a => allowed.includes(normaliseRisk(a?.risk))));
 }
 
 /**

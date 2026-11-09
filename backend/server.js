@@ -314,7 +314,9 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err);
+  // Stack only, never the whole object: an axios error carries its request config
+  // (URL with query string, headers), and a ZAP API call can carry a scan credential.
+  console.error('❌ Unhandled error:', (err && (err.stack || err.message)) || String(err));
   applyCorsToResponse(req, res);
   res.status(err.status || 500).json({
     error: 'Internal Server Error',

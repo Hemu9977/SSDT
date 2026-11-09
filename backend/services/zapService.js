@@ -9,6 +9,7 @@ const { loadEvidenceAlerts } = require('./zapDetailedAlerts');
 const cleanupService = require('./cleanupService');
 const { publishScanProgress } = require('./scanProgressService');
 const { getSanitizedAlerts } = require('../utils/vulnFilter');
+const { redactHeaderBlock } = require('../utils/credentialRedaction');
 const User = require('../models/User');
 
 // ============================================================================
@@ -230,9 +231,11 @@ async function fetchZapMessage(client, messageId) {
     const res = await client.get('/JSON/core/view/message/', { params: { id: messageId } });
     const m = (res && res.data && res.data.message) ? res.data.message : (res ? res.data : null);
     if (!m) return null;
+    // Credential header values are redacted before anything is stored: ZAP keeps
+    // the request exactly as sent, including any session cookie the target issued.
     return {
-      request: { header: m.requestHeader || '', body: m.requestBody || '' },
-      response: { header: m.responseHeader || '', body: m.responseBody || '' }
+      request: { header: redactHeaderBlock(m.requestHeader || ''), body: m.requestBody || '' },
+      response: { header: redactHeaderBlock(m.responseHeader || ''), body: m.responseBody || '' }
     };
   } catch (err) {
     console.warn(`⚠️ Failed to fetch ZAP message ${messageId}: ${err.message}`);
