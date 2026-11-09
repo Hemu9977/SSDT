@@ -6,6 +6,7 @@ import { useTheme } from '../context/ThemeContext';
 import ZapReportEnhanced from './ZapReportEnhanced';
 import WebCheckDetails from './WebCheckDetails';
 import IpAllowlistNote from './IpAllowlistNote';
+import EyeIcon from './EyeIcon';
 import '../styles/AuthenticatedScan.scss';
 import '../styles/HeroReport.scss';
 import '../styles/ScoreCards.scss';
@@ -18,6 +19,8 @@ import { downloadPdfReport } from '../utils/pdfDownload';
 import { browserTimeZone } from '../utils/timezone';
 import { getReportToolStates, getAiSummaryState } from '../utils/scanToolState';
 import { ScanToolCard, AiSummaryLoader, LoadedReveal } from './ScanLoadingStates';
+import { getApiErrorLabel } from '../utils/apiErrors';
+import { requestTimeout } from '../utils/requestTimeout';
 
 const LOGIN_ERROR_MESSAGE_KEYS = {
   FIELD_NOT_FOUND: 'loginFieldNotFound',
@@ -55,6 +58,17 @@ const AuthenticatedScanPanel = () => {
   const [targetUrl, setTargetUrl] = useState('');
   const [loginUrl, setLoginUrl] = useState('');
 
+  // Authentication method. 'form' is the original login-form flow and stays the
+  // default; 'basic' is HTTP Basic (manual scans only, HTTPS only).
+  const [authType, setAuthType] = useState('form');
+  const [basicUsername, setBasicUsername] = useState('');
+  const [basicPassword, setBasicPassword] = useState('');
+  const [showBasicPassword, setShowBasicPassword] = useState(false);
+  const [basicRealm, setBasicRealm] = useState('');
+  const [basicVerifyUrl, setBasicVerifyUrl] = useState('');
+  const [basicVerifying, setBasicVerifying] = useState(false);
+  const [basicError, setBasicError] = useState(null);
+
   // Step 1-2: Detection
   const [detecting, setDetecting] = useState(false);
   const [detectedFields, setDetectedFields] = useState(null);
@@ -81,6 +95,9 @@ const AuthenticatedScanPanel = () => {
   // internals. Progress is reported as neutral steps via utils/scanStatus.js.
   const [scanProgress, setScanProgress] = useState(0);
   const [scanning, setScanning] = useState(false);
+  // True while a stop request is in flight: the button is disabled and says so,
+  // so repeat clicks cannot fire repeat stops.
+  const [stopping, setStopping] = useState(false);
 
   // Progressive scan data (all scanners)
   const [report, setReport] = useState(null);
@@ -231,6 +248,58 @@ const AuthenticatedScanPanel = () => {
 
   // Report prose is rendered exactly as provided by the backend. Frontend UI
   // localization uses only static local dictionaries and makes no translation calls.
+
+  // ========== Step 1 (HTTP Basic): Verify credentials ==========
+  // No login page and no field detection: the server's own 401 challenge is the
+  // login. The backend proves the page is protected, tries the credential once,
+  // and keeps it in memory only (never stored, never returned).
+  const handleTestBasic = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+    if (!targetUrl || !basicUsername || !basicPassword) {
+      setBasicError(t('basicErrInvalidInput'));
+      return;
+    }
+
+    setBasicVerifying(true);
+    setBasicError(null);
+    setTestResult(null);
+    setTempSessionId(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/zap-auth/test-basic`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          targetUrl: targetUrl.trim(),
+          username: basicUsername,
+          password: basicPassword,
+          realm: basicRealm.trim() || undefined,
+          verifyUrl: basicVerifyUrl.trim() || undefined
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.authConfirmed === 'confirmed' && data.tempSessionId) {
+        // The password is not kept in the browser once the server holds it.
+        setBasicPassword('');
+        setShowBasicPassword(false);
+        setTempSessionId(data.tempSessionId);
+        setTestResult({ authenticated: true, authConfirmed: 'confirmed', warnings: data.warnings || [] });
+        setStep(3);
+        return;
+      }
+      // Structured code only — backend prose is never rendered.
+      setBasicError(getApiErrorLabel(t, { code: data.errorCode || data.code }, 'basicErrGeneric'));
+    } catch {
+      setBasicError(t('basicErrGeneric'));
+    } finally {
+      setBasicVerifying(false);
+    }
+  };
 
   // ========== Step 1: Detect Login Fields ==========
   const handleDetectFields = async () => {
@@ -501,19 +570,17 @@ const AuthenticatedScanPanel = () => {
       const res = await fetch(`${API_BASE}/api/zap-auth/scan`, {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify({
-          targetUrl,
-          loginUrl,
-          tempSessionId
-        })
+        body: JSON.stringify(authType === 'basic'
+          ? { targetUrl: targetUrl.trim(), tempSessionId }
+          : { targetUrl, loginUrl, tempSessionId })
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        if (data.code === 'SESSION_EXPIRED') {
-          setError(t('sessionExpiredTestAgain'));
-          setStep(2);
+        if (data.code === 'SESSION_EXPIRED' || data.code === 'BASIC_ORIGIN_MISMATCH') {
+          setError(getApiErrorLabel(t, data, 'sessionExpiredTestAgain'));
+          setStep(authType === 'basic' ? 1 : 2);
           setScanning(false);
           return;
         }
@@ -544,6 +611,46 @@ const AuthenticatedScanPanel = () => {
       setScanning(false);
     }
   };
+
+  // ========== Scan Stopped ==========
+  // One place that takes the page out of the scanning view once a scan is stopped —
+  // by this tab's Stop button, by another tab (WebSocket), or seen by the polling
+  // fallback. It used to only clear `scanning`, leaving step 4 on screen: the
+  // "Scanning in progress" header, a live Stop button, the progress bar and the
+  // loading cards, as if nothing had happened.
+  //
+  // Returns to step 1 with the target and sign-in settings kept, so the customer can
+  // start again. The one-time test session was spent by the scan, so the sign-in test
+  // must be run again; the Basic password is cleared rather than kept in memory.
+  const finishStoppedScan = useCallback(() => {
+    stopPollingRef.current = true;
+    if (wsWatchdogRef.current) {
+      clearTimeout(wsWatchdogRef.current);
+      wsWatchdogRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    isPollingRef.current = false;
+    if (activeScanIdRef.current) {
+      removeScanListener(activeScanIdRef.current);
+    }
+    activeScanIdRef.current = null;
+    wsListeningRef.current = false;
+    localStorage.removeItem('activeAuthScan');
+
+    setScanning(false);
+    setStopping(false);
+    setScanId(null);
+    setScanProgress(0);
+    setReport(null);
+    setTestResult(null);
+    setTempSessionId(null);
+    setBasicPassword('');
+    setStep(1);
+    setError(t('scanWasStopped'));
+  }, [removeScanListener, t]);
 
   // ========== Apply WebSocket Update Data ==========
   const applyUpdateData = useCallback((data) => {
@@ -598,21 +705,15 @@ const AuthenticatedScanPanel = () => {
       return;
     }
 
-    if (status === 'stopped') {
-      setScanning(false);
-      wsListeningRef.current = false;
-      if (wsWatchdogRef.current) {
-        clearTimeout(wsWatchdogRef.current);
-        wsWatchdogRef.current = null;
-      }
-      localStorage.removeItem('activeAuthScan');
+    if (status === 'stopped' || status === 'cancelled') {
+      finishStoppedScan();
       return;
     }
 
     // Partial updates
     setReport(prev => ({ ...(prev || {}), ...data, isPartial: true }));
     if (data.progress != null) setScanProgress(data.progress);
-  }, [t, setHasReport]);
+  }, [t, setHasReport, finishStoppedScan]);
 
   // ========== WebSocket Listener ==========
   const startWebSocketListener = useCallback((scanId) => {
@@ -670,6 +771,13 @@ const AuthenticatedScanPanel = () => {
         // Prevent updating if stopped/cancelled while requesting
         if (stopPollingRef.current) return;
 
+        // Stopped elsewhere (another tab, or before a page refresh). Without this the
+        // fallback polled a stopped scan every 15 s forever, showing it as running.
+        if (data.status === 'stopped' || data.status === 'cancelled') {
+          finishStoppedScan();
+          return;
+        }
+
         setScanProgress(data.progress || 0);
 
         // Progressive loading: update report with all scan data
@@ -705,7 +813,7 @@ const AuthenticatedScanPanel = () => {
     // Poll immediately, then every 15 seconds (reduced frequency fallback since WS is preferred)
     poll();
     pollingIntervalRef.current = setInterval(poll, 15000);
-  }, [t]);
+  }, [t, finishStoppedScan]);
 
   // Keep pollRef pointed at the latest closure
   pollRef.current = startPolling;
@@ -770,8 +878,13 @@ const AuthenticatedScanPanel = () => {
   }, [pdfDownloading, report, scanId, t]);
 
   // ========== Stop Scan ==========
+  // The server answers once the scan's scanner has halted and released its resources
+  // (it waits up to ~30 s for that), so this deadline is generous.
+  const STOP_REQUEST_TIMEOUT_MS = 60000;
+
   const handleStopScan = async () => {
-    if (!scanId) return;
+    const idToStop = scanId || activeScanIdRef.current;
+    if (!idToStop || stopping) return;
 
     const token = localStorage.getItem('token');
     if (!token) {
@@ -779,33 +892,54 @@ const AuthenticatedScanPanel = () => {
       return;
     }
 
+    setStopping(true);
+    setError(null);
+
+    // Stop listening first, so a progress event arriving mid-request cannot repaint
+    // the scan as running. Restored below if the stop does not go through.
+    stopPollingRef.current = true;
+    if (wsWatchdogRef.current) {
+      clearTimeout(wsWatchdogRef.current);
+      wsWatchdogRef.current = null;
+    }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    isPollingRef.current = false;
+    removeScanListener(idToStop);
+    wsListeningRef.current = false;
+
+    const deadline = requestTimeout(STOP_REQUEST_TIMEOUT_MS);
+    let res = null;
+    let data = null;
     try {
-      stopPollingRef.current = true;
-      if (wsWatchdogRef.current) {
-        clearTimeout(wsWatchdogRef.current);
-        wsWatchdogRef.current = null;
-      }
-      if (activeScanIdRef.current) {
-        removeScanListener(activeScanIdRef.current);
-      }
-      wsListeningRef.current = false;
-
-      await fetch(`${API_BASE}/api/zap-auth/stop/${scanId}`, {
+      res = await fetch(`${API_BASE}/api/zap-auth/stop/${idToStop}`, {
         method: 'POST',
-        headers: getHeaders()
+        headers: getHeaders(),
+        signal: deadline.signal
       });
-
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-      }
-      isPollingRef.current = false;
-
-      localStorage.removeItem('activeAuthScan');
-      setError(t('scanWasStopped'));
-      setScanning(false);
+      data = await res.json().catch(() => null);
     } catch (err) {
       console.error('Failed to stop scan:', err);
+    } finally {
+      deadline.clear();
     }
+
+    // Stopped (or already over, or gone — nothing left to stop either way).
+    if (res && (res.ok || res.status === 404)) {
+      finishStoppedScan();
+      return;
+    }
+
+    // Not confirmed. The scan may still be running, so say so and resume watching it
+    // rather than showing it as stopped: if the stop did land server-side, the next
+    // status read (WebSocket or the polling fallback) reports 'stopped' and the page
+    // leaves the scanning view then.
+    setStopping(false);
+    setError(t('failedToStopScanWithReason', { reason: getApiErrorLabel(t, data, 'errScanStopFailed') }));
+    stopPollingRef.current = false;
+    startWebSocketListener(idToStop);
   };
 
   // ========== New Scan ==========
@@ -814,6 +948,13 @@ const AuthenticatedScanPanel = () => {
     setStep(1);
     setTargetUrl('');
     setLoginUrl('');
+    setAuthType('form');
+    setBasicUsername('');
+    setBasicPassword('');
+    setShowBasicPassword(false);
+    setBasicRealm('');
+    setBasicVerifyUrl('');
+    setBasicError(null);
     setDetectedFields(null);
     setDetectionError(null);
     setSelectedFields([]);
@@ -825,6 +966,7 @@ const AuthenticatedScanPanel = () => {
     setScanId(null);
     setScanProgress(0);
     setScanning(false);
+    setStopping(false);
     setReport(null);
     setError(null);
 
@@ -919,6 +1061,39 @@ const AuthenticatedScanPanel = () => {
               </ul>
             </div>
 
+            <fieldset className="auth-method-options">
+              <legend>{t('authMethodLabel')}</legend>
+              <label className={`auth-method-option ${authType === 'form' ? 'selected' : ''}`}>
+                <input
+                  type="radio"
+                  name="authType"
+                  value="form"
+                  checked={authType === 'form'}
+                  onChange={() => { setAuthType('form'); setBasicError(null); }}
+                />
+                <span className="auth-method-option__text">
+                  <strong>{t('authMethodForm')}</strong>
+                  <span className="help-text">{t('authMethodFormHint')}</span>
+                </span>
+              </label>
+              <label className={`auth-method-option ${authType === 'basic' ? 'selected' : ''} ${pendingSchedule ? 'disabled' : ''}`}>
+                <input
+                  type="radio"
+                  name="authType"
+                  value="basic"
+                  checked={authType === 'basic'}
+                  disabled={!!pendingSchedule}
+                  onChange={() => { setAuthType('basic'); setDetectionError(null); }}
+                />
+                <span className="auth-method-option__text">
+                  <strong>{t('authMethodBasic')}</strong>
+                  <span className="help-text">
+                    {pendingSchedule ? t('basicScheduleUnavailable') : t('authMethodBasicHint')}
+                  </span>
+                </span>
+              </label>
+            </fieldset>
+
             <div className="form-group">
               <label htmlFor="targetUrl">{t('targetWebsiteUrl')}</label>
               <input
@@ -932,6 +1107,80 @@ const AuthenticatedScanPanel = () => {
               <span className="help-text">{t('targetUrlHelp')}</span>
             </div>
 
+            {authType === 'basic' && (
+              <>
+                <div className="form-group">
+                  <label htmlFor="basicUsername">{t('basicUsername')}</label>
+                  <input
+                    id="basicUsername"
+                    type="text"
+                    value={basicUsername}
+                    onChange={(e) => setBasicUsername(e.target.value)}
+                    className="url-input"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="basicPassword">{t('basicPassword')}</label>
+                  <div className="password-wrapper">
+                    <input
+                      id="basicPassword"
+                      type={showBasicPassword ? 'text' : 'password'}
+                      value={basicPassword}
+                      onChange={(e) => setBasicPassword(e.target.value)}
+                      className="url-input"
+                      autoComplete="new-password"
+                    />
+                    <EyeIcon isVisible={showBasicPassword} onClick={() => setShowBasicPassword(v => !v)} />
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="basicRealm">{t('basicRealmOptional')}</label>
+                  <input
+                    id="basicRealm"
+                    type="text"
+                    value={basicRealm}
+                    onChange={(e) => setBasicRealm(e.target.value)}
+                    className="url-input"
+                    autoComplete="off"
+                  />
+                  <span className="help-text">{t('basicRealmHint')}</span>
+                </div>
+                <div className="form-group">
+                  <label htmlFor="basicVerifyUrl">{t('basicVerifyUrlOptional')}</label>
+                  <input
+                    id="basicVerifyUrl"
+                    type="text"
+                    value={basicVerifyUrl}
+                    onChange={(e) => setBasicVerifyUrl(e.target.value)}
+                    placeholder="https://example.com/admin/"
+                    className="url-input"
+                  />
+                  <span className="help-text">{t('basicVerifyUrlHint')}</span>
+                </div>
+                <p className="field-hint">🔒 {t('basicHttpsOnlyNote')}</p>
+
+                <div className="step-actions">
+                  <button
+                    className="primary-btn"
+                    onClick={handleTestBasic}
+                    disabled={!targetUrl || !basicUsername || !basicPassword || basicVerifying || !!pendingSchedule}
+                  >
+                    {basicVerifying && <span className="spinner" />}
+                    <span>{basicVerifying ? t('verifyingCredentials') : t('verifyCredentials')}</span>
+                  </button>
+                </div>
+
+                {basicError && (
+                  <div className="detection-error">
+                    <strong>{t('detectionErrorLabel')}</strong> {basicError}
+                  </div>
+                )}
+              </>
+            )}
+
+            {authType === 'form' && (<>
             <div className="form-group">
               <label htmlFor="loginUrl">{t('loginPageUrl')}</label>
               <input
@@ -961,6 +1210,7 @@ const AuthenticatedScanPanel = () => {
                 <strong>{t('detectionErrorLabel')}</strong> {detectionError}
               </div>
             )}
+            </>)}
           </div>
         )}
 
@@ -1047,13 +1297,10 @@ const AuthenticatedScanPanel = () => {
                         className="url-input"
                         autoComplete="off"
                       />
-                      <button
-                        type="button"
-                        className="toggle-password"
+                      <EyeIcon
+                        isVisible={Boolean(showPasswords[field.selector])}
                         onClick={() => togglePasswordVisibility(field.selector)}
-                      >
-                        {showPasswords[field.selector] ? t('hide') : t('show')}
-                      </button>
+                      />
                     </div>
                   ) : (
                     <input
@@ -1167,24 +1414,39 @@ const AuthenticatedScanPanel = () => {
               </div>
             )}
 
+            {authType === 'basic' && testResult?.warnings?.includes('BASIC_REALM_MISMATCH') && (
+              <div className="test-result test-caution">
+                <p>{t('basicRealmMismatchWarning')}</p>
+              </div>
+            )}
+
             {/* Scan Summary */}
             <div className="scan-summary">
               <div className="summary-item">
                 <span className="summary-label">{t('targetLabel')}</span>
                 <span className="summary-value">{targetUrl}</span>
               </div>
-              <div className="summary-item">
-                <span className="summary-label">{t('loginUrlLabel')}</span>
-                <span className="summary-value">{loginUrl}</span>
-              </div>
-              <div className="summary-item">
-                <span className="summary-label">{t('fieldsLabel')}</span>
-                <span className="summary-value">{selectedFields.length} {t('credentialFields')}</span>
-              </div>
+              {authType === 'basic' ? (
+                <div className="summary-item">
+                  <span className="summary-label">{t('authMethodLabel')}</span>
+                  <span className="summary-value">{t('authMethodBasic')}</span>
+                </div>
+              ) : (
+                <>
+                  <div className="summary-item">
+                    <span className="summary-label">{t('loginUrlLabel')}</span>
+                    <span className="summary-value">{loginUrl}</span>
+                  </div>
+                  <div className="summary-item">
+                    <span className="summary-label">{t('fieldsLabel')}</span>
+                    <span className="summary-value">{selectedFields.length} {t('credentialFields')}</span>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="step-actions">
-              <button className="secondary-btn" onClick={() => setStep(2)}>
+              <button className="secondary-btn" onClick={() => setStep(authType === 'basic' ? 1 : 2)}>
                 {t('back')}
               </button>
               <button
@@ -1212,7 +1474,7 @@ const AuthenticatedScanPanel = () => {
                 </p>
               </div>
               {step === 4 && (
-                <button type="button" onClick={handleStopScan} className="stop-button">
+                <button type="button" onClick={handleStopScan} className="stop-button" disabled={stopping} aria-busy={stopping}>
                   <span className="button-text">{t('stopScan')}</span>
                 </button>
               )}
@@ -1230,6 +1492,13 @@ const AuthenticatedScanPanel = () => {
               </div>
             )}
 
+            {/* HTTP Basic: which checks ran signed in, and which did not. */}
+            {(step === 4 || step === 5) && (report?.authMethod === 'basic' || (step === 4 && authType === 'basic')) && (
+              <div className="test-result test-caution auth-scope-note">
+                <p>{t('basicScopeNotice')}</p>
+              </div>
+            )}
+
             {/* Progress Bar (only during scanning) */}
             {step === 4 && (
               <div className="scan-progress-section">
@@ -1240,8 +1509,9 @@ const AuthenticatedScanPanel = () => {
                   <span className="progress-percent">{scanProgress}%</span>
                   <span className="progress-phase">
                     {/* Neutral step progress — never leaks the backend `phase`
-                        (spidering / ajax_spider / active_scan / ...) or engine names. */}
-                    {getScanStatusLine(report, t)}
+                        (spidering / ajax_spider / active_scan / ...) or engine names.
+                        While a stop is in flight it says so, as the public scan page does. */}
+                    {stopping ? t('stoppingScan') : getScanStatusLine(report, t)}
                   </span>
                 </div>
                 <p style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: theme === 'light' ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.5)', textAlign: 'center', letterSpacing: '0.01em' }}>

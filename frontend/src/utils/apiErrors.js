@@ -58,6 +58,28 @@ const CODE_KEYS = {
 
   // ── Authenticated scanning (routes/zapAuthRoutes.js) ───────────────────────
   SESSION_EXPIRED: 'sessionExpiredTestAgain',
+  URL_HAS_CREDENTIALS: 'errUrlHasCredentials',
+  SCAN_NOT_FOUND: 'errScanNotFound',
+  SCAN_STOP_FAILED: 'errScanStopFailed',
+
+  // ── HTTP Basic authentication (services/basicAuthProbe.js) ─────────────────
+  BASIC_INVALID_CREDENTIALS: 'basicErrInvalidCredentials',
+  BASIC_NOT_REQUIRED: 'basicErrNotRequired',
+  BASIC_REQUIRES_HTTPS: 'basicErrRequiresHttps',
+  BASIC_SCHEME_UNSUPPORTED: 'basicErrSchemeUnsupported',
+  BASIC_TARGET_FORBIDDEN: 'basicErrTargetForbidden',
+  BASIC_ACCESS_DENIED: 'basicErrAccessDenied',
+  BASIC_CROSS_ORIGIN_REDIRECT: 'basicErrCrossOriginRedirect',
+  BASIC_TOO_MANY_REDIRECTS: 'basicErrTooManyRedirects',
+  BASIC_TARGET_UNREACHABLE: 'basicErrUnreachable',
+  BASIC_UNEXPECTED_STATUS: 'basicErrUnexpectedStatus',
+  BASIC_INVALID_INPUT: 'basicErrInvalidInput',
+  BASIC_INVALID_URL: 'basicErrInvalidUrl',
+  BASIC_VERIFY_URL_OFF_ORIGIN: 'basicErrVerifyUrlOffOrigin',
+  BASIC_ORIGIN_MISMATCH: 'basicErrOriginMismatch',
+  BASIC_VERIFY_FAILED: 'basicErrGeneric',
+  BASIC_AUTH_MANUAL_ONLY: 'basicScheduleUnavailable',
+  BLOCKED_TARGET: 'basicErrBlockedTarget',
 
   // ── Organizations & invites ────────────────────────────────────────────────
   ORG_NOT_FOUND: 'errOrgNotFound',

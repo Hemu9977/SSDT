@@ -226,26 +226,37 @@
   }
 
   // ========== Password Wrapper ==========
+  // Show/hide eye inside the field, drawn as on the sign-in and sign-up pages
+  // (components/EyeIcon.jsx + .password-toggle in Auth.scss). Repeated here because
+  // Auth.scss is imported only by those pages, so it may not be loaded on this one.
   .password-wrapper {
     position: relative;
 
-    .toggle-password {
+    .url-input {
+      padding-right: 2.75rem; // keep typed text clear of the eye
+    }
+
+    .password-toggle {
       position: absolute;
-      right: 12px;
+      right: 0.75rem;
       top: 50%;
       transform: translateY(-50%);
-      background: var(--accent);
-      border: none;
-      color: var(--background);
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
       cursor: pointer;
-      font-size: 0.85rem;
-      font-weight: 600;
-      transition: all 0.2s;
+      color: var(--foreground-darker);
+      font-size: 1.2rem;
+      transition: color 0.2s;
 
       &:hover {
-        background: var(--accent-light);
+        color: var(--accent);
+      }
+
+      svg {
+        width: 20px;
+        height: 20px;
+        fill: var(--accent);
+        stroke: var(--accent);
       }
     }
   }
@@ -575,5 +586,47 @@
     .step-actions > button {
       flex: 1 1 100%;
     }
+  }
+}
+
+// ── Authentication method choice (login form / HTTP Basic) ─────────────────────
+.auth-scan-panel .auth-method-options {
+  border: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+
+  legend {
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    padding: 0;
+  }
+
+  .auth-method-option {
+    display: flex;
+    gap: 0.65rem;
+    align-items: flex-start;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border-color, rgba(128, 128, 128, 0.35));
+    border-radius: 8px;
+    background: var(--panel-bg);
+    cursor: pointer;
+
+    input { margin-top: 0.2rem; accent-color: var(--accent); }
+
+    &.selected {
+      border-color: var(--accent);
+      background: linear-gradient(var(--accent-dim), var(--accent-dim)) var(--panel-bg);
+    }
+
+    &.disabled { cursor: not-allowed; opacity: 0.7; }
+  }
+
+  .auth-method-option__text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
   }
 }
