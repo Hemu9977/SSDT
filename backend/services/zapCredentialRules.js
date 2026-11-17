@@ -26,6 +26,9 @@
 const SCANNER_INITIATORS = '2,3,6,10';
 const COOKIE_RULE = 'auth_cookie';
 const BASIC_RULE_PREFIX = 'auth_basic_';
+// Form logins whose session is a Bearer token the app sends to its API (kept in
+// localStorage, not a cookie). One rule per API origin, named per scan.
+const BEARER_RULE_PREFIX = 'auth_bearer_';
 const INSECURE_AUTH_PSCAN_RULE = '10105';
 
 const FORM = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
@@ -72,12 +75,104 @@ async function applyBasicAuthRule(zapClient, { scanId, origin, authorization }) 
   });
 }
 
+/**
+ * Java regex matching exactly one origin (http or https — whichever the app
+ * itself used to send the token), any path. Same whole-URL shape as
+ * `originRuleRegex`; never matches another scheme, port, host or subdomain.
+ * @param {string} origin
+ */
+function exactOriginRegex(origin) {
+  const u = new URL(origin);
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('Only http(s) origins can be scoped');
+  const scheme = u.protocol.slice(0, -1);
+  const defaultPort = scheme === 'https' ? '443' : '80';
+  const port = u.port || defaultPort;
+  return `(?i)^${scheme}://${escapeJavaRegex(u.hostname)}(:${port})${u.port ? '' : '?'}(/.*)?$`;
+}
+
+// Path fragments of session-ending endpoints, as regex source shared with the
+// JS side (utils/bearerApiScope.js) so ZAP and the seed filter agree.
+const { LOGOUT_PATH_FRAGMENTS } = require('../utils/bearerApiScope');
+const LOGOUT_PATH_ALTERNATION = `(?:${LOGOUT_PATH_FRAGMENTS.join('|')})`;
+
+/**
+ * Java regex for the Bearer Replacer rule: exactly one origin, any path EXCEPT a
+ * logout-shaped one. Whatever a scanner replays — a crawled link, an attack on a
+ * seeded endpoint, a call the AJAX spider's browser makes — the token is never
+ * attached to a request that would end the session. The negative lookahead sits
+ * after the optional port, so `:443/logout` cannot slip past by backtracking.
+ * @param {string} origin
+ */
+function bearerRuleRegex(origin) {
+  const u = new URL(origin);
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('Only http(s) origins can be scoped');
+  const scheme = u.protocol.slice(0, -1);
+  const port = u.port || (scheme === 'https' ? '443' : '80');
+  return `(?i)^${scheme}://${escapeJavaRegex(u.hostname)}(:${port})${u.port ? '' : '?'}` +
+    `(?![/][^?#]*${LOGOUT_PATH_ALTERNATION})(/.*)?$`;
+}
+
+/**
+ * Context include regexes for the scanned site: its host and its subdomains,
+ * on a label boundary. The old `https?://host.*` also matched
+ * `https://host.evil.net/…`, and `https?://.*\.host.*` matched
+ * `https://x.host.evil.net/…` — both put a different domain in scope.
+ * ZAP matches context regexes against the whole URL.
+ * @param {string} hostname
+ */
+function siteScopeRegexes(hostname) {
+  const host = escapeJavaRegex(String(hostname).toLowerCase().replace(/^\[|\]$/g, ''));
+  const rest = '(?::[0-9]+)?(?:[/?#].*)?$';
+  return [
+    `(?i)^https?://${host}${rest}`,
+    `(?i)^https?://(?:[a-z0-9_-]+\\.)+${host}${rest}`
+  ];
+}
+
+/**
+ * Context excludes for an API origin's own context: every logout-shaped path
+ * (case-insensitive, unlike the site context's legacy `.*logout.*` list).
+ * @param {string} origin
+ */
+function apiContextExcludeRegexes(origin) {
+  const u = new URL(origin);
+  const scheme = u.protocol.slice(0, -1);
+  const port = u.port || (scheme === 'https' ? '443' : '80');
+  return [
+    `(?i)^${scheme}://${escapeJavaRegex(u.hostname)}(:${port})${u.port ? '' : '?'}/[^?#]*${LOGOUT_PATH_ALTERNATION}.*$`
+  ];
+}
+
+/** Per-scan, per-origin rule name: ZAP rejects duplicate descriptions. */
+function bearerRuleDescription(scanId, index) {
+  return `${BEARER_RULE_PREFIX}${String(scanId).replace(/[^A-Za-z0-9_-]/g, '_')}_${Number(index) || 0}`;
+}
+
+/**
+ * Inject the app's own `Authorization: Bearer …` header for one API origin,
+ * scanner traffic only, never on a logout-shaped path. The value is passed in a
+ * POST body and is never logged.
+ */
+async function applyBearerRule(zapClient, { scanId, index, origin, authorization }) {
+  await zapPost(zapClient, '/JSON/replacer/action/addRule/', {
+    description: bearerRuleDescription(scanId, index),
+    enabled: 'true',
+    matchType: 'REQ_HEADER',
+    matchRegex: 'false',
+    matchString: 'Authorization',
+    replacement: authorization,
+    initiators: SCANNER_INITIATORS,
+    url: bearerRuleRegex(origin)
+  });
+}
+
 async function credentialRuleNames(zapClient) {
   const res = await zapClient.get('/JSON/replacer/view/rules/');
   const rules = (res && res.data && res.data.rules) || [];
   return rules
     .map(r => r && r.description)
-    .filter(d => typeof d === 'string' && (d === COOKIE_RULE || d.startsWith(BASIC_RULE_PREFIX)));
+    .filter(d => typeof d === 'string' &&
+      (d === COOKIE_RULE || d.startsWith(BASIC_RULE_PREFIX) || d.startsWith(BEARER_RULE_PREFIX)));
 }
 
 /**
@@ -114,7 +209,7 @@ async function setInsecureAuthRule(zapClient, enabled) {
  * Never throws: every step is attempted even if an earlier one failed.
  * @returns {Promise<{steps: Object<string, boolean>}>} which steps succeeded
  */
-async function revokeScanCredentials(zapClient, { scanId, contextName, reEnableInsecureAuthRule = false } = {}) {
+async function revokeScanCredentials(zapClient, { scanId, contextName, extraContextNames = [], reEnableInsecureAuthRule = false } = {}) {
   const steps = {};
   const attempt = async (name, fn) => { try { await fn(); steps[name] = true; } catch (_) { steps[name] = false; } };
   await attempt('stopActiveScans', () => zapClient.get('/JSON/ascan/action/stopAllScans/'));
@@ -128,6 +223,10 @@ async function revokeScanCredentials(zapClient, { scanId, contextName, reEnableI
   });
   if (contextName) {
     await attempt('removeContext', () => zapClient.get('/JSON/context/action/removeContext/', { params: { contextName } }));
+  }
+  // A token scan's per-API-host contexts (form login only; Basic passes none).
+  for (const [i, name] of (Array.isArray(extraContextNames) ? extraContextNames : []).entries()) {
+    if (name) await attempt(`removeApiContext${i}`, () => zapClient.get('/JSON/context/action/removeContext/', { params: { contextName: name } }));
   }
   await attempt('newSession', () => zapClient.get('/JSON/core/action/newSession/', {
     params: { name: `revoked-${scanId || Date.now()}`, overwrite: 'true' }, timeout: 30000
@@ -143,9 +242,10 @@ async function revokeScanCredentials(zapClient, { scanId, contextName, reEnableI
  * the application — that must be reported as an authentication failure.
  * @returns {Promise<{ok:number, unauthorized:number, forbidden:number, other:number, verdict:'authenticated'|'degraded'|'failed'|'unknown'}>}
  */
-async function measureAuthCoverage(zapClient, origin, { pageSize = 500, maxMessages = 20000 } = {}) {
+async function measureAuthCoverage(zapClient, origin, { pageSize = 500, maxMessages = 20000, anyScheme = false } = {}) {
   const counts = { ok: 0, unauthorized: 0, forbidden: 0, other: 0 };
-  const regex = originRuleRegex(origin);
+  // Basic is https-only by construction; a Bearer API origin is whatever the app used.
+  const regex = anyScheme ? exactOriginRegex(origin) : originRuleRegex(origin);
   try {
     for (let start = 0; start < maxMessages; start += pageSize) {
       const res = await zapClient.get('/JSON/search/view/urlsByUrlRegex/', { params: { regex, baseurl: origin, start, count: pageSize } });
@@ -192,10 +292,17 @@ module.exports = {
   SCANNER_INITIATORS,
   COOKIE_RULE,
   BASIC_RULE_PREFIX,
+  BEARER_RULE_PREFIX,
   INSECURE_AUTH_PSCAN_RULE,
   basicRuleDescription,
+  bearerRuleDescription,
   originRuleRegex,
+  exactOriginRegex,
+  bearerRuleRegex,
+  siteScopeRegexes,
+  apiContextExcludeRegexes,
   applyBasicAuthRule,
+  applyBearerRule,
   purgeCredentialRules,
   setInsecureAuthRule,
   revokeScanCredentials,

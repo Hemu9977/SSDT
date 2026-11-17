@@ -2,11 +2,23 @@
 
 const puppeteer = require('puppeteer');
 const { revealLoginPanel } = require('../utils/revealLoginPanel');
-const { deriveMarker, scoreLoginAttempt, markerPresentInBody } = require('../utils/loginSignals');
+const {
+  deriveMarker, scoreLoginAttempt, markerPresentInBody, cookieDelta, newErrorMessages, toLines
+} = require('../utils/loginSignals');
+const {
+  classifyLoginRequest, classifyLoginResponse, isFailureNotice, MAX_RESPONSE_JSON_BYTES, ANALYTICS_HOST_PATTERN
+} = require('../utils/loginRequestSignals');
+const {
+  eligibleBearerSessions, isSharedThirdPartyApiHost, isLogoutUrl, IDENTITY_PATH_PATTERN
+} = require('../utils/bearerApiScope');
 
 const NAV_TIMEOUT_MS = 30000;
 const SETTLE_AFTER_SUBMIT_MS = 2500;
 const ANONYMOUS_PROBE_TIMEOUT_MS = 20000;
+// How long to wait for the site to answer a login request we saw go out. Long
+// enough for a sleeping API to wake (a cold Render service measured 23 s), short
+// enough that the whole test stays inside the load balancer's 60 s idle timeout.
+const LOGIN_RESPONSE_WAIT_MS = 25000;
 
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -71,6 +83,27 @@ async function captureSnapshot(page, withContent = false) {
       if (errorTexts.size >= 50) break;
     }
 
+    // Toasts and status lines. Component libraries announce a sign-in result
+    // through ARIA live regions (`role="status"`, `aria-live`) with generated
+    // class names, which the error selectors above cannot see — and on many
+    // single-page apps such a toast is the *only* visible answer to a refused
+    // login. Kept apart from `errorTexts` on purpose: a "Welcome back" toast is
+    // a live region too, and must not count as an error.
+    const noticeTexts = new Set();
+    let noticeNodes = [];
+    try {
+      noticeNodes = document.querySelectorAll('[role="status"], [role="alert"], [aria-live]:not([aria-live="off"])');
+    } catch {
+      noticeNodes = [];
+    }
+    for (const el of noticeNodes) {
+      if (!isVisible(el)) continue;
+      if (el.querySelector('input, form, button, select, textarea')) continue;
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text && text.length <= 300) noticeTexts.add(text);
+      if (noticeTexts.size >= 50) break;
+    }
+
     // A single-page app can log you in without changing the URL or setting a
     // cookie. The login form disappearing is the signal that it worked, so it
     // has to be part of what we compare before and after.
@@ -83,6 +116,9 @@ async function captureSnapshot(page, withContent = false) {
 
     return {
       errorTexts: [...errorTexts],
+      // Raw innerText (line breaks kept), so a multi-line toast can be excluded
+      // line by line from the signed-in marker.
+      noticeTexts: [...noticeTexts],
       visiblePasswordFields,
       // Bucketed so a clock or a view counter ticking over does not read as a
       // page change, while a real re-render does.
@@ -124,9 +160,278 @@ function fingerprint(snapshot) {
     .join('|');
 
   const strong = [snapshot.url, cookiePart, snapshot.visiblePasswordFields].join('::');
-  const weak = [(snapshot.errorTexts || []).join('~'), snapshot.textLengthBucket].join('::');
+  const weak = [
+    (snapshot.errorTexts || []).join('~'),
+    noticeLines(snapshot.noticeTexts).join('~'),
+    snapshot.textLengthBucket
+  ].join('::');
 
   return { strong, weak: `${strong}::${weak}` };
+}
+
+/**
+ * Every line of every visible notice, whitespace-collapsed.
+ * @param {string[]} noticeTexts raw innerText of live regions
+ * @returns {string[]}
+ */
+function noticeLines(noticeTexts) {
+  const out = new Set();
+  for (const text of Array.isArray(noticeTexts) ? noticeTexts : []) {
+    const whole = String(text).replace(/\s+/g, ' ').trim();
+    if (whole) out.add(whole);
+    for (const line of toLines(String(text))) out.add(line);
+  }
+  return [...out];
+}
+
+/**
+ * Failure-worded notices or error messages that appeared since `before`.
+ * @returns {boolean}
+ */
+function newFailureNoticeShown(before, after) {
+  const fresh = (beforeList, afterList) => {
+    const seen = new Set(beforeList);
+    return afterList.filter(t => !seen.has(t));
+  };
+  const appeared = [
+    ...fresh(noticeLines(before && before.noticeTexts), noticeLines(after && after.noticeTexts)),
+    ...newErrorMessages(before && before.errorTexts, after && after.errorTexts)
+  ];
+  return appeared.some(isFailureNotice);
+}
+
+// At most this many API URLs per origin are kept to seed the scan, and only
+// GETs: a captured POST/PUT/DELETE (create user, delete member…) is never replayed,
+// and neither is a logout-shaped GET (utils/bearerApiScope.js).
+const MAX_BEARER_SEEDS = 50;
+
+/**
+ * Record the Bearer tokens the page's own code sends after the login.
+ *
+ * Single-page apps that keep their session in localStorage never set a cookie:
+ * their JavaScript adds `Authorization: Bearer <token>` to calls to their API,
+ * often on another origin. Watching what the app actually sends is the one
+ * reliable way to learn the session — no guessing at storage keys or token
+ * formats. A token only counts once the API has answered a request carrying it
+ * with 2xx, i.e. the site itself accepted it.
+ *
+ * Values are held in memory for the caller only; nothing here logs them.
+ *
+ * @param {import('puppeteer').Page} page
+ */
+function watchBearerTokens(page) {
+  const before = new Set(); // tokens the page used before the login: not a session
+  const origins = new Map(); // origin -> { authorization, accepted, seeds: Map(url -> status) }
+  let armed = false;
+
+  const bearerOf = (request) => {
+    const value = (request.headers() || {}).authorization;
+    return typeof value === 'string' && /^Bearer\s+\S{8,}/i.test(value) ? value.trim() : null;
+  };
+  const originOf = (url) => {
+    try {
+      const u = new URL(url);
+      // Shared third-party APIs (payments, identity, BaaS…) are never a session
+      // host the scan could use: not recorded at all.
+      if (!/^https?:$/.test(u.protocol) || ANALYTICS_HOST_PATTERN.test(u.hostname) ||
+          isSharedThirdPartyApiHost(u.hostname)) return null;
+      return u.origin;
+    } catch {
+      return null;
+    }
+  };
+
+  const onRequest = (request) => {
+    try {
+      const authorization = bearerOf(request);
+      if (!authorization) return;
+      if (!armed) { before.add(authorization); return; }
+    } catch {
+      // Not attributable.
+    }
+  };
+  const onResponse = (response) => {
+    try {
+      if (!armed) return;
+      const request = response.request();
+      const authorization = bearerOf(request);
+      if (!authorization || before.has(authorization)) return;
+      const origin = originOf(request.url());
+      if (!origin) return;
+      const status = response.status();
+      const entry = origins.get(origin) || { authorization, accepted: false, seeds: new Map() };
+      // A refreshed token replaces the old one: the newest is the live session.
+      if (entry.authorization !== authorization) {
+        entry.authorization = authorization;
+        entry.accepted = false;
+        entry.seeds = new Map();
+      }
+      if (status >= 200 && status < 300) {
+        entry.accepted = true;
+        if (request.method() === 'GET' && entry.seeds.size < MAX_BEARER_SEEDS && !isLogoutUrl(request.url())) {
+          entry.seeds.set(request.url(), status);
+        }
+      }
+      origins.set(origin, entry);
+    } catch {
+      // Not attributable.
+    }
+  };
+
+  page.on('request', onRequest);
+  page.on('response', onResponse);
+
+  return {
+    /** From now on, a newly used token is a candidate session. */
+    arm() { armed = true; },
+    stop() {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+    },
+    /**
+     * @returns {Array<{origin:string, authorization:string, seedUrls:string[], verifyUrl:string|null}>}
+     *   accepted tokens only. Contains the secret: in memory only, never logged.
+     */
+    sessions() {
+      const out = [];
+      for (const [origin, entry] of origins) {
+        if (!entry.accepted) continue;
+        const seedUrls = [...entry.seeds.keys()];
+        const verifyUrl = seedUrls.find(u => IDENTITY_PATH_PATTERN.test(new URL(u).pathname)) || seedUrls[0] || null;
+        out.push({ origin, authorization: entry.authorization, seedUrls, verifyUrl });
+      }
+      return out;
+    }
+  };
+}
+
+/**
+ * Is the element this selector resolves to a show/hide-password control?
+ *
+ * Same rule as `isPasswordToggle` in `loginDetectionService.js` (kept in step
+ * by hand: both run inside the page, where neither can import the other). A
+ * `type="submit"` or a button worded like a sign-in is never a toggle.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function targetIsPasswordToggle(page, selector) {
+  try {
+    return await page.evaluate((sel) => {
+      const btn = document.querySelector(sel);
+      if (!btn || btn.tagName !== 'BUTTON') return false;
+      const type = (btn.getAttribute('type') || '').toLowerCase();
+      if (type === 'submit') return false;
+      const text = (btn.textContent || '').trim();
+      if (/log\s?in|sign\s?in|submit|continue|ログイン|サインイン|送信/i.test(text)) return false;
+      const hints = [
+        btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.id,
+        typeof btn.className === 'string' ? btn.className : '', btn.getAttribute('data-testid'), text
+      ].filter(Boolean).join(' ');
+      if (/show|hide|reveal|visib|eye|peek|unmask|表示|非表示/i.test(hints)) return true;
+      const wrapper = btn.parentElement;
+      return !text && type === 'button' && Boolean(wrapper && wrapper.querySelector('input[type="password"]'));
+    }, selector);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Watch the page's requests for the login submission and its answer.
+ *
+ * Only a verdict is kept — which signal matched, the status code, and whether
+ * the site answered. The request body is inspected in memory to decide and is
+ * never stored, logged or returned; neither is the URL or the response body.
+ *
+ * @param {import('puppeteer').Page} page
+ * @param {string[]} credentialValues values the test typed
+ */
+function watchLoginRequest(page, credentialValues) {
+  const state = { detected: false, matchedBy: null, status: null, outcome: null, done: false };
+  let tracked = null;
+  let resolveDone;
+  const done = new Promise(resolve => { resolveDone = resolve; });
+  const finish = (outcome, status) => {
+    if (state.done) return;
+    state.done = true;
+    state.outcome = outcome;
+    state.status = status === undefined ? null : status;
+    resolveDone();
+  };
+
+  const onRequest = (request) => {
+    try {
+      // A redirect is a new request object; keep following the one we picked.
+      if (tracked && request.redirectChain().includes(tracked)) {
+        tracked = request;
+        return;
+      }
+      if (state.detected) return;
+      const headers = request.headers() || {};
+      let postData;
+      try { postData = request.postData(); } catch { postData = undefined; }
+      const verdict = classifyLoginRequest({
+        method: request.method(),
+        url: request.url(),
+        resourceType: request.resourceType(),
+        contentType: headers['content-type'],
+        postData,
+        credentialValues
+      });
+      if (verdict.isLogin) {
+        tracked = request;
+        state.detected = true;
+        state.matchedBy = verdict.matchedBy;
+      }
+    } catch {
+      // A request we cannot inspect is not one we can attribute.
+    }
+  };
+
+  const onFinished = async (request) => {
+    if (request !== tracked || state.done) return;
+    const response = request.response();
+    const status = response ? response.status() : null;
+    let json = null;
+    try {
+      const type = String((response && response.headers()['content-type']) || '').toLowerCase();
+      if (response && type.includes('json')) {
+        const text = await response.text();
+        if (text.length <= MAX_RESPONSE_JSON_BYTES) json = JSON.parse(text);
+      }
+    } catch {
+      json = null;
+    }
+    finish(classifyLoginResponse({ status, json }), status);
+  };
+
+  const onFailed = (request) => {
+    if (request !== tracked || state.done) return;
+    finish('network_error', null);
+  };
+
+  page.on('request', onRequest);
+  page.on('requestfinished', onFinished);
+  page.on('requestfailed', onFailed);
+
+  return {
+    state,
+    done,
+    stop() {
+      page.off('request', onRequest);
+      page.off('requestfinished', onFinished);
+      page.off('requestfailed', onFailed);
+    },
+    /** Safe to log: no URL, body, header or value. */
+    summary() {
+      return {
+        detected: state.detected,
+        matchedBy: state.matchedBy,
+        status: state.status,
+        outcome: state.detected ? (state.done ? state.outcome : 'timeout') : null
+      };
+    }
+  };
 }
 
 /**
@@ -138,25 +443,43 @@ function fingerprint(snapshot) {
  * throw. It quietly succeeds at doing nothing, and the login was then reported
  * as failed. So we compare the page before and after instead.
  *
- * @returns {Promise<{strategy:string, changed:boolean}>}
+ * The page is not the only witness. Every attempt also watches the network for
+ * the login request itself (`watchLoginRequest`). Once one has gone out, no
+ * further strategy runs — pressing Enter or clicking a runner-up would send the
+ * customer's password again, and repeated failed sign-ins are how accounts get
+ * locked. Instead we wait (up to LOGIN_RESPONSE_WAIT_MS) for the site's answer,
+ * so that a refused login and an API that is slow to wake are told apart from a
+ * click that sent nothing.
+ *
+ * @param {import('puppeteer').Page} page
+ * @param {{selector:string}|null} submitButton
+ * @param {Array} alternates
+ * @param {{credentialValues?:string[], responseWaitMs?:number}} [options]
+ * @returns {Promise<{strategy:string, changed:boolean, loginRequest:Object}>}
  */
-async function submitLogin(page, submitButton, alternates) {
+async function submitLogin(page, submitButton, alternates, options = {}) {
+  const credentialValues = Array.isArray(options.credentialValues) ? options.credentialValues : [];
+  const responseWaitMs = Number.isFinite(options.responseWaitMs) ? options.responseWaitMs : LOGIN_RESPONSE_WAIT_MS;
+  const noRequest = { detected: false, matchedBy: null, status: null, outcome: null };
+
   // Capturing runs script in the page, so a navigation in flight can tear it
   // down mid-call. A failed capture means the page moved, which is itself the
   // change we are looking for.
-  const safeFingerprint = async () => {
+  const safeSnapshot = async () => {
     try {
-      return fingerprint(await captureSnapshot(page));
+      return await captureSnapshot(page);
     } catch {
       return null;
     }
   };
 
-  const before = await safeFingerprint();
+  const beforeSnapshot = await safeSnapshot();
   // If the baseline could not be captured we cannot compare, so accept the
   // first attempt and let the scoring below make the real judgement — it
   // reports "no observable change" on its own evidence anyway.
-  if (before === null) {
+  if (beforeSnapshot === null) {
+    const watcher = watchLoginRequest(page, credentialValues);
+    const startedAt = Date.now();
     try {
       if (submitButton && submitButton.selector) {
         await page.click(submitButton.selector);
@@ -167,7 +490,12 @@ async function submitLogin(page, submitButton, alternates) {
       // Fall through; scoring will see that nothing moved.
     }
     await wait(SETTLE_AFTER_SUBMIT_MS);
-    return { strategy: 'unverified', changed: true };
+    if (watcher.state.detected && !watcher.state.done) {
+      const remaining = responseWaitMs - (Date.now() - startedAt);
+      if (remaining > 0) await Promise.race([watcher.done, wait(remaining)]);
+    }
+    watcher.stop();
+    return { strategy: 'unverified', changed: true, loginRequest: watcher.summary() };
   }
 
   const attempts = [];
@@ -185,7 +513,7 @@ async function submitLogin(page, submitButton, alternates) {
   // Remembered in case no attempt produces a strong change: a weak one is still
   // better evidence than nothing, and the scoring stage judges it properly.
   let weakHit = null;
-  let baseline = before;
+  let baseline = beforeSnapshot;
 
   for (const [index, attempt] of attempts.entries()) {
     if (index > 0) {
@@ -200,7 +528,7 @@ async function submitLogin(page, submitButton, alternates) {
       await wait(300);
       // Re-measure, so each attempt is judged against the state it started
       // from rather than against a page two clicks ago.
-      const refreshed = await safeFingerprint();
+      const refreshed = await safeSnapshot();
       if (refreshed) baseline = refreshed;
     }
 
@@ -210,26 +538,67 @@ async function submitLogin(page, submitButton, alternates) {
     const navTimeout = index === 0 ? 15000 : 8000;
     const settle = index === 0 ? SETTLE_AFTER_SUBMIT_MS : 1500;
 
+    // A selector saved by older detection (`form:nth-of-type(1) button`, still
+    // stored in schedules) can resolve to the show/hide-password control. A
+    // click there only unmasks the password, so skip it and let the next
+    // strategy (Enter) submit the form.
+    if (attempt.selector && await targetIsPasswordToggle(page, attempt.selector)) {
+      continue;
+    }
+
+    const watcher = watchLoginRequest(page, credentialValues);
+    const startedAt = Date.now();
+    const navigation = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: navTimeout }).catch(() => null);
+
     try {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: navTimeout }).catch(() => null),
-        attempt.selector ? page.click(attempt.selector) : page.keyboard.press('Enter')
-      ]);
+      await (attempt.selector ? page.click(attempt.selector) : page.keyboard.press('Enter'));
     } catch {
+      watcher.stop();
       continue; // Element vanished or was not clickable; try the next approach.
     }
 
-    await wait(settle);
+    // A navigation, or the login request being answered — whichever is first.
+    // A single-page app never navigates, and waiting out the full navigation
+    // budget after the site has already said no only makes the customer wait.
+    await Promise.race([navigation, watcher.done]);
 
-    const after = await safeFingerprint();
-    if (after === null) {
+    if (watcher.state.detected) {
+      // The login went out. Wait for the answer rather than trying anything
+      // else: a sleeping API can take tens of seconds to wake.
+      if (!watcher.state.done) {
+        const remaining = responseWaitMs - (Date.now() - startedAt);
+        if (remaining > 0) await Promise.race([watcher.done, wait(remaining)]);
+      }
+      if (watcher.state.done && watcher.state.outcome === 'ok') {
+        // An accepted login is usually followed by a navigation; let it land
+        // before the page is read.
+        await Promise.race([navigation, wait(settle)]);
+      }
+      await wait(settle);
+      watcher.stop();
+      return { strategy: attempt.strategy, changed: true, loginRequest: watcher.summary() };
+    }
+
+    await wait(settle);
+    watcher.stop();
+
+    const afterSnapshot = await safeSnapshot();
+    if (afterSnapshot === null) {
       // The page went away underneath us, which only a real navigation does.
-      return { strategy: attempt.strategy, changed: true };
+      return { strategy: attempt.strategy, changed: true, loginRequest: noRequest };
     }
-    if (after.strong !== baseline.strong) {
-      return { strategy: attempt.strategy, changed: true };
+    const after = fingerprint(afterSnapshot);
+    const base = fingerprint(baseline);
+    if (after.strong !== base.strong) {
+      return { strategy: attempt.strategy, changed: true, loginRequest: noRequest };
     }
-    if (after.weak !== baseline.weak && !weakHit) {
+    if (newFailureNoticeShown(baseline, afterSnapshot)) {
+      // The site answered with a refusal we could not attribute to a request
+      // (a WebSocket, a body the browser did not expose). Trying again would
+      // only send the password again.
+      return { strategy: attempt.strategy, changed: true, loginRequest: noRequest };
+    }
+    if (after.weak !== base.weak && !weakHit) {
       // Something moved on the page but nothing that a submission would move —
       // most likely we opened a menu. Keep trying the other candidates.
       weakHit = attempt.strategy;
@@ -237,8 +606,8 @@ async function submitLogin(page, submitButton, alternates) {
   }
 
   return weakHit
-    ? { strategy: weakHit, changed: true }
-    : { strategy: 'none', changed: false };
+    ? { strategy: weakHit, changed: true, loginRequest: noRequest }
+    : { strategy: 'none', changed: false, loginRequest: noRequest };
 }
 
 /**
@@ -275,7 +644,7 @@ async function fetchAnonymousText(browser, url) {
   }
 }
 
-function failure(errorCode, errorMessage, evidence) {
+function failure(errorCode, errorMessage, evidence, extra = {}) {
   return {
     success: false,
     authenticated: false,
@@ -286,7 +655,9 @@ function failure(errorCode, errorMessage, evidence) {
     cookies: [],
     marker: null,
     markerCheckableInBody: false,
-    evidenceCodes: [],
+    evidenceCodes: extra.evidenceCodes || [],
+    submitStrategy: extra.submitStrategy || null,
+    loginRequest: extra.loginRequest || null,
     evidence
   };
 }
@@ -300,10 +671,19 @@ function failure(errorCode, errorMessage, evidence) {
  * @param {Object} [options.submitButton]
  * @param {Array}  [options.submitAlternates] ranked runners-up from detection
  * @param {string} [options.expectedMarker] customer-supplied signed-in text
- * @returns {Promise<Object>}
+ * @param {number} [options.responseWaitMs] how long to wait for the site to
+ *   answer a login request (default LOGIN_RESPONSE_WAIT_MS; tests shorten it)
+ * @returns {Promise<Object>} `errorCode` is one of the codes the UI maps; the
+ *   new `loginRequest` summary carries no URL, body, header or value.
  */
 async function testLogin(options) {
-  const { loginUrl, credentials, submitButton, submitAlternates, expectedMarker } = options;
+  const { loginUrl, credentials, submitAlternates, expectedMarker, responseWaitMs } = options;
+  // A bare selector string is a submit button too. The scan form's dropdown
+  // used to send one, and reading `.selector` off a string silently dropped
+  // the customer's choice: only Enter was ever pressed.
+  const submitButton = typeof options.submitButton === 'string' && options.submitButton.trim()
+    ? { selector: options.submitButton.trim() }
+    : options.submitButton;
 
   let browser = null;
 
@@ -317,6 +697,11 @@ async function testLogin(options) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent(USER_AGENT);
+
+    // Watching from the first request, so a token the page already used before
+    // anyone signed in (a public API key sent as Bearer) is never mistaken for
+    // the session.
+    const bearerWatch = watchBearerTokens(page);
 
     await page.goto(loginUrl, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT_MS });
 
@@ -363,19 +748,64 @@ async function testLogin(options) {
       }
     }
 
-    const submitResult = await submitLogin(page, submitButton, submitAlternates);
+    bearerWatch.arm();
+    const submitResult = await submitLogin(page, submitButton, submitAlternates, {
+      // Compared against request bodies in memory to recognise the login
+      // request; never logged, stored or returned.
+      credentialValues: (credentials || []).map(c => c && c.value).filter(v => typeof v === 'string'),
+      responseWaitMs
+    });
+    const loginRequest = submitResult.loginRequest || { detected: false, matchedBy: null, status: null, outcome: null };
+    const strategy = submitResult.strategy;
 
     if (!submitResult.changed) {
-      // Nothing we clicked reached the site. Reporting this as "wrong password"
-      // is what sent people hunting for credential problems that did not exist.
+      // Nothing we clicked reached the site: no login request went out and the
+      // page did not move. Reporting this as "wrong password" is what sent
+      // people hunting for credential problems that did not exist.
       return failure(
         'SUBMIT_NO_EFFECT',
         'Submitting the login form had no effect on the page.',
-        'No URL, cookie or message change after every submit strategy'
+        'No login request, URL, cookie or message change after every submit strategy',
+        { loginRequest, submitStrategy: strategy, evidenceCodes: ['no_login_request'] }
+      );
+    }
+
+    if (loginRequest.detected && (loginRequest.outcome === 'timeout' || loginRequest.outcome === 'network_error')) {
+      // The login went out and the site never answered — typically an API that
+      // is asleep and still waking. Not a credential problem, and not a wrong
+      // button either: the same test usually succeeds a minute later.
+      const code = loginRequest.outcome === 'timeout' ? 'login_request_unanswered' : 'login_request_network_error';
+      return failure(
+        'LOGIN_NO_RESPONSE',
+        'The site did not answer the login request in time.',
+        code,
+        { loginRequest, submitStrategy: strategy, evidenceCodes: [code] }
       );
     }
 
     const after = await captureSnapshot(page, true);
+
+    // The site said no. Three things must hold, so a site that did sign us in
+    // despite an odd status code is never reported as refused: the login form
+    // is still on screen, the address did not move, and no session cookie
+    // arrived. Then either the login request was answered with an error (HTTP
+    // or in its JSON), or a failure message appeared — in an error element or
+    // a toast, which is the only answer many single-page apps give.
+    const stillOnLoginForm =
+      after.visiblePasswordFields > 0 &&
+      before.url === after.url &&
+      cookieDelta(before.cookies, after.cookies).sessionLike.length === 0;
+    const refusedOnWire =
+      loginRequest.detected && (loginRequest.outcome === 'http_error' || loginRequest.outcome === 'app_error');
+    if (stillOnLoginForm && (refusedOnWire || newFailureNoticeShown(before, after))) {
+      const code = refusedOnWire ? `login_${loginRequest.outcome}` : 'failure_notice_shown';
+      return failure(
+        'LOGIN_REJECTED',
+        'The site rejected the login.',
+        code,
+        { loginRequest, submitStrategy: strategy, evidenceCodes: [code] }
+      );
+    }
 
     // Compare against the same page with no session at all.
     const anonymousText = await fetchAnonymousText(browser, after.url);
@@ -383,8 +813,11 @@ async function testLogin(options) {
       signedInText: after.visibleText,
       anonymousText,
       signedInHtml: after.html,
-      // Never let a message the page is showing become the proof of success.
-      excludeTexts: after.errorTexts
+      // Never let a message the page is showing become the proof of success —
+      // an error, or a toast. A "Welcome back" toast fades within seconds, so
+      // a marker taken from one would make every later check think the
+      // session had been lost.
+      excludeTexts: [...(after.errorTexts || []), ...noticeLines(after.noticeTexts)]
     });
 
     // A marker the customer gave us beats anything we inferred, but only if it
@@ -410,6 +843,31 @@ async function testLogin(options) {
 
     const verdict = scoreLoginAttempt({ before, after, markerResult });
 
+    // Token session. If the sign-in worked but no cookie arrived and the app has
+    // not yet called its API, load the signed-in page once more: an app that
+    // keeps its token in storage reads it on start-up and sends it with its
+    // first API call, which is what we record. Only after a sign-in that scored
+    // as one — never to manufacture a session out of a failed login.
+    //
+    // A site that signed us in with a session cookie never gets token API hosts:
+    // the cookie is its session, and it is scanned exactly as before Bearer
+    // support existed. Every recorded session then passes the shared host policy
+    // (no shared third-party API, label-boundary host checks, no logout seeds).
+    const hasSessionCookie = cookieDelta(before.cookies, after.cookies).sessionLike.length > 0;
+    if (verdict.authenticated && !hasSessionCookie &&
+        eligibleBearerSessions(bearerWatch.sessions()).length === 0) {
+      try {
+        await page.reload({ waitUntil: 'networkidle2', timeout: 15000 });
+        await wait(1500);
+      } catch {
+        // A slow or failing reload just means no token was seen.
+      }
+    }
+    bearerWatch.stop();
+    const bearer = verdict.authenticated
+      ? eligibleBearerSessions(bearerWatch.sessions(), { hasSessionCookie })
+      : [];
+
     await browser.close();
     browser = null;
 
@@ -421,6 +879,12 @@ async function testLogin(options) {
       authConfirmed: verdict.authConfirmed,
       postLoginUrl: after.url,
       cookies: after.cookies,
+      // Bearer sessions the app sent to its API after signing in, one per API
+      // origin, each with the GET URLs the API answered with 2xx. Contains the
+      // token: held in memory by the caller, never logged, stored or returned.
+      // Always empty when the login set a session cookie.
+      bearer,
+      hasSessionCookie,
       marker: verdict.marker,
       markerCheckableInBody: verdict.markerCheckableInBody,
       // Whether the marker is strong enough to prove a sign-in, or merely
@@ -430,6 +894,7 @@ async function testLogin(options) {
       markerAlternates: markerResult.alternates || [],
       evidenceCodes: verdict.evidenceCodes,
       submitStrategy: submitResult.strategy,
+      loginRequest,
       anonymousBaselineAvailable: Boolean(anonymousText),
       evidence,
       errorCode:

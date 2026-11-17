@@ -24,6 +24,7 @@ const {
 const { requestContainer, releaseContainer } = require('../services/zapContainerManager');
 const ScanResult = require('../models/ScanResult');
 const { checkScanTarget } = require('../utils/scanTargetGuard');
+const { eligibleBearerSessions } = require('../utils/bearerApiScope');
 const gridfsService = require('../services/gridfsService');
 const { loadEvidenceAlerts } = require('../services/zapDetailedAlerts');
 
@@ -191,11 +192,21 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
       expectedMarker: expectedMarker || null
     });
 
-    if (result.authenticated && result.cookies && result.cookies.length > 0) {
-      // Store cookies server-side with a temporary session ID
+    // A token session (the app sends `Authorization: Bearer` to its API) counts
+    // as much as a cookie — but only for a site that set no session cookie, and
+    // only for API origins the scan may attack: our target guard accepts them and
+    // they are not a shared third-party API (payments, identity, BaaS…). Seeds
+    // are same-origin, never logout-shaped. utils/bearerApiScope.js is the policy;
+    // testLogin applied it already, this re-applies it to what testLogin returned.
+    const bearer = eligibleBearerSessions(result.bearer, { hasSessionCookie: result.hasSessionCookie === true });
+    const hasCookies = Boolean(result.cookies && result.cookies.length > 0);
+
+    if (result.authenticated && (hasCookies || bearer.length > 0)) {
+      // Store the session server-side with a temporary session ID
       const tempSessionId = uuidv4();
       authSessions.set(tempSessionId, {
-        cookies: result.cookies,
+        cookies: result.cookies || [],
+        bearer,
         loginUrl,
         // The signed-in marker lets the scan check later whether it is still
         // logged in, and the recipe lets it log back in if it is not. Both live
@@ -215,9 +226,11 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
         createdAt: Date.now()
       });
 
+      const sessionKind = hasCookies && bearer.length ? 'cookie+bearer' : (bearer.length ? 'bearer' : 'cookie');
       console.log(
         `[ZAP-AUTH] Login ${result.authConfirmed}. Session stored: ${tempSessionId} ` +
-        `(marker=${result.marker ? 'yes' : 'no'}, strategy=${result.submitStrategy})`
+        `(marker=${result.marker ? 'yes' : 'no'}, strategy=${result.submitStrategy}, session=${sessionKind}, ` +
+        `apiOrigins=${bearer.length})`
       );
 
       // Return result WITHOUT cookies or the marker — only the tempSessionId.
@@ -229,7 +242,11 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
         authConfirmed: result.authConfirmed,
         postLoginUrl: result.postLoginUrl,
         evidence: result.evidence,
-        cookieCount: result.cookies.length,
+        cookieCount: (result.cookies || []).length,
+        sessionKind,
+        // Host names only (never the token): the API hosts the signed-in app
+        // talks to, which the scan will include so it reaches signed-in content.
+        authHosts: bearer.map(b => new URL(b.origin).host),
         // Tells the UI whether to offer the optional "what shows when you are
         // signed in?" field, without explaining why.
         markerFound: Boolean(result.marker),
@@ -244,8 +261,9 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
       // entirely in the browser. Reporting that as "confirmed" would show a
       // green tick on a flow that then refuses to advance, so the outcome here
       // is always a failure; only the reason differs.
+      // ...or that sent its token only to hosts the target guard refuses.
       const loggedInButNoCookies =
-        result.authenticated && (!result.cookies || result.cookies.length === 0);
+        result.authenticated && !hasCookies && bearer.length === 0;
 
       res.json({
         success: true,
@@ -259,6 +277,19 @@ router.post('/test-login', auth, loginSetupLimiter, async (req, res) => {
           : (result.errorCode || 'LOGIN_ANALYSIS_FAILED'),
         errorMessage: result.errorMessage
       });
+
+      // The outcome used to go unrecorded, so a failed test could not be told
+      // apart afterwards (refused? never answered? nothing sent?). Codes and
+      // counts only: no URL, selector, credential, header or body.
+      const req = result.loginRequest || {};
+      console.log(
+        `[ZAP-AUTH] Login test failed: code=${loggedInButNoCookies ? 'NO_SESSION_COOKIES' : (result.errorCode || 'LOGIN_ANALYSIS_FAILED')} ` +
+        `strategy=${result.submitStrategy || 'none'} loginRequest=${req.detected ? 'detected' : 'none'} ` +
+        `matchedBy=${req.matchedBy || '-'} status=${Number.isInteger(req.status) ? req.status : '-'} ` +
+        `outcome=${req.outcome || '-'} timedOut=${req.outcome === 'timeout'} ` +
+        `evidence=${(Array.isArray(result.evidenceCodes) && result.evidenceCodes.length ? result.evidenceCodes : ['-']).join(',')} ` +
+        `cookies=${Array.isArray(result.cookies) ? result.cookies.length : 0}`
+      );
     }
   } catch (error) {
     console.error('[ZAP-AUTH] Login test error:', error.message);
@@ -398,8 +429,12 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
         markerConfidence: session.markerConfidence || 'low',
         recipe: session.recipe || null,
         authConfirmed: session.authConfirmed || 'unconfirmed',
+        // Token session(s) for the app's API origin(s). In this closure only,
+        // like the recipe; the scan injects them into ZAP per origin.
+        bearer: Array.isArray(session.bearer) ? session.bearer : [],
         reloginAttempts: 0
       };
+    const authHosts = isBasic ? [] : authState.bearer.map(b => new URL(b.origin).host);
 
     // Generate scan ID
     const scanId = `zap-auth-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -428,7 +463,9 @@ router.post('/scan', auth, planCheck, scanLimiter, async (req, res) => {
             // the same HTML signed in or out, so a response body proves
             // nothing either way).
             loginOutcome: authState.authConfirmed === 'confirmed' ? 'confirmed' : 'unconfirmed',
-            ...(isBasic ? { authMethod: 'basic' } : {})
+            ...(isBasic ? { authMethod: 'basic' } : {}),
+            // Host names only: the signed-in API host(s) the scan also covers.
+            ...(authHosts.length ? { sessionKind: cookies.length ? 'cookie+bearer' : 'bearer', authHosts } : {})
           },
           createdAt: new Date(),
           updatedAt: new Date()
@@ -1075,6 +1112,15 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
         return res.status(400).json({
           errorCode: error.code,
           error: error.message
+        });
+      }
+      // A report whose prose could not be fully localized is never sent (no PDF was
+      // rendered). REPORT_TRANSLATION_UNAVAILABLE: the translation service could not be
+      // used — retry later. Completed translations are stored, so a retry is cheaper.
+      if (['REPORT_LOCALIZATION_INCOMPLETE', 'REPORT_TRANSLATION_UNAVAILABLE'].includes(error?.code)) {
+        return res.status(503).json({
+          errorCode: error.code,
+          error: 'Report could not be fully localized'
         });
       }
       res.status(500).json({

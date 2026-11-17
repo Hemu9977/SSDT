@@ -436,12 +436,21 @@ async function triggerAuthenticatedScan(scanId, targetUrl, userId, authConfig, m
       // keep the session in the browser rather than in a cookie. Treating it as a
       // confirmed sign-in would run the whole scan anonymously and label it
       // authenticated — the exact failure this work exists to prevent.
-      const noSession = !loginResult?.cookies || loginResult.cookies.length === 0;
+      //
+      // An app that keeps its session as a Bearer token for its API is the other
+      // carriable kind — same policy as POST /api/zap-auth/test-login
+      // (utils/bearerApiScope.js): only when the site set no session cookie, only
+      // API origins the target guard accepts that are not a shared third-party
+      // API, and never a logout-shaped seed.
+      const { eligibleBearerSessions } = require('../utils/bearerApiScope');
+      const bearer = eligibleBearerSessions(loginResult?.bearer, { hasSessionCookie: loginResult?.hasSessionCookie === true });
+      const noSession = (!loginResult?.cookies || loginResult.cookies.length === 0) && bearer.length === 0;
 
       if (loginResult && loginResult.authenticated && !noSession) {
         cookies = loginResult.cookies || [];
         loginOutcome = loginResult.authConfirmed || 'unconfirmed';
         authState = {
+          bearer,
           marker: loginResult.marker || null,
           markerCheckableInBody: Boolean(loginResult.markerCheckableInBody),
           markerConfidence: loginResult.markerConfidence || 'low',
@@ -733,6 +742,9 @@ module.exports = {
   // Exported so the scan orchestration can be exercised end-to-end without
   // going through the shared ScheduledScan table, which other environments poll.
   triggerPublicScan,
+  // Exported for tests (tests/bearerScheduler.test.js): the background login →
+  // scan hand-off of a scheduled authenticated scan.
+  triggerAuthenticatedScan,
   stopScheduler,
   processScheduledScans,
   finalizeRunningScans,

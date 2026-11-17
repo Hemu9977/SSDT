@@ -14,6 +14,7 @@ const { markerPresentInBody } = require('../utils/loginSignals');
 const { redactHeaderBlock, scrubSecrets, scrubText, MIN_SCRUB_LENGTH } = require('../utils/credentialRedaction');
 const credentialRules = require('./zapCredentialRules');
 const credentialVault = require('./scanCredentialVault');
+const { eligibleBearerSessions } = require('../utils/bearerApiScope');
 
 // ============================================================================
 // ZAP AUTH API CONFIGURATION
@@ -189,6 +190,7 @@ function groupAlertsByUrl(alerts) {
     if (!grouped[key]) {
       grouped[key] = {
         alert: alert.alert,
+        pluginId: alert.pluginId,
         risk: alert.risk,
         confidence: alert.confidence,
         description: alert.description,
@@ -366,6 +368,7 @@ async function createDualVersionAlerts(alerts, client = null, secrets = []) {
 
   const detailedAlerts = grouped.map(alert => ({
     alert: alert.alert,
+    pluginId: alert.pluginId,
     risk: alert.risk,
     confidence: alert.confidence,
     description: alert.description,
@@ -447,6 +450,25 @@ async function verifySignedIn({ zapClient, targetUrl, authState }) {
     if (status >= 200 && status < 400) return { verified: true, reason: 'basic_accepted' };
     return { verified: null, reason: `basic_status_${status}` };
   }
+  // Token session: ask the API itself. The app's "who am I" call (or another GET
+  // it made signed in) answers 401/403 once the token is no longer accepted —
+  // a far better witness than a page marker, which a single-page app never
+  // puts in its HTML.
+  const bearerProbe = authState && Array.isArray(authState.bearer)
+    ? authState.bearer.find(b => b && b.verifyUrl)
+    : null;
+  if (bearerProbe) {
+    try {
+      await zapClient.get('/JSON/core/action/accessUrl/', { params: { url: bearerProbe.verifyUrl, followRedirects: 'false' } });
+    } catch (_) {
+      return { verified: null, reason: 'bearer_probe_failed' };
+    }
+    const status = await credentialRules.latestStatusFor(zapClient, bearerProbe.verifyUrl);
+    if (status === null) return { verified: null, reason: 'no_response_captured' };
+    if (status === 401 || status === 403) return { verified: false, reason: 'bearer_unauthorized' };
+    if (status >= 200 && status < 300) return { verified: true, reason: 'bearer_accepted' };
+    return { verified: null, reason: `bearer_status_${status}` };
+  }
   if (!authState || !authState.marker) {
     return { verified: null, reason: 'no_marker' };
   }
@@ -505,11 +527,38 @@ async function reAuthenticate({ zapClient, authState, scanId }) {
       expectedMarker: authState.markerConfidence === 'high' ? authState.marker : null
     });
 
-    if (!result.authenticated || !result.cookies || result.cookies.length === 0) {
+    const hadBearer = Array.isArray(authState.bearer) && authState.bearer.length > 0;
+    const freshBearer = hadBearer && Array.isArray(result.bearer) ? result.bearer : [];
+    const freshCookies = Array.isArray(result.cookies) ? result.cookies : [];
+    // The session the scan started with must come back in the same form: a token
+    // scan needs a token, a cookie scan needs cookies.
+    if (!result.authenticated || (hadBearer ? freshBearer.length === 0 : freshCookies.length === 0)) {
       return { ok: false, cookies: [], reason: 'login_failed' };
     }
 
-    await applyCookieReplacerRule(zapClient, result.cookies);
+    // The fresh session values are secrets from now on, wherever ZAP quotes them.
+    if (Array.isArray(authState.secrets)) {
+      for (const value of [...freshCookies.map(c => c && c.value), ...bearerSecrets(freshBearer)]) {
+        if (typeof value === 'string' && value.length >= MIN_SCRUB_LENGTH && !authState.secrets.includes(value)) {
+          authState.secrets.push(value);
+        }
+      }
+    }
+
+    if (hadBearer) {
+      // Keep only API origins the scan already had in scope: a re-login must not
+      // widen what is being attacked.
+      const known = new Map(authState.bearer.map(b => [b.origin, b]));
+      const renewed = freshBearer
+        .filter(b => known.has(b.origin))
+        .map(b => ({ ...known.get(b.origin), authorization: b.authorization }));
+      if (renewed.length === 0) return { ok: false, cookies: [], reason: 'login_failed' };
+      await applyBearerRules(zapClient, scanId, renewed, authState.bearer.length);
+      authState.bearer = renewed;
+    }
+    if (freshCookies.length > 0) {
+      await applyCookieReplacerRule(zapClient, freshCookies);
+    }
 
     // A session was re-established, but that is not the same as knowing we are
     // signed in again. Report the two separately so the scan does not claim a
@@ -630,11 +679,112 @@ async function applyCookieReplacerRule(zapClient, cookies) {
   );
 }
 
-async function configureAuthContext({ targetUrl, cookies, scanId, zapClient, basic = null }) {
+/**
+ * True unless `url` parses to a different origin than `origin`. An alert whose
+ * URL cannot be parsed is kept, as it always was.
+ */
+function isOnOrigin(url, origin) {
+  if (typeof url !== 'string' || !url) return true;
+  try {
+    return new URL(url).origin === origin;
+  } catch (_) {
+    return true;
+  }
+}
+
+/** `url` lies inside the scan URL's subtree: same origin, same path prefix. */
+function isWithinScanUrl(url, scanUrl) {
+  try {
+    const u = new URL(url);
+    const base = new URL(scanUrl);
+    if (u.origin !== base.origin) return false;
+    const dir = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`;
+    return u.pathname === base.pathname || u.pathname.startsWith(dir);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Every form a token session's secret can take in ZAP output: the whole header
+ * value, and the bare token after "Bearer ".
+ * @param {Array<{authorization:string}>} bearer
+ */
+function bearerSecrets(bearer) {
+  const out = [];
+  for (const session of Array.isArray(bearer) ? bearer : []) {
+    const value = session && typeof session.authorization === 'string' ? session.authorization : '';
+    if (!value) continue;
+    out.push(value);
+    const token = value.replace(/^Bearer\s+/i, '');
+    if (token && token !== value) out.push(token);
+  }
+  return out;
+}
+
+/**
+ * Point the proxy's `Authorization` header for each API origin at its token.
+ * Old rules for this scan are removed first, which is also how a re-login
+ * replaces a stale token. Exact origin, scanner initiators only, POST body.
+ */
+async function applyBearerRules(zapClient, scanId, bearer, previousCount = 0) {
+  for (let i = 0; i < Math.max(previousCount, (bearer || []).length); i++) {
+    try {
+      await credentialRules.zapPost(zapClient, '/JSON/replacer/action/removeRule/', {
+        description: credentialRules.bearerRuleDescription(scanId, i)
+      });
+    } catch (_) {
+      // Not there yet.
+    }
+  }
+  for (const [index, session] of (bearer || []).entries()) {
+    await zapAuthApiWithRetry(
+      () => credentialRules.applyBearerRule(zapClient, { scanId, index, origin: session.origin, authorization: session.authorization }),
+      3, 1000, 'Add bearer token replacer rule'
+    );
+  }
+}
+
+/**
+ * One ZAP context per token API host, holding exactly that origin, with every
+ * logout-shaped path excluded. Each is scanned on its own (url = the origin),
+ * so the site's scan stays exactly the URL the customer entered.
+ * @returns {Promise<Array<{origin:string, contextId:string, contextName:string}>>}
+ */
+async function configureApiContexts({ scanId, zapClient, apiSessions }) {
+  const contexts = [];
+  for (const [index, session] of (apiSessions || []).entries()) {
+    const contextName = `auth_api_${scanId}_${index}`;
+    const created = await zapAuthApiWithRetry(
+      () => zapClient.get('/JSON/context/action/newContext/', { params: { contextName } }),
+      3, 1000, 'Create API context'
+    );
+    const contextId = created.data.contextId;
+    await zapAuthApiWithRetry(
+      () => zapClient.get('/JSON/context/action/includeInContext/', {
+        params: { contextName, regex: credentialRules.exactOriginRegex(session.origin) }
+      }),
+      3, 1000, 'Include API origin'
+    );
+    for (const regex of credentialRules.apiContextExcludeRegexes(session.origin)) {
+      // Not optional: an API context without its logout exclusion is not created.
+      await zapAuthApiWithRetry(
+        () => zapClient.get('/JSON/context/action/excludeFromContext/', { params: { contextName, regex } }),
+        3, 1000, 'Exclude API logout paths'
+      );
+    }
+    await zapClient.get('/JSON/context/action/setContextInScope/', {
+      params: { contextName, booleanInScope: 'true' }
+    });
+    contexts.push({ origin: session.origin, contextId, contextName });
+  }
+  return contexts;
+}
+
+async function configureAuthContext({ targetUrl, cookies, scanId, zapClient, basic = null, bearer = [] }) {
   const contextName = `auth_scan_${scanId}`;
   const targetUrlObj = new URL(targetUrl);
   const targetDomain = targetUrlObj.hostname;
-  const targetDomainEscaped = targetDomain.replace(/\./g, '\\.');
 
   console.log(`[ZAP-AUTH] Configuring auth context: ${contextName} for ${targetDomain}`);
 
@@ -648,11 +798,10 @@ async function configureAuthContext({ targetUrl, cookies, scanId, zapClient, bas
   const contextId = contextResponse.data.contextId;
   console.log(`[ZAP-AUTH] Created context: ${contextName} (ID: ${contextId})`);
 
-  // Include target domain and subdomains
-  const includePatterns = [
-    `https?://${targetDomainEscaped}.*`,
-    `https?://.*\\.${targetDomainEscaped}.*`
-  ];
+  // Include target domain and subdomains — on a label boundary, so
+  // `<target>.evil.net` is never in scope. Token API hosts are NOT added here:
+  // each gets its own context and its own scan (configureApiContexts).
+  const includePatterns = credentialRules.siteScopeRegexes(targetDomain);
 
   for (const pattern of includePatterns) {
     try {
@@ -709,6 +858,18 @@ async function configureAuthContext({ targetUrl, cookies, scanId, zapClient, bas
     } catch (err) {
       // Never fall through to an unauthenticated scan labelled as authenticated.
       console.error(`[ZAP-AUTH] Failed to configure Basic auth rule: ${err.message}`);
+      throw new Error('Failed to configure authentication in ZAP');
+    }
+  }
+
+  // Token session: the app's own Authorization header, per API origin.
+  if (bearer && bearer.length > 0) {
+    try {
+      await applyBearerRules(zapClient, scanId, bearer);
+      console.log(`[ZAP-AUTH] Bearer token rule configured for ${bearer.length} API origin(s)`);
+    } catch (err) {
+      // Never fall through to an unauthenticated scan labelled as authenticated.
+      console.error(`[ZAP-AUTH] Failed to configure bearer token rule: ${err.message}`);
       throw new Error('Failed to configure authentication in ZAP');
     }
   }
@@ -777,13 +938,36 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
   // What must never appear in stored output: the Basic credential in all its forms,
   // or — for a form-login scan — the session cookie values it injected (ZAP's
   // cookie findings can quote them in alert evidence and in the HTML report).
+  // Token sessions (form logins whose app sends `Authorization: Bearer` to its
+  // API) are secrets too: the header and the bare token, as ZAP may quote either.
+  // The host policy (utils/bearerApiScope.js) is applied once more here, before
+  // anything reaches ZAP: no shared third-party API, no logout-shaped seed or probe.
+  const bearer = !isBasic && authState && Array.isArray(authState.bearer)
+    ? eligibleBearerSessions(authState.bearer)
+    : [];
+  if (authState && !isBasic && Array.isArray(authState.bearer)) authState.bearer = bearer;
+  // A token sent to the site's own origin rides along with the site's scan; every
+  // other origin is a separate API host, scanned on its own.
+  const siteOrigin = new URL(targetUrl).origin;
+  const apiSessions = bearer.filter(b => b.origin !== siteOrigin);
+  let apiContexts = [];
   const secrets = basicCred
     ? basicCred.secrets
-    : [...new Set((cookies || []).map(c => c && c.value).filter(v => typeof v === 'string' && v.length >= MIN_SCRUB_LENGTH))];
+    : [...new Set([
+      ...(cookies || []).map(c => c && c.value),
+      ...bearerSecrets(bearer)
+    ].filter(v => typeof v === 'string' && v.length >= MIN_SCRUB_LENGTH))];
+  // A re-login mid-scan adds its fresh session values here, so they are
+  // scrubbed from the report as well.
+  if (authState && !isBasic) authState.secrets = secrets;
 
   // Accumulated sign-in health across the scan. Carried into the final write
   // below, which replaces `authScanResult` wholesale.
-  const authHealth = isBasic ? { authMethod: 'basic' } : {};
+  const authHealth = isBasic
+    ? { authMethod: 'basic' }
+    : (bearer.length
+      ? { sessionKind: (cookies || []).length ? 'cookie+bearer' : 'bearer', authHosts: bearer.map(b => new URL(b.origin).host) }
+      : {});
 
   // Registered synchronously, before the first await, so a stop that lands at any
   // point after startAsyncAuthScan hands over is seen by this worker.
@@ -892,9 +1076,13 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       cookies,
       scanId,
       zapClient: zapAuthApi,
-      basic: isBasic ? { origin: basicCred.origin, authorization: basicCred.authorization } : null
+      basic: isBasic ? { origin: basicCred.origin, authorization: basicCred.authorization } : null,
+      bearer
     });
     contextName = ctxName;
+    if (apiSessions.length) {
+      apiContexts = await configureApiContexts({ scanId, zapClient: zapAuthApi, apiSessions });
+    }
 
     // Access target URL to seed ZAP's session with authenticated cookies
     await updateProgress('authenticating', 10, { message: 'Accessing target with authentication...' });
@@ -921,6 +1109,32 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       } catch (_) {
         // Non-critical
       }
+    }
+
+    // Token session: the signed-in content is the app's API, which no crawler
+    // can discover from the site's HTML (the app builds those calls in
+    // JavaScript, from a token no crawler's browser has). Seed ZAP with the GET
+    // endpoints the app itself called after signing in; the bearer rule
+    // authenticates them, and the per-host API scans below then cover them.
+    // Seeds were vetted (same origin, never logout-shaped). A token sent to the
+    // site's own origin only seeds what lies inside the URL being scanned.
+    if (bearer.length) {
+      let seeded = 0;
+      for (const session of bearer) {
+        const seeds = session.origin === siteOrigin
+          ? (session.seedUrls || []).filter(u => isWithinScanUrl(u, targetUrl))
+          : (session.seedUrls || []);
+        for (const url of seeds) {
+          assertRunning();
+          try {
+            await zapAuthApi.get('/JSON/core/action/accessUrl/', { params: { url, followRedirects: 'false' } });
+            seeded++;
+          } catch (_) {
+            // One unreachable endpoint must not stop the scan.
+          }
+        }
+      }
+      console.log(`[ZAP-AUTH] Seeded ${seeded} signed-in API endpoint(s) across ${bearer.length} API origin(s)`);
     }
 
     // Before crawling anything, confirm the injected session is actually being
@@ -1155,72 +1369,116 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       console.warn(`[ZAP-AUTH] Active scan config warning: ${configError.message}`);
     }
 
+    // Polls one active scan to completion, mapping its 0–100% onto [lo, hi] of the
+    // UI bar. The loop is unchanged from the single-scan version (5 s polls,
+    // 3 h cap, stop after 5 min stuck); a stop request ends it at once.
+    // @returns {Promise<'completed'|'stopped_stuck'|'timed_out'>}
+    const waitForActiveScan = async (activeScanId, lo, hi, label) => {
+      let lastProgress = -1;
+      let stuckCount = 0;
+      const activeMaxIterations = 180 * 60 / 5; // 3 hours / 5s intervals
+
+      for (let i = 0; i < activeMaxIterations; i++) {
+        await pause(5000);
+
+        try {
+          const scanStatusResponse = await zapAuthApi.get('/JSON/ascan/view/status/', {
+            params: { scanId: activeScanId }
+          });
+          const scanProgress = parseInt(scanStatusResponse.data.status || 0);
+
+          if (scanProgress >= 100) return 'completed';
+
+          // Stuck detection
+          if (scanProgress === lastProgress) {
+            stuckCount++;
+            if (stuckCount > 60) { // 5 min stuck
+              console.warn(`[ZAP-AUTH] ${label} appears stuck at ${scanProgress}%. Stopping.`);
+              try {
+                await zapAuthApi.get('/JSON/ascan/action/stop/', {
+                  params: { scanId: activeScanId }
+                });
+              } catch (_) {}
+              return 'stopped_stuck';
+            }
+          } else {
+            stuckCount = 0;
+          }
+          lastProgress = scanProgress;
+
+          // Get alert count
+          let currentAlerts = 0;
+          try {
+            const alertsCountResponse = await zapAuthApi.get('/JSON/core/view/numberOfAlerts/');
+            currentAlerts = parseInt(alertsCountResponse.data.numberOfAlerts || 0);
+          } catch (_) {}
+
+          const uiProgress = lo + Math.floor(scanProgress * (hi - lo) / 100);
+          await updateProgress('active_scan', uiProgress, {
+            message: `Testing for vulnerabilities: ${scanProgress}%`,
+            alertsFound: currentAlerts
+          });
+          console.log(`[ZAP-AUTH] ${label}: ${scanProgress}% | Alerts: ${currentAlerts} | Stuck: ${stuckCount}`);
+        } catch (scanError) {
+          if (scanError.message === 'STOPPED_BY_USER') {
+            throw scanError;
+          }
+          console.warn(`[ZAP-AUTH] ${label} status error: ${scanError.message}`);
+        }
+      }
+      return 'timed_out';
+    };
+
+    // The site's scan is exactly the URL the customer entered, as it always was —
+    // also for a token session. Each token API host gets its own scan after it.
+    const siteScanEnd = apiContexts.length ? 70 : 90;
     const activeScanResponse = await zapAuthApiWithRetry(
       () => zapAuthApi.get('/JSON/ascan/action/scan/', {
-        params: {
-          url: targetUrl,
-          recurse: 'true',
-          inScopeOnly: 'true',
-          contextId: contextId
-        }
+        params: { url: targetUrl, recurse: 'true', inScopeOnly: 'true', contextId: contextId }
       }),
       3, 2000, 'Start active scan'
     );
     const activeScanId = activeScanResponse.data.scan;
     console.log(`[ZAP-AUTH] Active scan started: ID ${activeScanId}`);
+    await waitForActiveScan(activeScanId, 45, siteScanEnd, 'Active scan');
 
-    // Wait for active scan
-    let lastProgress = -1;
-    let stuckCount = 0;
-    const activeMaxIterations = 180 * 60 / 5; // 3 hours / 5s intervals
-
-    for (let i = 0; i < activeMaxIterations; i++) {
-      await pause(5000);
-
-      try {
-        const scanStatusResponse = await zapAuthApi.get('/JSON/ascan/view/status/', {
-          params: { scanId: activeScanId }
-        });
-        const scanProgress = parseInt(scanStatusResponse.data.status || 0);
-
-        if (scanProgress >= 100) break;
-
-        // Stuck detection
-        if (scanProgress === lastProgress) {
-          stuckCount++;
-          if (stuckCount > 60) { // 5 min stuck
-            console.warn(`[ZAP-AUTH] Active scan appears stuck at ${scanProgress}%. Stopping.`);
-            try {
-              await zapAuthApi.get('/JSON/ascan/action/stop/', {
-                params: { scanId: activeScanId }
-              });
-            } catch (_) {}
-            break;
-          }
-        } else {
-          stuckCount = 0;
-        }
-        lastProgress = scanProgress;
-
-        // Get alert count
-        let currentAlerts = 0;
+    // Separate scans, one per approved token API host: url = that origin, in its
+    // own context (exactly that origin, logout paths excluded). The session is
+    // re-checked first — the site's scan may have outlived the token.
+    if (apiContexts.length) {
+      Object.assign(authHealth, await checkAndRepairSession({
+        zapClient: zapAuthApi,
+        targetUrl,
+        authState,
+        scanId,
+        phase: 'before_api_scan'
+      }));
+      const apiScans = [];
+      const span = (90 - siteScanEnd) / apiContexts.length;
+      for (const [index, api] of apiContexts.entries()) {
+        assertRunning();
+        const host = new URL(api.origin).host;
+        const lo = Math.floor(siteScanEnd + index * span);
+        const hi = Math.floor(siteScanEnd + (index + 1) * span);
+        let apiScanId = null;
         try {
-          const alertsCountResponse = await zapAuthApi.get('/JSON/core/view/numberOfAlerts/');
-          currentAlerts = parseInt(alertsCountResponse.data.numberOfAlerts || 0);
-        } catch (_) {}
-
-        const uiProgress = 45 + Math.floor(scanProgress * 0.45); // 45-90%
-        await updateProgress('active_scan', uiProgress, {
-          message: `Testing for vulnerabilities: ${scanProgress}%`,
-          alertsFound: currentAlerts
-        });
-        console.log(`[ZAP-AUTH] Active scan: ${scanProgress}% | Alerts: ${currentAlerts} | Stuck: ${stuckCount}`);
-      } catch (scanError) {
-        if (scanError.message === 'STOPPED_BY_USER') {
-          throw scanError;
+          // ZAP refuses a url not in its sites tree (no seed was reachable):
+          // recorded, and the scan goes on with the next host.
+          const started = await zapAuthApi.get('/JSON/ascan/action/scan/', {
+            params: { url: api.origin, recurse: 'true', inScopeOnly: 'true', contextId: api.contextId }
+          });
+          apiScanId = started.data.scan;
+        } catch (err) {
+          assertRunning();
+          console.warn(`[ZAP-AUTH] API scan ${index + 1}/${apiContexts.length} not started: ${err.response?.status || err.code || 'error'}`);
+          apiScans.push({ host, status: 'not_started' });
+          continue;
         }
-        console.warn(`[ZAP-AUTH] Active scan status error: ${scanError.message}`);
+        console.log(`[ZAP-AUTH] API scan ${index + 1}/${apiContexts.length} started: ID ${apiScanId}`);
+        const status = await waitForActiveScan(apiScanId, lo, hi, `API scan ${index + 1}/${apiContexts.length}`);
+        apiScans.push({ host, status });
       }
+      authHealth.apiScans = apiScans;
     }
 
     console.log(`[ZAP-AUTH] Active scan complete`);
@@ -1233,16 +1491,33 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
     // 504 — same failure and fix as zapService.js/fetchAlertsPaged.
     const ALERT_PAGE_SIZE = 500;
     const rawAlerts = [];
-    for (let start = 0; start < 10000; start += ALERT_PAGE_SIZE) {
-      const alertsResponse = await zapAuthApiWithRetry(
-        () => zapAuthApi.get('/JSON/core/view/alerts/', {
-          params: { baseurl: targetUrl, start, count: ALERT_PAGE_SIZE }
-        }),
-        5, 3000, `Alerts retrieval (offset ${start})`
-      );
-      const page = alertsResponse.data.alerts || [];
-      rawAlerts.push(...page);
-      if (page.length < ALERT_PAGE_SIZE) break;
+    // The site, plus — for a token session — each API host it was scanned on:
+    // findings there are on the customer's signed-in application. ZAP's
+    // `baseurl` is a string prefix, so an API base ends in '/' (a bare
+    // `https://api.x` would also match `https://api.x.evil.net/…`), and every
+    // alert must be on its base's own origin.
+    const alertBases = [targetUrl, ...apiContexts.map(a => `${a.origin}/`)];
+    const seenAlertIds = new Set();
+    for (const baseurl of alertBases) {
+      const baseOrigin = new URL(baseurl).origin;
+      for (let start = 0; start < 10000; start += ALERT_PAGE_SIZE) {
+        const alertsResponse = await zapAuthApiWithRetry(
+          () => zapAuthApi.get('/JSON/core/view/alerts/', {
+            params: { baseurl, start, count: ALERT_PAGE_SIZE }
+          }),
+          5, 3000, `Alerts retrieval (offset ${start})`
+        );
+        const page = alertsResponse.data.alerts || [];
+        for (const alert of page) {
+          if (!isOnOrigin(alert && alert.url, baseOrigin)) continue;
+          // The same alert can sit under two bases (an API on a sub-path of the site).
+          const key = alert && alert.id !== undefined ? String(alert.id) : null;
+          if (key !== null && seenAlertIds.has(key)) continue;
+          if (key !== null) seenAlertIds.add(key);
+          rawAlerts.push(alert);
+        }
+        if (page.length < ALERT_PAGE_SIZE) break;
+      }
     }
     console.log(`[ZAP-AUTH] Retrieved ${rawAlerts.length} raw alerts`);
 
@@ -1263,6 +1538,27 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
         if (coverage.verdict === 'failed') authHealth.authVerified = false;
       }
       console.log(`[ZAP-AUTH] Basic coverage for ${scanId}: ok=${coverage.ok} 401=${coverage.unauthorized} 403=${coverage.forbidden} verdict=${coverage.verdict}`);
+    }
+
+    // Token session: the same question for each signed-in API origin. A scan
+    // whose API requests were all answered 401 never got past the sign-in, and
+    // must not be reported as authenticated coverage.
+    if (apiSessions.length) {
+      const evidence = [];
+      for (const session of apiSessions) {
+        const coverage = await credentialRules.measureAuthCoverage(zapAuthApi, session.origin, { anyScheme: true });
+        evidence.push({ host: new URL(session.origin).host, ...coverage });
+        console.log(`[ZAP-AUTH] API coverage for ${scanId}: ok=${coverage.ok} 401=${coverage.unauthorized} 403=${coverage.forbidden} verdict=${coverage.verdict}`);
+      }
+      authHealth.apiAuthEvidence = evidence;
+      if (evidence.every(e => e.verdict === 'failed')) {
+        authHealth.authDegraded = true;
+        authHealth.authDegradedReason = 'api_only_unauthorized';
+        authHealth.authVerified = false;
+      } else if (evidence.some(e => e.verdict === 'failed' || e.verdict === 'degraded') && !authHealth.authDegraded) {
+        authHealth.authDegraded = true;
+        authHealth.authDegradedReason = 'api_mostly_unauthorized';
+      }
     }
 
     // Process alerts (credentials scrubbed from alert text and raw evidence)
@@ -1445,6 +1741,8 @@ async function runAuthenticatedScanBackground(targetUrl, loginUrl, cookies, scan
       const { steps } = await credentialRules.revokeScanCredentials(zapAuthApi, {
         scanId,
         contextName,
+        // Token scans only; Basic and cookie scans pass none.
+        ...(apiContexts.length ? { extraContextNames: apiContexts.map(a => a.contextName) } : {}),
         reEnableInsecureAuthRule: isBasic
       });
       const failed = Object.entries(steps).filter(([, ok]) => !ok).map(([name]) => name);
