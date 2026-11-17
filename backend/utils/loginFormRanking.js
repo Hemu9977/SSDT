@@ -56,6 +56,11 @@ function scoreSubmitButton(field, index, passwordIndex) {
   const isButton = field.tagName === 'BUTTON' || field.inputType === 'submit';
   if (!isButton) return null;
   if (isNavigationButton(field)) return null;
+  // Flagged in the page by detection: a show/hide-password control. It sits
+  // right next to the password field, so proximity alone would rank it highly,
+  // and clicking it only unmasks the password. It stays in the field list for
+  // the manual override, but is never picked or auto-retried.
+  if (field.passwordToggle === true) return null;
 
   const text = (field.buttonText || field.label || '').trim();
   const id = field.id || '';

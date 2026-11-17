@@ -131,6 +131,99 @@ async function detectLoginFields(loginUrl) {
       const forms = document.querySelectorAll('form');
       const results = [];
 
+      // ── Selectors ─────────────────────────────────────────────────────────
+      // A selector is only useful if it finds *this* element and nothing else:
+      // the login test clicks whatever `document.querySelector` returns first.
+      // The old fallback `form:nth-of-type(N) button` matched every button in
+      // the form, so on a page with a show-password toggle before "Sign In" the
+      // test clicked the toggle and never submitted anything.
+      const matchesOnly = (selector, el) => {
+        try {
+          const found = document.querySelectorAll(selector);
+          return found.length === 1 && found[0] === el;
+        } catch {
+          return false;
+        }
+      };
+
+      // `tag:nth-of-type(k)` steps from the element up to the nearest ancestor
+      // with a unique id (or <body>). Each step picks exactly one child of a
+      // uniquely identified parent, so the path is unique by construction.
+      const positionalSelector = (el) => {
+        const steps = [];
+        let node = el;
+        while (node && node.nodeType === 1) {
+          if (node === document.body || node === document.documentElement) {
+            steps.unshift(node.tagName.toLowerCase());
+            break;
+          }
+          if (node !== el && node.id) {
+            const idSelector = `#${CSS.escape(node.id)}`;
+            if (matchesOnly(idSelector, node)) {
+              steps.unshift(idSelector);
+              break;
+            }
+          }
+          let position = 1;
+          for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+            if (sib.tagName === node.tagName) position++;
+          }
+          steps.unshift(`${node.tagName.toLowerCase()}:nth-of-type(${position})`);
+          node = node.parentElement;
+        }
+        return steps.join(' > ');
+      };
+
+      // Most stable first: id, name, test hooks, then the submit type within
+      // its own form. A candidate is accepted only if it resolves to exactly
+      // this element; otherwise the positional path is used.
+      const uniqueSelector = (el) => {
+        const tag = el.tagName.toLowerCase();
+        const candidates = [];
+        if (el.id) candidates.push(`#${CSS.escape(el.id)}`);
+
+        const form = tag === 'form' ? null : el.closest('form');
+        const formSelector = form ? uniqueSelector(form) : '';
+        // The short form first — it survives layout changes between detection
+        // and the login test — and the form-scoped one when the short form is
+        // not unique (two forms with the same field names, say).
+        const scoped = (selector) => (formSelector ? [selector, `${formSelector} ${selector}`] : [selector]);
+
+        const name = el.getAttribute('name');
+        if (name) candidates.push(...scoped(`${tag}[name="${CSS.escape(name)}"]`));
+        for (const attr of ['data-testid', 'data-test', 'data-cy', 'data-qa', 'aria-label']) {
+          const value = el.getAttribute(attr);
+          if (value) candidates.push(...scoped(`${tag}[${attr}="${CSS.escape(value)}"]`));
+        }
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        if ((tag === 'button' || tag === 'input') && type) {
+          candidates.push(...scoped(`${tag}[type="${CSS.escape(type)}"]`));
+        }
+
+        for (const candidate of candidates) {
+          if (matchesOnly(candidate, el)) return candidate;
+        }
+        return positionalSelector(el);
+      };
+
+      // A show/hide-password eye or a cancel control is not a submit button,
+      // even when its wording is empty or its class does not say "toggle".
+      const isPasswordToggle = (btn) => {
+        const type = (btn.getAttribute('type') || '').toLowerCase();
+        if (type === 'submit') return false;
+        const text = (btn.textContent || '').trim();
+        if (/log\s?in|sign\s?in|submit|continue|ログイン|サインイン|送信/i.test(text)) return false;
+        const hints = [
+          btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.id,
+          typeof btn.className === 'string' ? btn.className : '', btn.getAttribute('data-testid'), text
+        ].filter(Boolean).join(' ');
+        if (/show|hide|reveal|visib|eye|peek|unmask|表示|非表示/i.test(hints)) return true;
+        // An icon-only `type="button"` sitting next to the password input. (A
+        // button with no type attribute submits its form, so it is left alone.)
+        const wrapper = btn.parentElement;
+        return !text && type === 'button' && Boolean(wrapper && wrapper.querySelector('input[type="password"]'));
+      };
+
       const extractFieldData = (input, formIndex) => {
         const tagName = input.tagName.toUpperCase();
         const inputType = (input.type || 'text').toLowerCase();
@@ -151,21 +244,11 @@ async function detectLoginFields(loginUrl) {
         }
         if (!label) label = input.getAttribute('aria-label') || '';
 
-        // Build CSS selector
-        let selector = '';
-        if (input.id) {
-          selector = `#${CSS.escape(input.id)}`;
-        } else if (input.name) {
-          selector = `${tagName.toLowerCase()}[name="${CSS.escape(input.name)}"]`;
-        } else {
-          // Use nth-child as fallback
-          const parent = input.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children);
-            const index = siblings.indexOf(input);
-            selector = `${tagName.toLowerCase()}:nth-child(${index + 1})`;
-          }
-        }
+        // Unique on this page: an id or name when they identify it alone (the
+        // same selectors as before for well-formed pages), otherwise scoped or
+        // positional. The old `tag:nth-child(i)` fallback matched any element
+        // that happened to be the i-th child anywhere in the document.
+        const selector = uniqueSelector(input);
 
         return {
           tagName,
@@ -181,6 +264,8 @@ async function detectLoginFields(loginUrl) {
           // Carried out of the page so button ranking can run in Node, where it
           // is testable without a browser.
           className: typeof input.className === 'string' ? input.className : '',
+          title: input.getAttribute('title') || '',
+          passwordToggle: tagName === 'BUTTON' ? isPasswordToggle(input) : false,
           buttonText: tagName === 'BUTTON' ? (input.textContent || '').replace(/\s+/g, ' ').trim() : '',
           // Whether this field belongs to the login box itself. Fields inside a
           // real <form> always do; the no-form branch overrides this. Only
@@ -214,13 +299,16 @@ async function detectLoginFields(loginUrl) {
             /toggle|menu|nav|hamburger/i.test(btnClass);
 
           if (isNavigationButton) return; // Skip this button
+          if (isPasswordToggle(btn)) return; // Show/hide password, never a submit
 
           // Include if it's a submit button OR has submit-like text
           const isSubmitButton = btnType === 'submit' ||
             /login|sign.?in|log.?in|submit|enter|continue|go/i.test(text);
 
           if (isSubmitButton) {
-            const existing = fields.find(f => f.tagName === 'BUTTON' && f.selector === (btn.id ? `#${CSS.escape(btn.id)}` : ''));
+            // Selector for THIS button — not "the first button in the form".
+            const selector = uniqueSelector(btn);
+            const existing = fields.find(f => f.tagName === 'BUTTON' && f.selector === selector);
             if (!existing) {
               fields.push({
                 tagName: 'BUTTON',
@@ -228,12 +316,14 @@ async function detectLoginFields(loginUrl) {
                 name: btn.name || '',
                 id: btn.id || '',
                 placeholder: '',
-                selector: btn.id ? `#${CSS.escape(btn.id)}` : `form:nth-of-type(${formIndex + 1}) button`,
+                selector,
                 label: btn.textContent.trim(),
                 required: false,
                 ariaLabel: btn.getAttribute('aria-label') || '',
                 autocomplete: '',
                 className: typeof btn.className === 'string' ? btn.className : '',
+                title: btn.getAttribute('title') || '',
+                passwordToggle: false,
                 formIndex,
                 buttonText: btn.textContent.trim()
               });
