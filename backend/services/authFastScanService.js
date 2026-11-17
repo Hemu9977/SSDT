@@ -22,7 +22,15 @@ const { runUrlScan } = require('./urlscanService');
 const { startAsyncWebCheckScan } = require('./webCheckService');
 const { runLighthouseAudit } = require('./inHouse/lighthouseAudit');
 const { runPageCapture } = require('./inHouse/pageCapture');
+const { gradeHostWithBasicAuth } = require('./inHouse/headerGrade');
 const credentialVault = require('./scanCredentialVault');
+
+/** Provenance markers of the other Basic in-house results (never shown to customers). */
+function markBasic(result) {
+  return result && typeof result === 'object' && !result.error
+    ? { ...result, diagnosticSource: 'in-house', fallbackReason: 'basic_auth' }
+    : result;
+}
 
 /**
  * Run an in-house page check with the scan's Basic credential, scoped to the
@@ -113,18 +121,23 @@ async function ensureAuthFastScans(analysisId, userId) {
     // deny the other two, and the completion service only needs PageSpeed OR
     // Observatory to produce a real report.
     //
-    // HTTP Basic scans: the performance audit and the page capture run in-house,
-    // in a browser that answers Basic challenges for the target origin only — the
-    // credential is never given to a third-party service. The header grade
-    // (Observatory) and the site checks (WebCheck) stay unauthenticated and
-    // assess the public 401 response; the report says so.
+    // HTTP Basic scans: every check behind a report row runs in-house, signed in,
+    // with the credential sent only to the target origin — never to a third-party
+    // service, and never to the WebCheck container (which would only see the 401):
+    //   - the performance audit and the page capture, in a browser that answers
+    //     Basic challenges for the target origin only;
+    //   - WebCheck's firewall / hsts / tech-stack rules, on that same captured page;
+    //   - the security-header grade, whose one run also gives WebCheck's TLS grade.
+    // So a Basic report has the same sections, filled the same way, as any other.
     const [psiSettled, obsSettled, urlSettled] = await Promise.allSettled([
       claimed.pagespeedResult ? Promise.resolve(null)
         : isBasic ? basicAuthInHouse(analysisId, (basicAuth, sig) => runLighthouseAudit(claimed.target, { strategy: 'desktop', basicAuth, signal: sig }), signal)
           : getPageSpeedReport(claimed.target),
-      claimed.observatoryResult ? Promise.resolve(null) : scanHost(hostname),
+      claimed.observatoryResult ? Promise.resolve(null)
+        : isBasic ? basicAuthInHouse(analysisId, (basicAuth) => gradeHostWithBasicAuth(hostname, basicAuth), signal)
+          : scanHost(hostname),
       claimed.urlscanResult    ? Promise.resolve(null)
-        : isBasic ? basicAuthInHouse(analysisId, (basicAuth, sig) => runPageCapture(claimed.target, undefined, { basicAuth, signal: sig }), signal)
+        : isBasic ? basicAuthInHouse(analysisId, (basicAuth, sig) => runPageCapture(claimed.target, undefined, { basicAuth, signal: sig, siteChecks: true }), signal)
           : runUrlScan(claimed.target)
     ]);
     // The page checks are the fast scanners' only use of the credential.
@@ -137,10 +150,31 @@ async function ensureAuthFastScans(analysisId, userId) {
     }
 
     const val = (r) => (r.status === 'fulfilled' ? r.value : { error: r.reason?.message });
+    let obsValue = val(obsSettled);
+    let urlValue = val(urlSettled);
+    const precomputed = isBasic ? splitBasicResults() : null;
+    function splitBasicResults() {
+      // The header grade returns { observatory, tls }; the capture carries siteChecks.
+      // Store the score-card shapes as before; hand the rest to WebCheck.
+      const graded = obsValue && obsValue.observatory ? obsValue : null;
+      if (graded) obsValue = markBasic(graded.observatory);
+      const checks = urlValue && urlValue.siteChecks;
+      if (urlValue && typeof urlValue === 'object' && 'siteChecks' in urlValue) {
+        urlValue = { ...urlValue };
+        delete urlValue.siteChecks;
+      }
+      const unavailable = { error: 'unavailable' };
+      return {
+        tls: graded ? markBasic(graded.tls) : unavailable,
+        firewall: checks?.firewall || unavailable,
+        hsts: checks?.hsts || unavailable,
+        'tech-stack': checks?.['tech-stack'] || unavailable,
+      };
+    }
     const updateFields = {};
     if (!claimed.pagespeedResult)  { updateFields.pagespeedResult  = val(psiSettled); console.log('[ZAP-AUTH] PageSpeed completed'); }
-    if (!claimed.observatoryResult){ updateFields.observatoryResult = val(obsSettled); console.log('[ZAP-AUTH] Observatory completed'); }
-    if (!claimed.urlscanResult)    { updateFields.urlscanResult     = val(urlSettled); console.log('[ZAP-AUTH] URLScan completed'); }
+    if (!claimed.observatoryResult){ updateFields.observatoryResult = obsValue; console.log('[ZAP-AUTH] Observatory completed'); }
+    if (!claimed.urlscanResult)    { updateFields.urlscanResult     = urlValue; console.log('[ZAP-AUTH] URLScan completed'); }
 
     // Persist BEFORE WebCheck starts. This write is what closes the race: by the
     // time WebCheck can complete and trigger the completion service, the fast-scan
@@ -155,7 +189,7 @@ async function ensureAuthFastScans(analysisId, userId) {
       || (!claimed.webCheckResult.status && !claimed.webCheckResult.error);
     // startAsyncWebCheckScan also refuses a stopped scan; checking here saves the read.
     if (webCheckNotStarted && !signal.aborted) {
-      const webCheckInit = await startAsyncWebCheckScan(claimed.target, analysisId, userId)
+      const webCheckInit = await startAsyncWebCheckScan(claimed.target, analysisId, userId, precomputed ? { precomputed } : undefined)
         .catch(e => ({ status: 'failed', error: e.message }));
       await ScanResult.updateOne(
         { analysisId },

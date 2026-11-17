@@ -57,6 +57,11 @@ function targetHandler(req, res) {
   const ok = req.headers.authorization === hdr(CRED);
   if (req.url === '/go-cross') { res.writeHead(302, { Location: `${O.other}/challenge` }); return res.end(); }
   if (!ok) return challenge(res, 'Target');
+  if (req.url === '/site-checks') {
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Server': 'cloudflare', 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' });
+    return res.end('<!doctype html><html><head><meta name="generator" content="WordPress 6.6"></head><body>'
+      + '<script src="/wp-includes/js/jquery/jquery.min.js"></script><h1>FXTEST-SITE-CHECKS</h1></body></html>');
+  }
   if (req.url === '/') {
     return html(res, `<h1 id="canary">FXTEST-PROTECTED-HOME</h1>
       <img src="${O.other}/challenge.png">
@@ -182,6 +187,22 @@ test('real capturePage: authenticated screenshot, credential only to the target 
   assert.deepEqual(authedElsewhere(), []);
   const anon = await _capturePage(`${O.target}/`, { signal: new AbortController().signal }).catch(e => e);
   assert.ok(anon instanceof Error, 'without credentials the capture is refused, not a picture of the 401 page');
+});
+
+test('real capturePage with siteChecks: WAF, HSTS and technologies measured on the signed-in page, credential only to the target', async (t) => {
+  if (!browserOk) return t.skip(skipReason);
+  reset();
+  const out = await _capturePage(`${O.target}/site-checks`, { signal: new AbortController().signal, basicAuth: { origin: O.target, ...CRED }, siteChecks: true });
+  const c = out.siteChecks;
+  assert.ok(c, 'site checks missing');
+  assert.deepEqual([c.firewall.hasWaf, c.firewall.waf, c.firewall.diagnosticSource], [true, 'Cloudflare', 'in-house']);
+  assert.deepEqual([c.hsts.enabled, c.hsts.maxAge, c.hsts.compatible], [true, 31536000, false]);
+  const names = c['tech-stack'].technologies.map(x => x.name);
+  assert.ok(names.includes('WordPress') && names.includes('jQuery') && names.includes('Cloudflare'), names.join(','));
+  assert.deepEqual(authedElsewhere(), []);
+  // Without asking, the capture result carries no site checks.
+  const plain = await _capturePage(`${O.target}/site-checks`, { signal: new AbortController().signal, basicAuth: { origin: O.target, ...CRED } });
+  assert.equal(plain.siteChecks, null);
 });
 
 test('real runLighthouseAudit with basicAuth: scores the protected page, nothing sent elsewhere', async (t) => {

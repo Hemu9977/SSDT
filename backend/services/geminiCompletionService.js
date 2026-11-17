@@ -15,6 +15,7 @@
 const ScanResult = require('../models/ScanResult');
 const User = require('../models/User');
 const { refineReport } = require('./geminiService');
+const { isHstsEnabled } = require('./inHouse/siteChecks');
 const { getFullResults } = require('./webCheckService');
 const { handleScanComplete } = require('./notificationService');
 const { publishScanProgress } = require('./scanProgressService');
@@ -162,7 +163,7 @@ function _buildStructuredFallbackReport(scan, zapReport, webCheckReport) {
   const firewallChecked = !!wc.firewall && !wc.firewall.error;
   const hstsChecked      = !!wc.hsts     && !wc.hsts.error;
   const hasWaf  = firewallChecked && !!wc.firewall.hasWaf;
-  const hstsOn  = hstsChecked && !!wc.hsts.enabled;
+  const hstsOn  = hstsChecked && isHstsEnabled(wc.hsts);
   const techs   = (wc['tech-stack']?.technologies || []).slice(0, 6).map(t => t.name || t).filter(Boolean);
 
   const lines = [];

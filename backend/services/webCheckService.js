@@ -35,6 +35,7 @@ const { createConcurrencyLimiter } = require('../utils/concurrencyLimiter');
 const { CircuitBreaker }     = require('../utils/circuitBreaker');
 const { runLighthouseAudit } = require('./inHouse/lighthouseAudit');
 const { getTlsReport }       = require('./inHouse/headerGrade');
+const { normalizeHsts }      = require('./inHouse/siteChecks');
 const { withInHouseFallback, httpErrorReason, lighthouseUnusable } = require('./inHouse/fallback');
 const { validateScanResult } = require('../utils/resultValidation');
 const config                 = require('../config/scanConfig');
@@ -178,6 +179,14 @@ const IN_HOUSE_FALLBACKS = {
     inHouse: (url, signal) => runLighthouseAudit(url, { strategy: 'mobile', signal }),
     unusable: lighthouseUnusable,
   },
+};
+
+/** A check the fast scanners already ran signed in (HTTP Basic). Throws its failure like a scan would. */
+const takePrecomputed = (scanType, result) => {
+  if (!result || typeof result !== 'object' || result.error) {
+    throw new Error(`${scanType}: ${result?.error || 'unavailable'}`);
+  }
+  return result;
 };
 
 /**
@@ -327,7 +336,7 @@ const runAllScans = async (url) => {
   settled.forEach((result, index) => {
     const type = ALLOWED_SCANS[index];
     if (result.status === 'fulfilled' && result.value.success) {
-      scanResults[type] = result.value.data;
+      scanResults[type] = type === 'hsts' ? normalizeHsts(result.value.data) : result.value.data;
     } else {
       scanResults[type] = {
         error:     result.reason?.message || result.value?.error || 'Scan failed',
@@ -427,7 +436,15 @@ const extractWebCheckSummary = (results) => {
  * Start WebCheck scans asynchronously (non-blocking, saves results to MongoDB).
  * Idempotent — checks both DB state and in-memory map before launching.
  */
-const startAsyncWebCheckScan = async (url, analysisId, userId) => {
+/**
+ * @param {object} [opts]
+ * @param {Record<string, object>} [opts.precomputed] - HTTP Basic scans: results for
+ *   checks already run signed in by the fast scanners (tls, firewall, hsts,
+ *   tech-stack). Those checks are taken from here and never sent to the container,
+ *   which only sees the 401. An `{ error }` entry is recorded as that check's failure
+ *   — never retried unauthenticated and presented as the protected page.
+ */
+const startAsyncWebCheckScan = async (url, analysisId, userId, { precomputed = null } = {}) => {
   console.log(`[WebCheck] startAsyncWebCheckScan | analysisId=${analysisId} url=${url}`);
 
   // ── 1. DB check (source of truth, prevents restarts after ECS task replacement) ──
@@ -562,7 +579,7 @@ const startAsyncWebCheckScan = async (url, analysisId, userId) => {
     async () => {
       const s = _analysisScheduler.stats();
       console.log(`[WebCheck] Analysis scheduled | analysisId=${analysisId} schedulerActive=${s.active} schedulerQueued=${s.queued}`);
-      return runWebCheckInBackground(url, analysisId, userId, controller);
+      return runWebCheckInBackground(url, analysisId, userId, controller, { precomputed });
     },
     { signal: controller.signal }
   ).catch(err => {
@@ -597,7 +614,7 @@ const startAsyncWebCheckScan = async (url, analysisId, userId) => {
  * @param {string}          userId       - Owner
  * @param {AbortController} controller   - Controls cancellation for this scan
  */
-const runWebCheckInBackground = async (url, analysisId, userId, controller) => {
+const runWebCheckInBackground = async (url, analysisId, userId, controller, { precomputed = null } = {}) => {
   const parentSignal = controller.signal;
   const wallStart    = Date.now();
 
@@ -624,7 +641,8 @@ const runWebCheckInBackground = async (url, analysisId, userId, controller) => {
     completedCount++;
 
     if (scanResult.success) {
-      results[scanType] = scanResult.data;
+      // The container's hsts result has no `enabled`; every reader needs it.
+      results[scanType] = scanType === 'hsts' ? normalizeHsts(scanResult.data) : scanResult.data;
     } else {
       if (scanResult.errorType === 'empty_result') {
         results[scanType] = emptyResultPayload(scanType);
@@ -718,7 +736,9 @@ const runWebCheckInBackground = async (url, analysisId, userId, controller) => {
       const t0 = Date.now();
       let scanResult;
       try {
-        const data = await runScan(scanType, url, perScanController.signal);
+        const data = precomputed && Object.prototype.hasOwnProperty.call(precomputed, scanType)
+          ? takePrecomputed(scanType, precomputed[scanType])
+          : await runScan(scanType, url, perScanController.signal);
         const durationMs = Date.now() - t0;
         console.log(
           `[WebCheck] ${scanType} OK | durationMs=${durationMs} analysisId=${analysisId} ` +

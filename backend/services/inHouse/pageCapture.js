@@ -4,6 +4,7 @@ const { LAUNCH_ARGS, chromiumPath, runInBrowserSlot } = require('./browserSlot')
 const { countryOf } = require('../../utils/ipCountry');
 const { lookupVerdict } = require('./threatVerdict');
 const { installScopedBasicAuth } = require('./scopedBasicAuth');
+const { collectPageData, siteChecksFromPage } = require('./siteChecks');
 
 /**
  * In-house page capture — the fallback for the external page-analysis service
@@ -81,8 +82,12 @@ function buildCaptureResult({ requestedUrl, finalUrl, main, responses, requestCo
   };
 }
 
-/** Load the page, observe its traffic, and take a screenshot. */
-async function capturePage(url, { signal, basicAuth = null }) {
+/**
+ * Load the page, observe its traffic, and take a screenshot.
+ * `siteChecks`: also run WebCheck's firewall / hsts / tech-stack rules on this same
+ * (signed-in) document — HTTP Basic scans, where the container only ever sees 401.
+ */
+async function capturePage(url, { signal, basicAuth = null, siteChecks = false }) {
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: chromiumPath(),
@@ -142,6 +147,17 @@ async function capturePage(url, { signal, basicAuth = null }) {
     const security = mainResponse.securityDetails();
     const remote = mainResponse.remoteAddress?.() || {};
 
+    let checks = null;
+    if (siteChecks) {
+      try {
+        const pageData = await page.evaluate(collectPageData);
+        checks = siteChecksFromPage({ headers, pageData, url: page.url() || url });
+      } catch (err) {
+        // The capture itself is still valid; the caller reports these checks unavailable.
+        console.warn(`[PageCapture] Site checks unavailable: ${err.message}`);
+      }
+    }
+
     return {
       capture: buildCaptureResult({
         requestedUrl: url,
@@ -157,7 +173,8 @@ async function capturePage(url, { signal, basicAuth = null }) {
         requestCount,
         dataLength
       }),
-      screenshot
+      screenshot,
+      siteChecks: checks
     };
   } finally {
     signal.removeEventListener('abort', close);
@@ -185,14 +202,15 @@ async function storeScreenshot(buffer) {
  * @param {number} [maxWaitTime] - overall capture budget in ms
  * @param {object} [opts]
  * @param {AbortSignal} [opts.signal] - caller cancellation (skips a queued capture, closes a running one)
+ * @param {boolean} [opts.siteChecks] - also return `siteChecks` (firewall / hsts / tech-stack) from the same load
  * @returns {Promise<object>} Page analysis result (see buildCaptureResult + verdicts/screenshot)
  */
-async function runPageCapture(targetUrl, maxWaitTime = CAPTURE_TIMEOUT_MS, { basicAuth = null, signal } = {}) {
+async function runPageCapture(targetUrl, maxWaitTime = CAPTURE_TIMEOUT_MS, { basicAuth = null, signal, siteChecks = false } = {}) {
   console.log(`🔍 [PageCapture] Starting for: ${targetUrl}${basicAuth ? ' (HTTP Basic, target origin only)' : ''}`);
 
   // The verdict is DNS-only, so it runs beside the capture rather than in the slot.
   const [captured, verdicts] = await Promise.all([
-    runInBrowserSlot('Page capture', ctx => capturePage(targetUrl, { ...ctx, basicAuth }), { timeoutMs: maxWaitTime, signal }),
+    runInBrowserSlot('Page capture', ctx => capturePage(targetUrl, { ...ctx, basicAuth, siteChecks }), { timeoutMs: maxWaitTime, signal }),
     lookupVerdict(targetUrl)
   ]);
 
@@ -215,7 +233,10 @@ async function runPageCapture(targetUrl, maxWaitTime = CAPTURE_TIMEOUT_MS, { bas
     verdicts,
     screenshot,
     screenshotFileId,
-    reportUrl: null
+    reportUrl: null,
+    // Only when asked for; the caller moves these into WebCheck's results and never
+    // stores them with the capture.
+    ...(siteChecks ? { siteChecks: captured.siteChecks || null } : {})
   };
 }
 
