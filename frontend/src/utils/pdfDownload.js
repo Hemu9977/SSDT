@@ -55,7 +55,7 @@ async function boundedFetch(url, init, read) {
 const readJson = (res) => res.json().catch(() => ({}));
 
 /** A 200 can still be a proxy's HTML error page or an empty body. */
-const isPdfBlob = (blob) => !!blob && blob.size > 0 && /pdf/i.test(blob.type || '');
+export const isPdfBlob = (blob) => !!blob && blob.size > 0 && /pdf/i.test(blob.type || '');
 
 function reportError(messageKey, cause) {
   const err = new Error(messageKey);
@@ -65,7 +65,7 @@ function reportError(messageKey, cause) {
 }
 
 /** Map a non-success poll/start response to an i18n key. */
-function classifyFailure(status, body) {
+export function classifyFailure(status, body, lang = 'ja') {
   if (status === 429) {
     if (body?.errorCode === 'GEMINI_KEY_EXHAUSTED') return 'geminiKeyExhausted';
     return 'pdfRateLimited';
@@ -73,6 +73,13 @@ function classifyFailure(status, body) {
   if (body?.errorCode === 'EN_CONTENT_NOT_ENGLISH' || body?.errorCode === 'EN_TEMPLATE_NOT_ENGLISH') {
     return 'englishPdfOnly';
   }
+  // The backend never renders a report whose prose is not fully in the chosen
+  // language. UNAVAILABLE: the translation service could not be used (outage,
+  // rate limit) — a later retry succeeds, and finished translations are kept.
+  if (body?.errorCode === 'REPORT_TRANSLATION_UNAVAILABLE') {
+    return lang === 'ja' ? 'pdfTranslationUnavailable' : 'pdfTranslationUnavailableAny';
+  }
+  if (body?.errorCode === 'REPORT_LOCALIZATION_INCOMPLETE') return 'pdfLocalizationIncomplete';
   if (body?.errorCode === 'SCAN_NOT_COMPLETE' || status === 400) return 'pdfScanIncomplete';
   return 'pdfGenerationFailed';
 }
@@ -129,7 +136,7 @@ export async function downloadPdfReport({
     } catch (err) {
       throw reportError('pdfGenerationFailed', err); // network failure or timeout
     }
-    if (!res.ok) throw reportError(classifyFailure(res.status, body));
+    if (!res.ok) throw reportError(classifyFailure(res.status, body, lang));
     if (!body?.jobId) throw reportError('pdfGenerationFailed');
     return body.jobId;
   };
@@ -184,6 +191,6 @@ export async function downloadPdfReport({
       throw reportError('pdfJobExpired');
     }
 
-    throw reportError(classifyFailure(res.status, body));
+    throw reportError(classifyFailure(res.status, body, lang));
   }
 }

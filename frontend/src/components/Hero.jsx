@@ -76,6 +76,8 @@ const Hero = ({ historicalScan }) => {
   const [pdfDownloading, setPdfDownloading] = useState(false);
   const [pdfProgress, setPdfProgress] = useState(0);
   const [pdfProgressMessage, setPdfProgressMessage] = useState('');
+  // i18n key of the last PDF failure; shown after the generating state ends, cleared on the next attempt.
+  const [pdfError, setPdfError] = useState(null);
   const [pdfDropdownOpen, setPdfDropdownOpen] = useState(false);
 
   // Close PDF dropdown when clicking outside
@@ -962,6 +964,7 @@ const Hero = ({ historicalScan }) => {
       target: report?.target,
     };
 
+    setPdfError(null);
     setPdfDownloading(true);
     setPdfProgress(0);
     setPdfProgressMessage(lang === 'ja' ? t('initializingJapanesePdf') : t('initializingEnglishPdf'));
@@ -996,12 +999,12 @@ const Hero = ({ historicalScan }) => {
     } catch (err) {
       // err.messageKey is an i18n key; the backend's English text is never shown.
       console.error('PDF download failed:', err);
-      setPdfProgressMessage(t(err.messageKey || 'pdfGenerationFailed'));
-      setTimeout(() => {
-        setPdfDownloading(false);
-        setPdfProgress(0);
-        setPdfProgressMessage('');
-      }, 4000);
+      // End the generating state at once (the button used to keep saying
+      // "Generating…" beside the error) and keep the message until the next attempt.
+      setPdfDownloading(false);
+      setPdfProgress(0);
+      setPdfProgressMessage('');
+      setPdfError(err.messageKey || 'pdfGenerationFailed');
     }
   }, [pdfDownloading, report, t]);
 
@@ -1865,6 +1868,9 @@ const Hero = ({ historicalScan }) => {
                   {t('pdfProgressNote')}
                 </p>
               </div>
+            )}
+            {pdfError && !pdfDownloading && (
+              <p className="pdf-error-message" role="alert">{t(pdfError)}</p>
             )}
 
             <p className="download-note">

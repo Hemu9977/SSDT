@@ -8,6 +8,7 @@ import '../styles/ZapReportEnhanced.scss';
 import { API_BASE } from '../config/api';
 import { useTranslation } from '../contexts/TranslationContext';
 import { requestTimeout } from '../utils/requestTimeout';
+import { isPdfBlob } from '../utils/pdfDownload';
 
 // The evidence view streams the scan's detailed file server-side, which takes a
 // few seconds for a very large scan; past this the panel offers a retry.
@@ -207,6 +208,16 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
                     alert(t('geminiKeyExhausted'));
                     throw new Error(t('geminiKeyExhausted'));
                 }
+                if (errorData.errorCode === 'REPORT_TRANSLATION_UNAVAILABLE') {
+                    const err = new Error('REPORT_TRANSLATION_UNAVAILABLE');
+                    err.messageKey = lang === 'ja' ? 'pdfTranslationUnavailable' : 'pdfTranslationUnavailableAny';
+                    throw err;
+                }
+                if (errorData.errorCode === 'REPORT_LOCALIZATION_INCOMPLETE') {
+                    const err = new Error('REPORT_LOCALIZATION_INCOMPLETE');
+                    err.messageKey = 'pdfLocalizationIncomplete';
+                    throw err;
+                }
                 if (response.status === 400 && (errorData.errorCode === 'EN_CONTENT_NOT_ENGLISH' || errorData.errorCode === 'EN_TEMPLATE_NOT_ENGLISH')) {
                     alert(t('englishPdfOnly'));
                     throw new Error(errorData.error || 'English-only validation failed');
@@ -215,6 +226,12 @@ const ZapReportEnhanced = ({ zapData, scanId, apiPrefix = '/api/zap', currentLan
             }
 
             const blob = await response.blob();
+            // A 200 can still be an empty body or a proxy's HTML page: never save that as a PDF.
+            if (!isPdfBlob(blob)) {
+                const err = new Error('NOT_A_PDF');
+                err.messageKey = 'pdfGenerationFailed';
+                throw err;
+            }
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;

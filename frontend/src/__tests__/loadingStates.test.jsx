@@ -184,6 +184,67 @@ describe('downloadPdfReport', () => {
     await advance(6000);
     expect(await result).toBe('pdfGenerationFailed');
   });
+
+  it('a report that could not be fully localized resolves to its own translated message', async () => {
+    global.fetch = jest.fn((url) => (url.endsWith('/pdf-job')
+      ? json(200, { jobId: 'j' })
+      : json(503, { status: 'failed', errorCode: 'REPORT_LOCALIZATION_INCOMPLETE', error: 'Report could not be fully localized' })));
+    const result = settle(run('ja'));
+    await advance(6000);
+    expect(await result).toBe('pdfLocalizationIncomplete');
+    expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+  });
+
+  it('translation service unavailable: its own message, naming the Japanese PDF only for a JA report', async () => {
+    global.fetch = jest.fn((url) => (url.endsWith('/pdf-job')
+      ? json(200, { jobId: 'j' })
+      : json(503, { status: 'failed', errorCode: 'REPORT_TRANSLATION_UNAVAILABLE', error: 'Report could not be fully localized' })));
+    for (const [lang, key] of [['ja', 'pdfTranslationUnavailable'], ['en', 'pdfTranslationUnavailableAny']]) {
+      const result = settle(run(lang));
+      await advance(6000);
+      expect(await result).toBe(key);
+    }
+    expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+  });
+
+  it('a failed JA attempt does not poison the next one: the retry downloads the PDF', async () => {
+    let attempt = 0;
+    global.fetch = jest.fn((url) => {
+      if (url.endsWith('/pdf-job')) { attempt += 1; return json(200, { jobId: `j${attempt}` }); }
+      return attempt === 1
+        ? json(503, { status: 'failed', errorCode: 'REPORT_TRANSLATION_UNAVAILABLE' })
+        : pdf();
+    });
+    const first = settle(run('ja'));
+    await advance(6000);
+    expect(await first).toBe('pdfTranslationUnavailable');
+    const second = settle(run('ja'));
+    await advance(6000);
+    expect(await second).toBe('downloaded');
+    const saved = HTMLAnchorElement.prototype.click.mock.instances.map((a) => a.download);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatch(/^security_report_JA_.*\.pdf$/);
+  });
+});
+
+// ── Scan panels: a failed PDF never looks like it is still generating ────────
+describe('PDF failure state in both scan panels', () => {
+  // Rendering the panels needs a whole finished scan; this pins the contract in
+  // the source instead (Hero and AuthenticatedScanPanel must stay identical).
+  const fs = require('fs');
+  const path = require('path');
+  const source = (f) => fs.readFileSync(path.join(__dirname, '..', 'components', f), 'utf8');
+  for (const file of ['Hero.jsx', 'AuthenticatedScanPanel.jsx']) {
+    it(`${file}: ends the generating state at once and keeps a translated alert until the next attempt`, () => {
+      const src = source(file);
+      const catchBlock = src.slice(src.indexOf("console.error('PDF download failed:'"), src.indexOf("console.error('PDF download failed:'") + 600);
+      expect(catchBlock).toMatch(/setPdfDownloading\(false\);/);
+      expect(catchBlock).toMatch(/setPdfError\(err\.messageKey \|\| 'pdfGenerationFailed'\)/);
+      expect(catchBlock).not.toMatch(/setTimeout/);
+      expect(src).toMatch(/\{pdfError && !pdfDownloading && \(\s*<p className="pdf-error-message" role="alert">\{t\(pdfError\)\}<\/p>/);
+      expect(src).toMatch(/setPdfError\(null\);\s*setPdfDownloading\(true\);/);
+    });
+  }
 });
 
 // ── Scan viewer (opened from Recent Scans) ───────────────────────────────────

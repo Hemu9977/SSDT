@@ -29,6 +29,8 @@ const LOGIN_ERROR_MESSAGE_KEYS = {
   UNEXPECTED_ERROR: 'loginUnexpectedError',
   LOGIN_PANEL_NOT_FOUND: 'loginPanelNotFound',
   SUBMIT_NO_EFFECT: 'loginSubmitNoEffect',
+  LOGIN_REJECTED: 'loginRejected',
+  LOGIN_NO_RESPONSE: 'loginNoResponse',
   AUTH_UNCONFIRMED: 'loginAuthUnconfirmed',
   NO_SESSION_COOKIES: 'loginNoSessionCookies'
 };
@@ -110,6 +112,8 @@ const AuthenticatedScanPanel = () => {
   const [pdfDownloading, setPdfDownloading] = useState(false);
   const [pdfProgress, setPdfProgress] = useState(0);
   const [pdfProgressMessage, setPdfProgressMessage] = useState('');
+  // i18n key of the last PDF failure; shown after the generating state ends, cleared on the next attempt.
+  const [pdfError, setPdfError] = useState(null);
   const [pdfDropdownOpen, setPdfDropdownOpen] = useState(false);
 
   // General UI
@@ -834,6 +838,7 @@ const AuthenticatedScanPanel = () => {
       target: report?.target,
     };
 
+    setPdfError(null);
     setPdfDownloading(true);
     setPdfProgress(0);
     setPdfProgressMessage(lang === 'ja' ? t('initializingJapanesePdf') : t('initializingEnglishPdf'));
@@ -868,12 +873,12 @@ const AuthenticatedScanPanel = () => {
     } catch (err) {
       // err.messageKey is an i18n key; the backend's English text is never shown.
       console.error('PDF download failed:', err);
-      setPdfProgressMessage(t(err.messageKey || 'pdfGenerationFailed'));
-      setTimeout(() => {
-        setPdfDownloading(false);
-        setPdfProgress(0);
-        setPdfProgressMessage('');
-      }, 4000);
+      // End the generating state at once (the button used to keep saying
+      // "Generating…" beside the error) and keep the message until the next attempt.
+      setPdfDownloading(false);
+      setPdfProgress(0);
+      setPdfProgressMessage('');
+      setPdfError(err.messageKey || 'pdfGenerationFailed');
     }
   }, [pdfDownloading, report, scanId, t]);
 
@@ -986,13 +991,23 @@ const AuthenticatedScanPanel = () => {
   };
 
   // Render field selector helper
+  // `selected` is a detected field object (`{ selector, label, … }`), and
+  // `onChange` is handed one back. It used to receive `e.target.value` — a bare
+  // selector string — while the login test reads `submitButton.selector`, so
+  // any choice made in this dropdown was silently ignored and the test fell
+  // back to pressing Enter. The object also never matched an option value, so
+  // the detected default was not shown as selected.
   const renderFieldSelector = (label, options, selected, onChange) => {
     if (!options || options.length === 0) return null;
+    const selectedValue = typeof selected === 'string' ? selected : (selected?.selector || '');
 
     return (
       <div className="field-selector">
         <label>{label}</label>
-        <select value={selected || ''} onChange={(e) => onChange(e.target.value)}>
+        <select
+          value={selectedValue}
+          onChange={(e) => onChange(options.find(field => field.selector === e.target.value) || null)}
+        >
           <option value="">{t('selectFieldOption', { label })}</option>
           {options.map((field, idx) => (
             <option key={idx} value={field.selector}>
@@ -1411,6 +1426,14 @@ const AuthenticatedScanPanel = () => {
               <div className="test-result test-success">
                 <strong>{'✅'} {t('authenticationVerified')}</strong>
                 <p>{t('readyToStartAuthenticatedSecurityScan')}</p>
+                {/* Sites that sign in to a separate API host with a token: that
+                    host is where the signed-in content lives, and it is scanned
+                    too. Shown so the customer knows exactly what will be tested. */}
+                {Array.isArray(testResult.authHosts) && testResult.authHosts.length > 0 && (
+                  <p className="auth-hosts-note">
+                    {t('authApiHostsIncluded', { hosts: testResult.authHosts.join(', ') })}
+                  </p>
+                )}
               </div>
             )}
 
@@ -2182,8 +2205,11 @@ const AuthenticatedScanPanel = () => {
                             <div className="pdf-progress-fill" style={{ width: `${pdfProgress}%` }} />
                           </div>
                           <p className="pdf-progress-message">{pdfProgressMessage}</p>
-                          <p className="pdf-progress-note">PDF generation includes AI formatting and Japanese translation. This may take up to 2 minutes.</p>
+                          <p className="pdf-progress-note">{t('pdfProgressNote')}</p>
                         </div>
+                      )}
+                      {pdfError && !pdfDownloading && (
+                        <p className="pdf-error-message" role="alert">{t(pdfError)}</p>
                       )}
 
                       <p className="download-note">PDF: Professional bilingual report (EN + JA) | JSON: Raw data for analysis</p>

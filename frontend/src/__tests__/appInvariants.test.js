@@ -288,12 +288,26 @@ describe('sign-in verification', () => {
     expect(missing).toEqual([]);
   });
 
-  it.each(['SUBMIT_NO_EFFECT', 'AUTH_UNCONFIRMED', 'LOGIN_PANEL_NOT_FOUND'])(
+  it.each(['SUBMIT_NO_EFFECT', 'LOGIN_REJECTED', 'LOGIN_NO_RESPONSE', 'AUTH_UNCONFIRMED', 'LOGIN_PANEL_NOT_FOUND', 'NO_SESSION_COOKIES'])(
     '%s resolves to a specific message rather than the generic fallback',
     (code) => {
       expect(loginCodeKeys[code]).toBeDefined();
     }
   );
+
+  it('the submit-button dropdown hands back the field object, never a bare string', () => {
+    // The login test reads `submitButton.selector`. The dropdown used to pass
+    // `e.target.value` (a string), so a customer's choice was silently ignored
+    // and only Enter was pressed — the 2026-11-13 SUBMIT_NO_EFFECT.
+    const renderer = panel.slice(
+      panel.indexOf('const renderFieldSelector'),
+      panel.indexOf('return (', panel.indexOf('const renderFieldSelector')) + 600
+    );
+    expect(renderer).toMatch(/onChange\(options\.find\(field => field\.selector === e\.target\.value\) \|\| null\)/);
+    expect(renderer).not.toMatch(/onChange\(e\.target\.value\)/);
+    expect(renderer).toMatch(/selected\?\.selector/);
+    expect(panel).toMatch(/submitButton: selectedSubmitButton,/);
+  });
 
   it('has a third outcome between success and failure', () => {
     // "Could not confirm" must be distinguishable from a green tick: the scan

@@ -496,6 +496,22 @@ body.dark {
     font-style: italic;
   }
 
+  // A failed PDF download: shown once the generating state has ended, until the
+  // next attempt (Hero and AuthenticatedScanPanel).
+  .pdf-error-message {
+    width: 100%;
+    max-width: 480px;
+    margin: 1.5rem auto 0;
+    padding: 0.75rem 1rem;
+    border: 1px solid #e81123;
+    border-radius: 6px;
+    background: linear-gradient(rgba(232, 17, 35, 0.08), rgba(232, 17, 35, 0.08)) var(--panel-bg);
+    color: #e81123;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+  }
+
   .pdf-progress-container {
     width: 100%;
     max-width: 400px;

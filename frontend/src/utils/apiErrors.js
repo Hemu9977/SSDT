@@ -108,6 +108,12 @@ const CODE_KEYS = {
   NO_UPCOMING_OCCURRENCE: 'errNoUpcomingOccurrence',
   SCHEDULE_CREATE_FAILED: 'failedSaveSchedule',
   SCHEDULE_UPDATE_FAILED: 'failedSaveSchedule',
+
+  // ── PDF reports (sent as `errorCode`; utils/pdfDownload.js resolves it) ─────
+  // The report's prose could not be fully localized, so no PDF was produced.
+  REPORT_LOCALIZATION_INCOMPLETE: 'pdfLocalizationIncomplete',
+  // The translation service could not be used, so no PDF was produced; retry later.
+  REPORT_TRANSLATION_UNAVAILABLE: 'pdfTranslationUnavailable',
 };
 
 /**
