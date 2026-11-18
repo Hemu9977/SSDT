@@ -24,7 +24,7 @@ Phase 0 (proof of concept, 2026-11-08) recommended GO WITH CHANGES. This branch 
 | 8 | Origin-scoped CDP handler; never `page.authenticate` / `extraHeaders` | B | Done (`scopedBasicAuth.js`) |
 | 9 | Handler wired into the real page capture | B | Done (`pageCapture.js`) |
 | 10 | Real `runLighthouseAudit` uses a Puppeteer page for Basic scans | B | Done; the existing path is unchanged for every other scan |
-| 11 | Observatory (and WebCheck) unauthenticated; disclosed | B | Done (UI notice + both PDFs) |
+| 11 | ~~Observatory (and WebCheck) unauthenticated; disclosed~~ **Reversed 2026-11-09:** header grade, TLS, WAF, HSTS and technologies run signed in (origin-scoped); the PDF has the same sections as other scans | B | Done (see "Report parity" below) |
 | 12 | Pre-flight probe + coverage classifier | B | Done (`basicAuthProbe.js`, `measureAuthCoverage`) |
 | 13 | In-memory vault; `authSessions` TTL for Basic; origin binding | B | Done (Basic 15 min; form unchanged at 24 h) |
 | 14 | One scan per ZAP instance | — | Unchanged: the existing `zap:lock:auth` lock |
@@ -221,7 +221,7 @@ It asserts:
    - a deploy or restart drops in-flight Basic credentials, and those scans fail closed;
    - a second backend task would need sticky routing or a shared encrypted store.
 3. **Out-of-process frames and workers are not answered.** The handler only sees the page target, so challenges from out-of-process iframes and service workers are never answered (fail closed). A cross-origin iframe on the **target** origin that itself requires Basic would therefore render as unauthenticated in the screenshot and audit. This doesn't affect the vulnerability scan.
-4. **Header grade and WebCheck are unauthenticated** (by decision) and reflect the public 401 response. This is disclosed in the UI and both PDFs.
+4. ~~Header grade and WebCheck are unauthenticated~~ — superseded 2026-11-09 by **Report parity**: the header grade runs signed in through an origin-scoped guard on the grading engine's HTTP clients (`headerGrade.gradeHostWithBasicAuth`; never the engine's `customHeaders`, which sends to every host), and WebCheck's TLS / WAF / HSTS / technologies come from that grade and from the signed-in page capture (`inHouse/siteChecks.js`), handed to WebCheck as `precomputed` results so the container never asks for them. WebCheck's other detail checks (headers, cookies, redirects, quality…) are still unauthenticated; the UI notice says so. The PDF no longer has a Basic-only scope section. Evidence: `tests/basicAuthSiteChecks.test.js` (real local HTTPS servers: the credential never reaches a same-port subdomain on a redirect hop, another origin, plain HTTP or a concurrent unauthenticated grading; mutation-checked) and `scopedBasicAuth.browser.test.js` (real Chromium).
 5. **The external urlscan/PSI services are skipped for Basic scans.** The screenshot and performance card come from the in-house engines only, and there is no CrUX field data.
 6. **Not supported:**
    - Digest, NTLM and Negotiate (refused with `BASIC_SCHEME_UNSUPPORTED`);
@@ -247,6 +247,15 @@ It asserts:
 ## 7. Deployment plan (requires approval; not executed)
 
 Order matters, because ZAP must not require a key before the backend sends one.
+
+> **Superseded for the ZAP key (2026-11-09):** the backend half shipped as `fortexa-backend:97`
+> (2026-11-08). The ZAP half is now `infrastructure/zap-key-rotation/` — run `zapKeyRollout.js`
+> step by step; its README has the evidence. What changed against the plan below:
+> `ZAP_AUTH_API_KEY` is **not** a strong random string (25 chars, non-alphanumeric) and the unused
+> `ZAP_API_KEY` key holds the publicly leaked hard-coded key, so step 1 rotates it; ZAP logs every
+> `-config` value (`Setting config api.key = …`), so the keyed command silences that logger;
+> and with the key enforced the only working backend is `:97`, so **rollback is ZAP → keyless
+> `:21`/`:12`, never backend `:95`** (whose image never sends the key on readiness probes).
 
 1. **Secret.** No new secret. `fortexa-backend-secrets:ZAP_AUTH_API_KEY` exists. Confirm its value is a strong random string.
 2. **Backend.**

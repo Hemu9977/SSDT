@@ -98,13 +98,13 @@ grep "ZAP_API_KEY" backend/.env
 **Expected Output:**
 ```
 ZAP_API_URL=http://localhost:8080
-ZAP_API_KEY=ssdt-secure-zap-2025
+ZAP_API_KEY=<your own random key: openssl rand -hex 32>
 ```
 
 **If not found:** Add these lines to `backend/.env`:
 ```env
 ZAP_API_URL=http://localhost:8080
-ZAP_API_KEY=ssdt-secure-zap-2025
+ZAP_API_KEY=<your own random key: openssl rand -hex 32>
 ```
 
 ---

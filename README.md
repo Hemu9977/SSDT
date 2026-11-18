@@ -222,7 +222,7 @@ EMAIL_PASS=your_app_password
 
 # OWASP ZAP Configuration (Docker container)
 ZAP_API_URL=http://localhost:8080
-ZAP_API_KEY=ssdt-secure-zap-2025
+ZAP_API_KEY=<your own random key: openssl rand -hex 32>
 
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID=your_google_client_id_from_cloud_console
@@ -299,7 +299,7 @@ npm run build
 **ZAP Connection Failed:**
 
 - Ensure the Docker container `zap-daemon` is running (`docker ps`).
-- Check if `ZAP_API_KEY` in `.env` matches the key in `docker-compose.yml` (default: `ssdt-secure-zap-2025`).
+- Check if `ZAP_API_KEY` in `.env` matches the key in `docker-compose.yml` (there is no default: `docker-compose.yml` refuses to start without `ZAP_API_KEY` in the root `.env`; generate one with `openssl rand -hex 32`).
 
 **Ports Not Available:**
 

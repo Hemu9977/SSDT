@@ -33,14 +33,17 @@ MERN stack (MongoDB, Express 5, React 19, Node.js) web application that performs
   ZAP locks, capacity state, scan progress pub/sub, Gemini dedup, PDF job metadata).
 - **Production Redis: self-managed Valkey 9.0 on EC2** (`i-0ae101f3fba1e6cf5`,
   `redis.fortexa.internal` / 10.0.128.50, private subnet, TLS-only with Fortexa's private CA,
-  ACL user `fortexa-app`, AOF + RDB, `noeviction`). Production revision:
-  **`fortexa-backend:86`** (image `v55`, pinned by digest); `REDIS_URL`, `REDIS_TLS_CA` and
-  `REDIS_TLS_SERVERNAME` all come from `fortexa-redis/app`. Runbook, scripts and verification:
-  `infrastructure/redis-ec2/README.md`.
-- **Rollback: Redis Cloud via `fortexa-backend:85`** — the same `v55` digest as 86, with
-  `REDIS_URL` from `fortexa-backend-secrets:REDIS_URL` and no `REDIS_TLS_*`. Do not delete
-  Redis Cloud or that key during the rollback window. Revision 83 (image `v54` by mutable tag)
-  is an old, superseded rollback — do not use it.
+  ACL user `fortexa-app`, AOF + RDB, `noeviction`). Production revision: **`fortexa-backend:98`**
+  (image `v66` = `sha256:7526c61b…`, deployed 2026-11-09 14:20 UTC: log redaction, report
+  localization, no `*.backup*` files). `:98` is `:97` with only the image changed, so `:97`
+  (image `v_basicauth`) is the immediate rollback. `REDIS_URL`,
+  `REDIS_TLS_CA` and `REDIS_TLS_SERVERNAME` all come from `fortexa-redis/app`. Runbook, scripts
+  and verification: `infrastructure/redis-ec2/README.md`.
+- **The Redis Cloud rollback (`fortexa-backend:85`) no longer exists.** Its image (`v55`, also
+  `:86`'s) and every image before `v61` were deleted from ECR (the repo has no lifecycle
+  policy), so revisions `:80–:90` cannot start. Startable revisions are `:91–:97`, all on the
+  EC2 Valkey. Whether Redis Cloud and `fortexa-backend-secrets:REDIS_URL` are still needed is
+  now a deliberate decision, not a rollback window. Re-check ECR before naming any rollback.
 - **ElastiCache is retired.** Cluster `fortexa-redis` was deleted on 2026-10-03 (it never
   served traffic) and is neither a production nor a rollback target. Neither 86 nor 85
   references `fortexa-backend-secrets:ELASTICACHE_REDIS_URL`; revisions 80–84 still do and
@@ -118,6 +121,70 @@ detection) fetches from our own IP, so the client's allowlist entry covers it.
 - Same 26 score cards + ZAP Report + WebCheck Analysis
 - Uses ZAP instance on port 8081
 
+### Form-login test outcomes (`loginTestService.testLogin`, 2026-11-16)
+- Detection (`loginDetectionService.js`) gives every field and button a selector that
+  `querySelectorAll` resolves to **that element only** (`uniqueSelector`: id → name → test hooks →
+  `type` → positional path). The old `form:nth-of-type(N) button` resolved to the first button in the
+  form — on credit.villdesign.com the show-password toggle, so no login was ever sent. Show/hide-password
+  controls are never offered or auto-picked (`passwordToggle`), and `submitLogin` refuses to click one
+  even when a stale stored selector points at it.
+- The submit dropdown hands `onChange` the field **object**. It used to pass the option's string, which
+  `testLogin` ignored (`.selector` of a string) — only Enter was pressed. `testLogin` now also accepts a
+  bare selector string.
+- `submitLogin` watches the network (`utils/loginRequestSignals.js`): a login request is a write (or a
+  GET form navigation) that carries a typed value, a password-shaped key, is a document POST, or hits an
+  auth-shaped path — never analytics/telemetry/beacons. Once one is seen **no other strategy runs**
+  (no second password submission) and the answer is awaited up to 25 s (cold APIs; ALB idle is 60 s).
+- Codes: `SUBMIT_NO_EFFECT` = nothing was sent and the page did not move; `LOGIN_REJECTED` = the login
+  form is still there, same URL, no session cookie, and the request got 4xx/5xx or a JSON refusal, or a
+  failure-worded notice/toast appeared; `LOGIN_NO_RESPONSE` = sent, never answered (or network error);
+  `NO_SESSION_COOKIES` (route) = signed in but no cookie to carry. Live-region text (`role=status`,
+  `aria-live`) is never the signed-in marker.
+- A failed test logs one line of codes only: `[ZAP-AUTH] Login test failed: code=… strategy=…
+  loginRequest=… matchedBy=… status=… outcome=… timedOut=… evidence=… cookies=…`.
+- **Token sessions (approved 2026-11-16).** Apps that keep the session as a Bearer token in
+  `localStorage` and send it to a separate API origin (e.g. credit.villdesign.com: `lumina_token` →
+  `credit-managment-managment.onrender.com`) are now carried. `testLogin`'s `watchBearerTokens` records
+  the `Authorization: Bearer` the app itself sends after signing in; a token counts only once the API
+  answered it 2xx, never one used before the login, never to analytics hosts. If none was seen it reloads
+  the signed-in page once (apps send it on start-up). Result field `bearer: [{ origin, authorization,
+  seedUrls (GETs only, ≤50), verifyUrl ("who am I" call) }]` — in memory only, never logged/stored/returned.
+  - **Policy: `utils/bearerApiScope.js` `eligibleBearerSessions`**, applied by `testLogin`, `/test-login`,
+    the scheduler and the scan worker alike. (1) A login that set a **session cookie** gets **no** token
+    hosts (`testLogin` returns `hasSessionCookie`; cookie sites scan exactly as before). (2) **Shared
+    third-party API providers are never eligible** (`SHARED_API_PROVIDER_DOMAINS`: payments, identity,
+    Google/Firebase, Supabase/BaaS, SaaS APIs, analytics, CDNs; every `*.amazonaws.com` except API
+    Gateway/AppSync/ELB/EC2). Customer hosting — `*.onrender.com` (credit's API), Heroku, Vercel, Cloud
+    Run… — stays eligible. (3) Hosts match on a **label boundary** (`hostMatchesDomain`), never a suffix
+    (`credit.villdesign.com.evil.net`). (4) **Logout-shaped URLs** (`LOGOUT_PATH_FRAGMENTS`: logout,
+    signOut, revoke, sessions/destroy…) are never seeds or the `verifyUrl`. Origins/seeds also pass
+    `checkScanTarget`; seeds are same-origin GETs, ≤50.
+  - `/test-login` accepts cookies **or** bearer. The browser gets `sessionKind` and `authHosts` (host
+    names only); the UI says that host is scanned too.
+  - Scan (`zapAuthService`) — **the site scan is exactly the entered URL** (`ascan url=targetUrl`, site
+    context = host + subdomains via boundary-safe `siteScopeRegexes`; the old `https?://host.*` also
+    matched `host.evil.net`). **Each API host is a separate scan**: own context `auth_api_<scanId>_<i>`
+    (exact origin, logout paths excluded via `apiContextExcludeRegexes`), `ascan url=<origin>`, run after
+    the site scan, preceded by a session check (`before_api_scan`); outcome in `apiScans[]`
+    (`completed`/`not_started`/`stopped_stuck`). A token for the site's own origin rides with the site
+    scan (seeds inside the entered URL only). Replacer rule `auth_bearer_<scanId>_<i>` (POST,
+    `bearerRuleRegex` = exact origin **minus logout paths**, so no scanner ever sends the token to a
+    logout URL; initiators 2,3,6,10). Alerts: site base = target, API base = `<origin>/` (ZAP's
+    `baseurl` is a prefix), and every alert must be on its base's origin. Revocation also removes the
+    API contexts. Session probed via `verifyUrl` (401/403 → re-login, which only renews origins
+    already in scope); API coverage → `apiAuthEvidence`/`api_only_unauthorized`. Token values are
+    scrubbed like cookies. Cookie-only scans make the same ZAP requests as before.
+  - Verified on the pinned ZAP image (2026-11-16, internal Docker network, production host names as
+    aliases): two active scans (site URL, then API origin); 477/477 API requests carried the token
+    (231 attacks), 0 site requests did, 0 logout requests, 0 requests to `credit.villdesign.com.evil.net`
+    or `api.stripe.com`; no `auth_*` rule or scan context left. Cookie scan alongside: one active scan,
+    cookie on every site request, no API traffic.
+- Tests: `tests/loginRequestSignals.test.js` (pure), `tests/loginFlows.browser.test.js` (real Chromium,
+  local fixtures incl. a copy of the credit.villdesign.com shape; skips without Chromium),
+  `tests/bearerScanLifecycle.test.js` (real scan worker, fake ZAP: scope, logout, look-alike alerts,
+  failure / refused API scan / Stop mid-API-scan cleanup), `tests/bearerApiScope.test.js` (policy
+  tables, ZAP regexes, `/test-login`), `tests/bearerScheduler.test.js` (real `triggerAuthenticatedScan`).
+
 ### HTTP Basic authentication (authenticated scans, manual-only)
 Second auth method beside the login form (radio choice in step 1 of `AuthenticatedScanPanel.jsx`;
 form login is the default and unchanged). Design and evidence: `docs/BASIC_AUTH_IMPLEMENTATION.md`.
@@ -138,8 +205,27 @@ form login is the default and unchanged). Design and evidence: `docs/BASIC_AUTH_
 - Browser checks (page capture, performance audit) use `services/inHouse/scopedBasicAuth.js`
   (CDP `Fetch.authRequired`, target origin only, one attempt). **Never `page.authenticate()` or
   Lighthouse `extraHeaders`** — both send the credential to other origins (Phase 0 evidence).
-  The external PSI/urlscan services are skipped for Basic scans; the header grade (Observatory)
-  and WebCheck stay **unauthenticated** — disclosed in the UI and both PDFs (`renderAuthScopeNote`).
+  The external PSI/urlscan/Observatory services are skipped for Basic scans.
+- **Basic reports have the same sections, filled the same way, as any other** (2026-11-09; this
+  reversed design decision 11). Every check behind a PDF row runs in-house, signed in:
+  - header grade: `headerGrade.gradeHostWithBasicAuth` — the engine's HTTP clients get a guard
+    (AsyncLocalStorage-scoped request interceptor on `Session.prototype.init`) that adds
+    `Authorization` only for the exact target origin and strips it on every redirect hop that
+    leaves it (follow-redirects keeps it for same-port subdomains). **Never the engine's
+    `customHeaders`** — it sends to every host. The engine is pinned exactly (1.7.2); the guard
+    patches its internal `Session`, so re-verify on any upgrade (the tests fail if it stops applying).
+    One run also yields WebCheck's `tls` grade.
+  - WebCheck `firewall` / `hsts` / `tech-stack`: `inHouse/siteChecks.js` ports of the container
+    rules, run on the page capture's own signed-in document (`runPageCapture(..., { siteChecks:
+    true })`) — no extra request, no new credential path.
+  - Those four go to `startAsyncWebCheckScan(..., { precomputed })` and never to the container
+    (which only sees 401). A failed one is recorded as failed, never retried unauthenticated.
+  - Other WebCheck detail checks (headers, cookies, redirects, quality…) still run without the
+    credential; only the UI notice (`basicScopeNotice`) says so. The PDF's Basic-only scope
+    section is gone (`RENDERER_REVISION` 4).
+- **HSTS was "No" in every report** until 2026-11-09: the container's `hsts` returns
+  `{ message, compatible, hstsHeader }`, never `enabled`, which every reader used. Results are now
+  normalized when recorded (`normalizeHsts`) and read via `isHstsEnabled` (also covers stored ones).
 - Schedules refuse Basic (`BASIC_AUTH_MANUAL_ONLY`). `checkScanTarget` refuses any URL with
   embedded credentials (`URL_HAS_CREDENTIALS`).
 - Redaction (`utils/credentialRedaction.js`): credential header values are redacted at capture
@@ -149,6 +235,107 @@ form login is the default and unchanged). Design and evidence: `docs/BASIC_AUTH_
 - ZAP API key is required (`ZAP_API_KEY` / `ZAP_AUTH_API_KEY`, same secret); images pinned to
   `ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47…` (what production actually ran). `zap-sg` already
   limits :8080 to `fortexa-backend-sg`.
+- **Production ZAP stays keyless until `infrastructure/zap-key-rotation/` is rolled out** —
+  `zapKeyRollout.js` (rotate → restart backend → register → verify → switch; README has the
+  evidence and rollback = ZAP back to keyless `:21`/`:12`, never the backend). Facts verified
+  against the pinned image: ZAP logs every `-config`/`-configfile` value at INFO
+  (`Setting config api.key = <key>`), so the keyed task definitions set `AbstractParam` to WARN
+  in a home `log4j2.properties` — keep that when editing the command; a missing/wrong key is a
+  closed connection (`socket hang up`, curl 52), not 401/403; the start command refuses an
+  empty or non-alphanumeric key. Only backend `:97`+ can drive a keyed ZAP.
+
+### PDF report localization (`services/reportLocalization.js`)
+Every prose field of both PDF generators (`generateSingleLanguagePdf`, `generateZapPdf`; public,
+form-login and Basic scans alike) goes through `localizeReport`, which returns localized prose
+**or throws before anything is rendered** — `REPORT_TRANSLATION_UNAVAILABLE` (the model could not
+be used: outage, rate limit, credentials, deadline; "try again later") or
+`REPORT_LOCALIZATION_INCOMPLETE` (anything else). An English-only line is never drawn in a JA
+report and no finding is ever dropped. (Root cause of the old mixed JA reports: chunks of five
+whole findings as free-text JSON failed `JSON.parse` and silently stayed English.)
+- **2026-11-17 production failure (fixed):** every JA report with an XSS finding was refused. ZAP's
+  shared WASC-8 solution line "Consult the XSS Prevention Cheat Sheet…" came back (correctly) as
+  "…XSS Prevention Cheat Sheet を参照してください。"; the audit read "Prevention Cheat Sheet" as an
+  English run, and at temperature 0 every retry returned the identical text. Found by hashing the
+  pinned image's alert text against the logged unit hash (`6bc5e042a6`). Fixes below.
+- **Prose vs data.** Prose = finding title/description/solution, AI analysis, static labels,
+  template text. Data (never translated, never sent) = occurrences/evidence, URLs, references,
+  ids, risk/confidence enums, counts, scan values, target, scan history.
+- **Labels** come only from `i18n/reportStrings.js` (`t(lang, key)`); JA finding titles from the
+  reviewed `i18n/zapAlertNames.ja.js` (Japanese only — `originalName`/`pluginId` are kept on the
+  finding, never drawn), anything else via the engine.
+- **Pipeline (per line):** `i18n/protectTokens.js` masks secrets/identity/technical literals as
+  `{{Tn}}` → **JA: the scanner's own reviewed Japanese** (`i18n/zapCatalog.ja.json`, 1,244 lines
+  from the pinned ZAP image's `vulnerabilities_ja_JP.xml` + `Messages_ja_JP.properties`, aligned
+  line by line; rebuilt by `scripts/buildZapJaCatalog.js <plugin dir>` whenever the ZAP image
+  digest or the audit changes — `tests/zapJaCatalog.test.js` checks the digest) → store lookup →
+  `geminiService.translateReportUnits` batches (schema-constrained JSON, temperature 0, thinking
+  off; no `seed`) → per-unit validation (`hardCheck`: placeholders, no new URL/host/email, no
+  Markdown, length, enough target language; then the language audit) → a batch that fails as a
+  whole is halved; **a rejected unit goes straight to the single-unit ladder: Flash → Flash in
+  repair mode (told why — fixed templates + the plain English words it kept — temperature 0.3)
+  → Pro in repair mode** (Pro cannot disable thinking: budget 512). Rate limits (429) re-send the
+  same batch after 2/5/10 s, never split. Outage (6 availability failures, no success) fails fast.
+- **Last resort (JA, user decision 2026-11-17):** a unit with no clean translation after the ladder
+  is drawn with its **best Japanese candidate** if it passed every hard check and failed only
+  wording rules (`en_run`/`en_share`/`en_function_word`/`en_word_in_short_field`); a short
+  sentence-free literal (`isLiteralLine`, ≤ 6 words, no function word, not a title) the model
+  returned unchanged twice, once in repair mode, is kept as is. Both are logged
+  (`translation_best_japanese_used` / `translation_literal_kept`, `softAccepted`, `softReasons`)
+  and never stored. A candidate that breaks a hard check is never used.
+- **`i18n/languageAudit.js`** judges words, not characters: an explicit allowlist
+  (`i18n/technicalTerms.js`; plain words match only in canonical case) keeps header names, ids,
+  products, protocol and document names (`… Cheat Sheet` titles, capitalised words only) and
+  notation (incl. command-line options) legal in Japanese; English function words, 3+ word runs,
+  a high English share, or any English word in a title fail. Extend it only with proper names and
+  notation found by `scripts/zapCatalogSweep.js <plugin dir> <out.json>` (every scanner alert text
+  through the real model; 2026-11-17: 747 lines + 199 titles, 7/7 chunks complete), never with
+  ordinary English words.
+- **Store: `models/ReportTranslation.js`** (`report_translations`). `_id` = sha256(ENGINE_VERSION ‖
+  lang ‖ kind ‖ masked text); no source text, no unmasked value. Rows are immutable
+  (`$setOnInsert`, E11000 = success) and re-read after writing so concurrent writers converge.
+  ENGINE_VERSION hashes model, prompts (incl. the repair note), schema and scrubber — **not the
+  audit**: every stored row is re-validated against the current audit when read, so an allowlist
+  fix keeps stored translations. TTL 180 days on `lastUsedAt`. The single-flight map is **per
+  process**; correctness across tasks comes from the store. Completed units are stored even when
+  the report is refused, so a retry only translates what was missing.
+- **Jobs / UI:** both codes reach the UI as `errorCode` (job poll and the ZAP PDF routes: 503) →
+  `pdfTranslationUnavailable` (JA; `…Any` for EN) / `pdfLocalizationIncomplete`. Hero and
+  AuthenticatedScanPanel end the generating state at once on failure and show a persistent
+  `role="alert"` line until the next attempt. A finished job is reused only while its
+  `reportVersion` (`pdfService.reportVersion()`, renderer revision + engine) matches.
+- Logs carry counts, categories and unit-hash prefixes only (`[Localization] {json}`); `_generate`
+  logs error class/status, never `err.message` (SDK and `JSON.parse` messages quote model text).
+- Real-model check (local, Vertex via gcloud ADC, no DB): `node scripts/pdfLocalizationSmoke.js
+  <outDir> [--outage]` — 16 PDFs (incl. an XSS report) + drawn-text dumps; run twice to see zero
+  model calls.
+
+### Logging: no secrets, ever (`utils/logRedaction.js`)
+- `server.js`, `workers/startWorker.js` **and every script** (`scripts/*.js`,
+  `clear-stuck-scans.js`, `test-stripe.js` — one-off ECS tasks log to CloudWatch too) call
+  `require('…/utils/logRedaction').install()` right after dotenv, before anything else loads.
+  Keep new entry points and scripts doing the same (the test enforces it for both folders).
+- It wraps `console.log/info/warn/error/debug` **and `dir/dirxml/trace/table`** (those used to
+  print the raw object): errors lose their HTTP request/response (axios `config` holds API-key
+  headers, `apikey` params and POSTed login bodies), a Redis error's `command.args` becomes a
+  count (ioredis puts AUTH's `[user, password]` there), sensitive object keys are redacted at
+  any depth, and the text is scrubbed of secret env values (incl. `*_PASS`/`*_PWD`, and the
+  password inside every URL-valued variable — `MONGO_URI`, `REDIS_URL`), OAuth (`ya29.`) /
+  `AIza` keys, JWTs, Bearer/Basic/Digest credentials (also letters-only base64 and
+  URL-encoded `Basic+…`), Stripe/AWS keys, PEM private keys, `user:pass@` URLs, secret query
+  params, credential header lines, and the value after any secret-named key in JSON
+  (incl. double-encoded), inspected objects, form bodies and prose.
+- Outside tests it also wraps `process.stdout/stderr.write` for strings (the `debug` module
+  behind ioredis/socket.io/puppeteer writes there directly) and registers early
+  `uncaughtException`/`unhandledRejection` handlers: Node's own crash printer dumps an axios
+  error's config verbatim. They step aside once the entry point registers its own.
+- Checked against 10,000 real production log lines: only the OAuth-token-prefix leak and
+  nothing legitimate changed. Never loosen a rule without re-running that kind of check.
+- Still never log a secret at the call site — not even a prefix ("token starts with …" leaked
+  the Google OAuth token prefix on every start until 2026-11-09). Log presence (`!!value`) or
+  length. `tests/secretLogging.test.js` runs `geminiService` in child processes, checks the
+  redactor, and scans every backend `console.*` call for secret env values, sliced keys/tokens
+  and secret variables; it also forbids `*.backup` source copies (one shipped a hard-coded ZAP
+  key in the image; `.dockerignore` now excludes `*.backup`/`*.bak`).
 
 ### Shared Components
 - **`WebCheckDetails.jsx`** - Renders all 29 WebCheck scan types. Props: `{ webCheckReport, theme }`. Used by both Hero.jsx and AuthenticatedScanPanel.jsx.
@@ -269,8 +456,17 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
 - `backend/tests/pdfEnglishReport.test.js` — runs the real `generateSingleLanguagePdf` for a
   Japanese site and records every drawn string: EN and JA generate in either order (EN used to
   abort with `EN_CONTENT_NOT_ENGLISH`), the site's Japanese is drawn translated with URLs
-  restored, raw HTTP evidence stays verbatim, EN still generates when Gemini is down, a repeat
-  download reuses `TranslationCache`, and no URL/host/operator name/email reaches Gemini.
+  restored, raw HTTP evidence stays verbatim, EN is **refused** (not drawn half-Japanese) when the
+  site's Japanese cannot be translated, an English-only EN report needs no model, a repeat
+  download reuses the stored translations, and no URL/host/operator name/email reaches Gemini.
+- Report localization: `reportLocalization.test.js` (the reproduced Path Traversal failure, every
+  failure category, retry-by-halving, outage, deadline, scrubber, injection, store/single-flight/
+  cross-task/E11000, logs), `languageAudit.test.js` (false-positive and false-negative tables),
+  `pdfLocalization.test.js` (real generators: {Basic, form, public} × {full, vulnerability} ×
+  {en, ja} audited on drawn text, evidence verbatim, glyphs, margins, outage refusal, page breaks),
+  `pdfJobLocalization.test.js` (job fails with the code, nothing in GridFS, retry reuses work,
+  version-aware reuse), `reportTranslationCall.test.js` (the real SDK request and response
+  classification). Fixture: `tests/fixtures/zapAlerts/stgEbx8.en.json` (exact scanner text).
   (The PDF no longer calls `formatScanDataForPdf`: after 19 Aug 2026 it never once beat its
   35s timeout in production, so every PDF used the deterministic data after waiting 35s.)
 - `backend/tests/zapDetailedAlerts.test.js` — the streaming reader for the ZAP detailed-alerts
@@ -304,8 +500,13 @@ cd frontend && CI=true npx react-scripts build              # must stay warning-
   `basicAuthScanLifecycle.test.js` (the real scan worker against a fake ZAP: revocation on every
   exit, no stored secrets, concurrent isolation), `basicAuthOutputs.test.js` (PDF EN/JA, JSON
   export, Gemini inputs), `basicAuthRoutes.test.js`, and `scopedBasicAuth.browser.test.js` (real
-  Chromium: iframes, workers, redirects, real capture + Lighthouse; skips without Chromium).
-  Frontend: `src/__tests__/basicAuthInvariants.test.js`.
+  Chromium: iframes, workers, redirects, real capture + Lighthouse + site checks; skips without
+  Chromium), `basicAuthSiteChecks.test.js` (the site-check ports, HSTS normalization, the header
+  grade's credential guard against real local HTTPS servers — run in a subprocess,
+  `tests/support/basicGradeScenario.js`, because the engine's sockets inside the runner process
+  intermittently corrupted its IPC frames under full-suite load — the Basic fast-scan
+  orchestration, and the PDF rows). `pdfLocalization.test.js` also asserts Basic, form and public
+  reports draw identical section headings. Frontend: `src/__tests__/basicAuthInvariants.test.js`.
 - `frontend/src/__tests__/appInvariants.test.js` — route guard decision table,
   import resolution, locale parity, that no backend string reaches the UI, and
   plan-catalog parity with the backend catalog.

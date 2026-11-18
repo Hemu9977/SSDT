@@ -62,7 +62,7 @@ Add these to your `backend/.env`:
 ```env
 # ZAP Configuration (already exists in your .env.example)
 ZAP_API_URL=http://localhost:8080
-ZAP_API_KEY=ssdt-secure-zap-2025
+ZAP_API_KEY=<your own random key: openssl rand -hex 32>
 ```
 
 ---
