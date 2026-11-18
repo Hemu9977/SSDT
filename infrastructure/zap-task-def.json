@@ -29,7 +29,7 @@
         "-c"
       ],
       "command": [
-        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.key=\"$ZAP_API_KEY\" -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
+        "mkdir -p /home/zap/.ZAP && printf -- '-Xms2g -Xmx11g\n' > /home/zap/.ZAP/.ZAP_JVM.properties && case \"$ZAP_API_KEY\" in \"\" | *[!A-Za-z0-9]*) echo 'ZAP_API_KEY is missing or not alphanumeric - refusing to start' >&2; exit 1;; esac && unzip -p /zap/zap-*.jar org/zaproxy/zap/resources/log4j2-home.properties > /home/zap/.ZAP/log4j2.properties && printf '\\nlogger.abstractparam.name = org.parosproxy.paros.common.AbstractParam\\nlogger.abstractparam.level = warn\\n' >> /home/zap/.ZAP/log4j2.properties && exec zap.sh -daemon -silent -host 0.0.0.0 -port 8080 -config api.key=\"$ZAP_API_KEY\" -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true"
       ],
       "environment": [],
       "stopTimeout": 30,
