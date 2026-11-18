@@ -8,6 +8,7 @@
  * Exit code 0 = every probe was refused as expected.
  */
 
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const Redis = require('ioredis');
 
 const url = new URL(process.env.REDIS_URL);

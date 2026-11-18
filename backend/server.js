@@ -6,6 +6,9 @@
   const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env';
   require('dotenv').config({ path: path.resolve(__dirname, envFile) });
 }
+// Before anything else can log: no credential, token or API key may reach the
+// logs, whatever a call site passes to console.* (utils/logRedaction.js).
+require('./utils/logRedaction').install();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');

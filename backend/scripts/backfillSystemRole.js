@@ -10,6 +10,7 @@
 // Usage: node scripts/backfillSystemRole.js
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const mongoose = require('mongoose');
 
 async function run() {

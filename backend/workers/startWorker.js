@@ -23,6 +23,8 @@ if (process.env.DISABLE_WORKER === 'true') {
   const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env';
   require('dotenv').config({ path: path.resolve(__dirname, '..', envFile) });
 }
+// Before anything else can log (see utils/logRedaction.js).
+require('../utils/logRedaction').install();
 
 const connectDB             = require('../db');
 const { createRedisClient, disconnectAll } = require('../config/redis');

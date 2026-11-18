@@ -56,6 +56,7 @@ async function buildRoster({ User, Organization, checkEmail = null }) {
 async function main() {
   // Loaded here, not at module scope: tests import the functions below.
   require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+  require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
   const mongoose = require('mongoose');
   const User = require('../models/User');
   const Organization = require('../models/Organization');

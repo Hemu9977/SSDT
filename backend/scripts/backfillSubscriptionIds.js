@@ -21,6 +21,7 @@
 // Usage: node scripts/backfillSubscriptionIds.js [--apply]
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const mongoose = require('mongoose');
 const Organization = require('../models/Organization');
 const User = require('../models/User');

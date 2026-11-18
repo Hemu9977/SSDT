@@ -1,5 +1,6 @@
-const mongoose = require('mongoose');
 require('dotenv').config();
+require('./utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
+const mongoose = require('mongoose');
 
 const cleanupService = require('./services/cleanupService');
 const ScanResult = require('./models/ScanResult');

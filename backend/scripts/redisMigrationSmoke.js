@@ -19,6 +19,7 @@
  * Exit code 0 = every check passed.
  */
 
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const crypto = require('crypto');
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const { createRedisClient, createDedicatedConnection, disconnectAll } = require('../config/redis');

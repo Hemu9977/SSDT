@@ -1,6 +1,7 @@
-const mongoose = require('mongoose');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
+const mongoose = require('mongoose');
 
 const Organization = require('../models/Organization');
 

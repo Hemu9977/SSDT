@@ -1,3 +1,4 @@
+require('./utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const http = require('http');
 
 const data = JSON.stringify({

@@ -4,6 +4,7 @@
  * Run: node backend/scripts/patch_combined_analysis.js
  */
 'use strict';
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const fs   = require('fs');
 const path = require('path');
 

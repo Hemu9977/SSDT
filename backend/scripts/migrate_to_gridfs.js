@@ -1,7 +1,8 @@
+require('dotenv').config();
+require('../utils/logRedaction').install(); // before anything that logs (utils/logRedaction.js)
 const mongoose = require('mongoose');
 const ScanResult = require('../models/ScanResult');
 const gridfsService = require('../services/gridfsService');
-require('dotenv').config();
 
 async function migrateToGridFS() {
     try {

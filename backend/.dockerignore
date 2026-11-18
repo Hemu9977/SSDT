@@ -10,3 +10,9 @@ Dockerfile*
 # Local artefacts that must not ship in the production image
 zap-report-*
 test-stripe.js
+
+# Editor/backup copies of source files (one shipped a hard-coded ZAP API key).
+# Trailing * also catches timestamped copies such as foo.py.backup-20260107-003958.
+*.backup*
+*.bak*
+*.orig
