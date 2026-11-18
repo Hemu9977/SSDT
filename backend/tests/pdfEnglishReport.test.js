@@ -10,8 +10,9 @@
  * Japanese character — including each occurrence's `evidence`, which the report
  * never even draws, so the site's own HTML was enough (production, 26 Oct 2026:
  * eleven attempts on one scan, all failed). The English report now translates the
- * site's Japanese, keeps raw HTTP evidence verbatim, and still generates when
- * translation is unavailable.
+ * site's Japanese, keeps raw HTTP evidence verbatim, and — since reports are
+ * never rendered with mixed-language prose — refuses with
+ * REPORT_TRANSLATION_UNAVAILABLE when that translation is unavailable.
  *
  * Run with: node --test backend/tests/
  */
@@ -35,15 +36,10 @@ const chain = {
 };
 stub('models/ScanResult.js', { find: () => chain });
 
-// TranslationCache: in memory, keyed like the real model.
-const cacheRows = new Map();
-stub('models/TranslationCache.js', {
-  generateHash: (text, lang) => `${lang}:${text}`,
-  find: ({ hash }) => ({
-    select: () => ({ lean: async () => hash.$in.filter(h => cacheRows.has(h)).map(h => ({ hash: h, translatedText: cacheRows.get(h) })) })
-  }),
-  saveTranslation: async (text, lang, translated) => { cacheRows.set(`${lang}:${text}`, translated); }
-});
+// The translation store, in memory (same query shapes as models/ReportTranslation.js).
+const { memoryTranslationModel, fakeJapanese } = require('./support/localizationStubs');
+const translationModel = memoryTranslationModel();
+stub('models/ReportTranslation.js', translationModel);
 
 // GridFS: the detailed-alerts file, streamed in small chunks.
 const gridfs = { files: new Map(), opened: [] };
@@ -58,7 +54,9 @@ stub('services/gridfsService.js', {
 });
 stub('services/reportTemplateDocx.js', { getReportTemplateStaticContent: async () => ({}) });
 
-// Gemini: a phrasebook translator that records what it was sent.
+// Gemini: a phrasebook translator (JA→EN) that records what it was sent. Into
+// Japanese it uses a deterministic stand-in. Text it does not know comes back
+// unchanged, which the engine rejects as untranslated.
 const PHRASES = {
   'The site is in good shape. ページタイトル「株式会社サンプル」 is served over HTTPS.':
     'The site is in good shape. The page title "Sample Co., Ltd." is served over HTTPS.',
@@ -67,14 +65,13 @@ const PHRASES = {
 };
 const gemini = { sent: [], fail: false };
 stub('services/geminiService.js', {
-  translateText: async (texts, lang) => {
+  translateReportUnits: async (units, lang) => {
+    const texts = units.map(u => u.text);
     gemini.sent.push({ texts, lang });
-    if (gemini.fail) throw new Error('Gemini quota exhausted');
-    return texts.map(t => PHRASES[t] ?? t);
+    if (gemini.fail) throw Object.assign(new Error('report translation failed: transient'), { category: 'transient' });
+    return { translations: new Map(units.map(u => [u.id, lang === 'ja' ? fakeJapanese(u.text) : (PHRASES[u.text] ?? u.text)])) };
   },
   formatAiAnalysisForPdf: async () => null,
-  translateAiAnalysisSectionsToJapanese: async (x) => x,
-  translateVulnerabilitiesToJapanese: async (x) => x,
 });
 
 // Record everything drawn.
@@ -89,8 +86,7 @@ PDFDocument.prototype.text = function (str, ...rest) {
 // Keep test output readable; the generator logs every stage.
 for (const k of ['log', 'warn']) console[k] = () => {};
 
-const { generateSingleLanguagePdf, buildScanHistoryTable, collectJapanesePassages,
-        translateJapaneseForEnglishReport } = require('../services/pdfService');
+const { generateSingleLanguagePdf, buildScanHistoryTable } = require('../services/pdfService');
 const { _cache: alertsCache } = require('../services/zapDetailedAlerts');
 
 const JA = /[぀-ヿ㐀-鿿]/;
@@ -138,7 +134,7 @@ test.beforeEach(() => {
   drawn = [];
   gemini.sent = [];
   gemini.fail = false;
-  cacheRows.clear();
+  translationModel.rows.clear();
   alertsCache.clear();
   gridfs.opened = [];
   gridfs.files.set('file-1', detailedAlerts());
@@ -180,10 +176,19 @@ test('nothing identifying reaches Gemini: no URL, host, operator name or email',
   }
 });
 
-test('EN generates when translation is unavailable; the Japanese is drawn as is', async () => {
+test('EN is refused, not drawn half-Japanese, when the site\'s Japanese cannot be translated', async () => {
   gemini.fail = true;
-  assert.ok(isPdf(await generateSingleLanguagePdf(makeScan(), 'en', 'all')));
-  assert.ok(drawnText().includes('ページタイトル「株式会社サンプル」'));
+  await assert.rejects(generateSingleLanguagePdf(makeScan(), 'en', 'all'),
+    (e) => e.code === 'REPORT_TRANSLATION_UNAVAILABLE' && e.detail.lang === 'en' && e.detail.unresolvedUnits > 0);
+  assert.equal(drawn.length, 0, 'nothing was rendered');
+});
+
+test('EN of an English-only site needs no translation and generates during an outage', async () => {
+  gemini.fail = true;
+  const scan = makeScan({ refinedReport: '# Security Analysis\n## Summary\nThe site is in good shape.' });
+  gridfs.files.set('file-1', detailedAlerts().map(a => ({ ...a, description: a.description.split('\n')[0] })));
+  assert.ok(isPdf(await generateSingleLanguagePdf(scan, 'en', 'all')));
+  assert.equal(gemini.sent.length, 0, 'no translation was requested');
 });
 
 test('downloading the English report again reuses the stored translations', async () => {
@@ -222,31 +227,6 @@ test('the plan severity filter applies when the detailed file is missing', async
   const text = drawnText();
   assert.match(text, /SQL Injection/);
   assert.ok(!text.includes('Absence of Anti-CSRF Tokens'));
-});
-
-test('passages: only drawn prose is collected, one whole line at a time', () => {
-  const roots = {
-    scanData: { header: { target: 'https://例え.jp' }, summary: { riskLevel: { en: 'Low', ja: '低' } } },
-    vulnerabilities: [{
-      name: 'X', description: 'Intro.\n  TLS 1.2を有効にしてください (recommended)  \nOutro.',
-      sampleUrls: [{ url: 'https://e.jp/日本' }], reference: 'https://e.jp/参考',
-      occurrences: [{ evidence: '氏名', request: { body: '本文' } }]
-    }]
-  };
-  const passages = collectJapanesePassages(roots);
-  assert.deepEqual(passages.map(p => p.text), ['TLS 1.2を有効にしてください (recommended)']);
-  passages[0].set('Enable TLS 1.2 (recommended)');
-  assert.equal(roots.vulnerabilities[0].description, 'Intro.\n  Enable TLS 1.2 (recommended)  \nOutro.');
-});
-
-test('a translation that drops a placeholder or comes back redacted is not used', async () => {
-  const roots = { a: '詳細は https://example.co.jp をご覧ください', b: 'お知らせ', c: '会社概要' };
-  const out = await translateJapaneseForEnglishReport(roots, {
-    cache: { get: async () => ({}), put: () => {} },
-    translate: async (texts) => texts.map(t => (t.includes('{{T0}}') ? 'See the page for details' : t === 'お知らせ' ? 'REDACTED news' : 'Company profile'))
-  });
-  assert.deepEqual(out, { passages: 3, translated: 1 });
-  assert.deepEqual(roots, { a: '詳細は https://example.co.jp をご覧ください', b: 'お知らせ', c: 'Company profile' });
 });
 
 test('scan history table comes from the database rows, English rows English-only', () => {

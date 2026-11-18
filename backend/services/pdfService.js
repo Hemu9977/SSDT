@@ -2,8 +2,12 @@
 
 /**
  * pdfService.js
- * Generates bilingual (English + Japanese) security scan PDF reports.
- * Depends on: geminiService.js, zapDetailedAlerts.js (GridFS), ScanResult model.
+ * Generates single-language (English or Japanese) security scan PDF reports.
+ * Depends on: reportLocalization.js (all prose localization and the language
+ * gate), zapDetailedAlerts.js (GridFS), ScanResult model, i18n/reportStrings.js.
+ *
+ * A report whose prose cannot be fully localized is never rendered: both
+ * generators reject with code REPORT_LOCALIZATION_INCOMPLETE instead.
  *
  * Usage:
  *   const { generateSingleLanguagePdf, generateZapPdf } = require('./pdfService');
@@ -14,45 +18,39 @@
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
-const { pathToFileURL } = require('url');
+const crypto = require('crypto');
 const { getSanitizedAlerts } = require('../utils/vulnFilter');
+const { isHstsEnabled } = require('./inHouse/siteChecks');
 const { redactHeaderBlock } = require('../utils/credentialRedaction');
 
-let puppeteer;
-try { puppeteer = require('puppeteer'); } catch { puppeteer = null; }
-
 const ScanResult = require('../models/ScanResult');
-const TranslationCache = require('../models/TranslationCache');
-const { formatAiAnalysisForPdf, translateText, translateAiAnalysisSectionsToJapanese, translateVulnerabilitiesToJapanese } = require('./geminiService');
+const { formatAiAnalysisForPdf } = require('./geminiService');
 const { loadReportAlerts, detailedAlertsBucket } = require('./zapDetailedAlerts');
 const { getReportTemplateStaticContent } = require('./reportTemplateDocx');
-const { maskIdentityTokens } = require('./geminiSanitizer');
+const { localizeReport, engineVersion } = require('./reportLocalization');
+const { t, riskLabel, confidenceLabel, statusLabel } = require('../i18n/reportStrings');
 const { lighthouseScores, formatScore, formatMetric, NOT_AVAILABLE } = require('../utils/scoreFormat');
 
 // ─── Config ────────────────────────────────────────────────────────────────────
-// Spec requirement: PDFKit-only (no Puppeteer/HTML renderer)
-const PDF_RENDERER = 'pdfkit';
 const pdfOpts = { maxRetries: 1, timeoutMs: 35000, maxBackoffMs: 3000 };
-// Japanese translation is the single most failure-prone step and its failure
-// silently degrades the whole JA report (thin AI summary + untranslated findings).
-// It gets a far more generous budget than the fast-fail `pdfOpts`: real retries
-// for transient 503s and a per-attempt timeout large enough for a Flash call.
-// The overall PDF job budget is 300s (virustotalRoutes PDF_JOB_TIMEOUT_MS), so
-// this stays well within it even in the worst case.
-const translateOpts = { maxRetries: 3, timeoutMs: 60000, maxBackoffMs: 15000 };
-// Outer ceiling for the whole (chunked, multi-call) JA translation stage. A final
-// safety net only — `_generate` already enforces per-attempt timeouts and retries.
-const TRANSLATION_CEILING_MS = 200000;
-// English report: Japanese text from the scanned site is translated in batches of
-// this many passages, a few batches at a time, all within EN_TRANSLATION_CEILING_MS.
-// Whatever is not translated by then is drawn in Japanese.
-const EN_TRANSLATION_BATCH = 40;
-const EN_TRANSLATION_CONCURRENCY = 3;
-const EN_TRANSLATION_CEILING_MS = 120000;
-const enTranslateOpts = { maxRetries: 2, timeoutMs: 45000, maxBackoffMs: 5000 };
-// Vulnerabilities are translated in small chunks so one transient failure only
-// costs that chunk (kept English), not the entire findings list.
-const VULN_TRANSLATION_CHUNK_SIZE = 5;
+
+// Localization: every report's prose goes through services/reportLocalization.js.
+// It either returns fully localized prose or throws REPORT_LOCALIZATION_INCOMPLETE
+// before anything is rendered, so a mixed-language PDF is never produced.
+
+// Identifies what a generated PDF was built with. A PDF job records it, and a
+// finished job is reused only while it matches (services/pdfJobStore.js), so a
+// report built by older code is never served as a new one after a deploy.
+// Bump RENDERER_REVISION whenever the rendered output changes.
+// r4: HTTP Basic reports lose the extra scope section; HSTS read via isHstsEnabled.
+const RENDERER_REVISION = 4;
+let reportVersionMemo = null;
+function reportVersion() {
+  if (!reportVersionMemo) {
+    reportVersionMemo = `r${RENDERER_REVISION}-${crypto.createHash('sha256').update(engineVersion()).digest('hex').slice(0, 12)}`;
+  }
+  return reportVersionMemo;
+}
 
 // Request/Response evidence: keep the headers (that's the proof for header/config
 // findings) but only a short "taste" of the body — a full HTTP response body is an
@@ -82,16 +80,8 @@ function buildEvidenceText(header, body, lang = 'en') {
   let out = hdr;
   const append = s => { out += (out && !out.endsWith('\n') ? '\n' : '') + s; };
   if (bdy) append(bdy);
-  if (binary) {
-    append(lang === 'ja'
-      ? '…(バイナリデータのため本文は表示されません — 全文はJSONエクスポートを参照してください)'
-      : '…(binary body not shown — full body available in the JSON export)');
-  }
-  if (trimmed) {
-    append(lang === 'ja'
-      ? '…(本文は省略されました — 全文はJSONエクスポートを参照してください)'
-      : '…(body truncated — full body available in the JSON export)');
-  }
+  if (binary) append(t(lang, 'binaryBody'));
+  if (trimmed) append(t(lang, 'bodyTruncated'));
   return out;
 }
 
@@ -139,11 +129,6 @@ const TEMPLATE_MARGIN = { top: 60, bottom: 60, left: 55, right: 55 };
 
 // ─── Small utilities ────────────────────────────────────────────────────────────
 
-function timeout(ms, message) {
-  // unref: a deadline that lost the race must not keep the process alive.
-  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms).unref());
-}
-
 function buildAiAnalysisFromRefinedReport(refinedReport) {
   try {
     const lines = refinedReport.split('\n');
@@ -166,7 +151,9 @@ function buildAiAnalysisFromRefinedReport(refinedReport) {
     };
 
     for (const line of lines) {
-      const trimmed = line.trim();
+      // Inline-code backticks (`Strict-Transport-Security`) were drawn literally;
+      // keep what is inside them.
+      const trimmed = line.trim().replace(/`([^`\n]+)`/g, '$1');
       if (!trimmed) {
         pushParagraph();
         pushList();
@@ -207,12 +194,6 @@ function buildAiAnalysisFromRefinedReport(refinedReport) {
   }
 }
 
-
-function escapeHtml(v) {
-  return String(v ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
 
 function containsJapanese(text) {
   return /[\u3040-\u30ff\u3400-\u9fff]/.test(String(text || ''));
@@ -296,16 +277,6 @@ function getTypeColor(type) {
            success: COLORS.success, info: COLORS.info }[type] || COLORS.text;
 }
 
-function getRiskLabel(risk, lang) {
-  if (lang !== 'ja') return risk || 'Unknown';
-  const r = String(risk || '').toLowerCase();
-  if (r.includes('high'))          return '高';
-  if (r.includes('medium'))        return '中';
-  if (r.includes('low'))           return '低';
-  if (r.includes('informational')) return '情報';
-  return '不明';
-}
-
 function stripBoldMarkers(text) { return String(text || '').replace(/\*\*/g, ''); }
 
 function isBoldBalanced(text) {
@@ -314,25 +285,6 @@ function isBoldBalanced(text) {
 }
 
 // ─── Disclaimer / history helpers ───────────────────────────────────────────────
-
-function getDisclaimerContent(lang) {
-  if (lang === 'ja') return {
-    title: '免責事項',
-    body: [
-      '本レポートは自動スキャン結果に基づいて作成されており、検出内容が不完全である場合や、環境・設定差により実際の状態と異なる場合があります。',
-      '本レポートの内容について、完全性・正確性・最新性を保証するものではありません。重要な意思決定(運用判断、法的判断、投資判断等)を行う際には、本レポートのみに依拠せず、追加の検証や専門家による確認を実施してください。',
-      '本レポートの利用に起因して発生したいかなる損害(直接・間接を問わず)についても、提供者は責任を負いません。'
-    ].join('\n\n')
-  };
-  return {
-    title: 'Disclaimer',
-    body: [
-      'This report is generated based on automated scan results. Detected findings may be incomplete or may differ from the actual state due to environmental or configuration differences.',
-      'We do not guarantee the completeness, accuracy, or timeliness of the content of this report. When making important decisions (operational, legal, investment, etc.), please do not rely solely on this report and conduct additional verification or consultation with experts.',
-      'The provider shall not be liable for any damages (direct or indirect) arising from the use of this report.'
-    ].join('\n\n')
-  };
-}
 
 function formatHistoryDate(date, lang) {
   const d = date instanceof Date ? date : (date ? new Date(date) : null);
@@ -372,159 +324,6 @@ function projectLangValue(val, lang) {
   return val;
 }
 
-// ─── English report: translating the scanned site's Japanese ───────────────────
-//
-// A Japanese site puts Japanese into the English report: quoted in the AI analysis,
-// in finding text, in scan values. The English report used to throw
-// EN_CONTENT_NOT_ENGLISH on any of it (while the Japanese report, with no such
-// check, always downloaded) — and the check also walked fields that are never
-// drawn, such as each occurrence's `evidence`, so a Japanese site's own HTML was
-// enough to make the English report impossible. Now that text is translated, and
-// whatever cannot be translated is drawn in Japanese (Noto Sans JP covers it).
-
-// Drawn verbatim in the English report: proof (raw HTTP evidence), links,
-// identifiers, enums, and the Japanese half of bilingual {en, ja} values.
-const EN_VERBATIM_KEYS = new Set([
-  'occurrences', 'request', 'response', 'sampleUrls', 'urls', 'url', 'target',
-  'reference', 'scanId', 'cweid', 'wascid', 'risk', 'ja'
-]);
-
-/**
- * Every Japanese passage the English report would draw from `roots`, as
- * `{ text, set }` — `set(english)` writes the translation back in place.
- *
- * A passage is a whole line with Japanese in it, less its surrounding whitespace:
- * Japanese mixed with English ("TLS 1.2を有効にしてください") only translates
- * into a sentence as a whole. Lines without Japanese are left alone, and each line
- * is its own passage so text keeps its line structure. The scan-history table is
- * never passed in: it holds the operator's name, which must not reach Gemini.
- */
-function collectJapanesePassages(roots) {
-  const passages = [];
-  const visitString = (s, write) => {
-    if (!containsJapanese(s)) return;
-    const lines = s.split('\n');
-    lines.forEach((line, li) => {
-      if (!containsJapanese(line)) return;
-      const start = line.length - line.trimStart().length;
-      const end = line.trimEnd().length;
-      passages.push({
-        text: line.slice(start, end),
-        set: (t) => { lines[li] = line.slice(0, start) + t + line.slice(end); write(lines.join('\n')); }
-      });
-    });
-  };
-  const walk = (node, key, write) => {
-    if (node == null || EN_VERBATIM_KEYS.has(key)) return;
-    if (typeof node === 'string') return visitString(node, write);
-    if (Array.isArray(node)) return node.forEach((v, i) => walk(v, key, (t) => { node[i] = t; }));
-    if (typeof node === 'object') {
-      for (const k of Object.keys(node)) walk(node[k], k, (t) => { node[k] = t; });
-    }
-  };
-  walk(roots, '', () => {});
-  return passages;
-}
-
-const PLACEHOLDER_RE = /\{\{T\d+\}\}/g;
-
-/** A translation we can draw: non-empty, changed, placeholders intact, nothing redacted. */
-function isUsableTranslation(src, t) {
-  if (typeof t !== 'string' || !t.trim() || t.trim() === src.trim()) return false;
-  if (t.length > src.length * 8 + 200) return false;
-  if (t.includes('REDACTED') && !src.includes('REDACTED')) return false;
-  const want = (src.match(PLACEHOLDER_RE) || []).sort();
-  const got  = (t.match(PLACEHOLDER_RE) || []).sort();
-  return want.length === got.length && want.every((p, i) => p === got[i]);
-}
-
-// Translations persist in TranslationCache (30-day TTL), so downloading the
-// English report again is quick and reads the same. Keys are the masked
-// passages: no URL, email or host is ever stored.
-const translationCacheStore = {
-  async get(texts) {
-    if (!texts.length) return {};
-    try {
-      const byHash = new Map(texts.map(t => [TranslationCache.generateHash(t, 'en'), t]));
-      const rows = await TranslationCache.find({ hash: { $in: [...byHash.keys()] } })
-        .select('hash translatedText').lean();
-      return Object.fromEntries(rows.filter(r => byHash.has(r.hash)).map(r => [byHash.get(r.hash), r.translatedText]));
-    } catch (e) {
-      console.warn('[PDF] Translation cache read failed:', e.message);
-      return {};
-    }
-  },
-  put(translations) {
-    for (const [src, t] of Object.entries(translations)) {
-      TranslationCache.saveTranslation(src, 'en', t).catch(() => {});
-    }
-  }
-};
-
-/**
- * Translate, in place, the Japanese the English report would draw from `roots`
- * (see collectJapanesePassages). URLs, emails, IPs and hostnames are replaced by
- * {{Tn}} placeholders before anything is sent and restored after. Never throws:
- * a passage that is not translated by the deadline, or comes back unusable, stays
- * Japanese. `deps` lets tests inject the translator and cache.
- *
- * @returns {Promise<{ passages: number, translated: number }>}
- */
-async function translateJapaneseForEnglishReport(roots, deps = {}) {
-  const {
-    translate   = (texts) => translateText(texts, 'en', enTranslateOpts),
-    cache       = translationCacheStore,
-    batchSize   = EN_TRANSLATION_BATCH,
-    concurrency = EN_TRANSLATION_CONCURRENCY,
-    ceilingMs   = EN_TRANSLATION_CEILING_MS,
-    logLabel    = 'PDF'
-  } = deps;
-
-  const items = collectJapanesePassages(roots).map(p => ({ ...p, ...maskIdentityTokens(p.text) }));
-  if (!items.length) return { passages: 0, translated: 0 };
-
-  const sources = [...new Set(items.map(i => i.masked))];
-  const translations = new Map();
-  const cached = await cache.get(sources);
-  for (const src of sources) {
-    if (isUsableTranslation(src, cached[src])) translations.set(src, cached[src]);
-  }
-
-  const todo = sources.filter(s => !translations.has(s));
-  const batches = [];
-  for (let i = 0; i < todo.length; i += batchSize) batches.push(todo.slice(i, i + batchSize));
-  const deadline = Date.now() + ceilingMs;
-  let next = 0;
-  const worker = async () => {
-    while (next < batches.length) {
-      const batch = batches[next++];
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return;
-      try {
-        const out = await Promise.race([translate(batch), timeout(remaining, 'English translation deadline reached')]);
-        const fresh = {};
-        batch.forEach((src, i) => {
-          const t = Array.isArray(out) ? out[i] : undefined;
-          if (isUsableTranslation(src, t)) { translations.set(src, t); fresh[src] = t; }
-        });
-        cache.put(fresh);
-      } catch (e) {
-        console.warn(`[${logLabel}] English translation of ${batch.length} passage(s) failed (${e.message}) — drawn in Japanese`);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, worker));
-
-  let translated = 0;
-  for (const item of items) {
-    const t = translations.get(item.masked);
-    if (!t) continue;
-    item.set(t.replace(PLACEHOLDER_RE, (p) => item.tokens[Number(p.slice(3, -2))]));
-    translated++;
-  }
-  return { passages: items.length, translated };
-}
-
 function executorDisplay(user, lang) {
   const name  = user?.name  ? String(user.name)  : '';
   const email = user?.email ? String(user.email) : '';
@@ -541,19 +340,7 @@ function executorDisplay(user, lang) {
 }
 
 function getStatusLabel(status, lang) {
-  const s = status || '';
-  if (lang !== 'ja') {
-    if (s === 'completed')                            return 'Completed';
-    if (s === 'combining' || s === 'pending' || s === 'queued') return 'Scanning';
-    if (s === 'failed')                               return 'Failed';
-    if (s === 'stopped' || s === 'cancelled')         return 'Cancelled';
-    return s || 'unknown';
-  }
-  if (s === 'completed')                            return '診断終了';
-  if (s === 'combining' || s === 'pending' || s === 'queued') return 'スキャン中';
-  if (s === 'failed')                               return '失敗';
-  if (s === 'stopped' || s === 'cancelled')         return '停止';
-  return s || '不明';
+  return statusLabel(status, lang);
 }
 
 async function fetchScanHistoryRows(scanResult, limit = 8) {
@@ -601,8 +388,11 @@ async function fetchScanHistoryRows(scanResult, limit = 8) {
 function buildScanHistoryTable(scanHistoryRows) {
   const rows = Array.isArray(scanHistoryRows) ? scanHistoryRows : [];
   return {
-    title: { en: 'Scan History', ja: '診断履歴' },
-    headers: { en: ['Date', 'Executed by', 'Status'], ja: ['日付', '実行ユーザー', 'ステータス'] },
+    title: { en: t('en', 'scanHistory'), ja: t('ja', 'scanHistory') },
+    headers: {
+      en: ['historyDate', 'historyExecutedBy', 'historyStatus'].map(k => t('en', k)),
+      ja: ['historyDate', 'historyExecutedBy', 'historyStatus'].map(k => t('ja', k))
+    },
     rows: {
       en: rows.map(r => [r.dateEn || '', r.executedByEn || '', getStatusLabel(r.status, 'en')]),
       ja: rows.map(r => [r.dateJa || '', r.executedByJa || '', getStatusLabel(r.status, 'ja')])
@@ -747,7 +537,7 @@ function buildScanDataForPdf(scanResult) {
       target: scanResult?.target || '',
       scanId: scanResult?.analysisId || '',
       date:   new Date().toLocaleDateString(),
-      status: { en: scanResult?.status || 'unknown', ja: scanResult?.status === 'completed' ? '完了' : (scanResult?.status || '不明') }
+      status: { en: statusLabel(scanResult?.status, 'en'), ja: statusLabel(scanResult?.status, 'ja') }
     },
     summary: {
       title:      { en: 'Executive Summary', ja: 'エグゼクティブサマリー' },
@@ -787,9 +577,9 @@ function buildScanDataForPdf(scanResult) {
         ],
         alerts: alerts.slice(0, 7).map(a => ({ risk: a.risk, alert: a.alert })),
         detailedAlerts: alerts.map(a => ({
-          name: a.alert, risk: a.risk, confidence: a.confidence,
-          description: a.description || 'No description available',
-          solution:    a.solution    || 'No solution provided',
+          name: a.alert, pluginId: a.pluginId, risk: a.risk, confidence: a.confidence,
+          description: a.description || '',
+          solution:    a.solution    || '',
           reference:   a.reference   || '',
           cweid: a.cweid, wascid: a.wascid,
           totalOccurrences: a.totalOccurrences || a.occurrences?.length || 0,
@@ -814,120 +604,12 @@ function buildScanDataForPdf(scanResult) {
         items: [
           { label: { en: 'TLS Grade',    ja: 'TLS評価'      }, value: (wcOk && (wc?.tls?.tlsInfo?.grade || wc?.ssl?.grade)) || NOT_AVAILABLE, type: 'grade' },
           { label: { en: 'WAF Detected', ja: 'WAF検出'      }, value: wcYesNo(wcOk && !!wc?.firewall && !wc.firewall.error, wc?.firewall?.hasWaf, 'はい', 'いいえ'), type: (!wcOk || !wc?.firewall || wc.firewall.error) ? 'stat' : (wc?.firewall?.hasWaf ? 'success' : 'warning') },
-          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: wcYesNo(wcOk && !!wc?.hsts && !wc.hsts.error, wc?.hsts?.enabled, '有効', '無効'),     type: (!wcOk || !wc?.hsts || wc.hsts.error) ? 'stat' : (wc?.hsts?.enabled ? 'success' : 'warning') },
+          { label: { en: 'HSTS Enabled', ja: 'HSTS有効'     }, value: wcYesNo(wcOk && !!wc?.hsts && !wc.hsts.error, isHstsEnabled(wc?.hsts), '有効', '無効'),     type: (!wcOk || !wc?.hsts || wc.hsts.error) ? 'stat' : (isHstsEnabled(wc?.hsts) ? 'success' : 'warning') },
           { label: { en: 'Technologies', ja: 'テクノロジー' }, value: (wcOk && Array.isArray(wc?.['tech-stack']?.technologies)) ? wc['tech-stack'].technologies.slice(0, 5).map(t => t.name || t).join(', ') : NOT_AVAILABLE, type: 'stat' }
         ]
       }
     ]
   };
-}
-
-function buildJapaneseAiAnalysisFromScanData(scanData, vulnerabilitiesEn = []) {
-  const risk   = scanData?.summary?.riskLevel?.ja || '不明';
-  const target = scanData?.header?.target || '';
-  const rc = { high: 0, medium: 0, low: 0, info: 0 };
-  for (const v of vulnerabilitiesEn) {
-    const r = String(v?.risk || '').toLowerCase();
-    if (r.includes('high'))   rc.high++;
-    else if (r.includes('medium')) rc.medium++;
-    else if (r.includes('low'))    rc.low++;
-    else rc.info++;
-  }
-  const findings = [];
-  if (rc.high   > 0) findings.push(`高リスクの脆弱性が${rc.high}件検出されています。`);
-  if (rc.medium > 0) findings.push(`中リスクの脆弱性が${rc.medium}件検出されています。`);
-  if (!findings.length) findings.push('重大な脆弱性は検出されませんでした。');
-
-  return {
-    title: 'AIによるセキュリティ分析',
-    sections: [
-      { heading: '総評', content: [
-          { type: 'paragraph', text: `対象: ${target}` },
-          { type: 'paragraph', text: `総合リスク評価: ${risk}` },
-          { type: 'bullets', items: findings }
-      ]},
-      { heading: '推奨対応', content: [{ type: 'bullets', items: [
-          '高リスク項目は最優先で修正し、再スキャンで効果を確認してください。',
-          '入力検証、認証・セッション管理、セキュリティヘッダーの設定状況を重点的に見直してください。',
-          '運用上の露出（公開範囲、管理画面、API）を踏まえて、WAF/レート制限/監視も併用してください。'
-      ]}]}
-    ]
-  };
-}
-
-/**
- * Translate the AI analysis and vulnerabilities to Japanese — resiliently and
- * granularly, so a failure in one area never blanks the whole Japanese report.
- *
- *  - The AI analysis is translated on its own. Only if that specific call fails
- *    (or returns no Japanese) does the AI narrative fall back to the short
- *    static buildJapaneseAiAnalysisFromScanData stub.
- *  - Vulnerabilities are translated in small chunks. A chunk that fails keeps its
- *    English text while the other chunks stay Japanese (partial success).
- *  - `occurrences` (raw request/response) and `sampleUrls`/`urls` are always kept
- *    from the English source and re-attached — they are never sent to Gemini and
- *    never lost, so the Request/Response Evidence section still renders.
- *
- * `deps` lets tests inject stub translators (no network); production uses the real
- * Gemini calls with the generous `translateOpts` budget.
- *
- * @returns {Promise<{ aiToUse: object|null, vulnsToUse: Array }>}
- */
-async function translateReportToJapanese({ aiAnalysis = null, vulnsEn = [], scanData = null } = {}, deps = {}) {
-  const {
-    translateAi        = (ai)    => translateAiAnalysisSectionsToJapanese(ai, translateOpts),
-    translateVulnChunk = (chunk) => translateVulnerabilitiesToJapanese(chunk, translateOpts),
-    chunkSize          = VULN_TRANSLATION_CHUNK_SIZE,
-    logLabel           = 'PDF'
-  } = deps;
-
-  // ── AI analysis (independent) ───────────────────────────────────────────────
-  let aiToUse = aiAnalysis;
-  if (aiAnalysis) {
-    try {
-      const ja = await translateAi(aiAnalysis);
-      // Accept the translated analysis only if at least one SECTION actually became
-      // Japanese (the title alone is always Japanese, so it can't be the signal).
-      // If every section failed to translate, fall back to the static summary.
-      if (ja && ja.sections?.length && containsJapanese(JSON.stringify(ja.sections))) {
-        aiToUse = ja;
-      } else {
-        console.warn(`[${logLabel}] AI translation produced no Japanese sections — using static summary`);
-        aiToUse = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
-      }
-    } catch (e) {
-      console.warn(`[${logLabel}] AI analysis translation failed (${e.message}) — using static summary`);
-      aiToUse = buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn);
-    }
-  }
-
-  // ── Vulnerabilities (independent, chunked) ──────────────────────────────────
-  // Start as the English list; replace each chunk in place only on success.
-  const vulnsToUse = vulnsEn.slice();
-  for (let start = 0; start < vulnsEn.length; start += chunkSize) {
-    const chunkEn = vulnsEn.slice(start, start + chunkSize);
-    // Strip bulky/technical fields before translation; re-attached from source below.
-    const chunkForTranslate = chunkEn.map(({ occurrences, sampleUrls, urls, ...rest }) => rest);
-    try {
-      const jaChunk = await translateVulnChunk(chunkForTranslate);
-      if (Array.isArray(jaChunk)) {
-        jaChunk.forEach((jv, i) => {
-          const src = chunkEn[i];
-          if (!src || !jv) return;
-          vulnsToUse[start + i] = {
-            ...src, // keep name/risk/confidence/reference/cwe/wasc + occurrences/sampleUrls/urls
-            description: jv.description ?? src.description,
-            solution:    jv.solution ?? src.solution
-          };
-        });
-      }
-    } catch (e) {
-      console.warn(`[${logLabel}] Vulnerability chunk ${start + 1}-${start + chunkEn.length} translation failed (${e.message}) — keeping English for this chunk`);
-      // chunk stays English (already present in vulnsToUse)
-    }
-  }
-
-  return { aiToUse, vulnsToUse };
 }
 
 /**
@@ -953,9 +635,9 @@ async function loadReportFindings(scanResult, accessLevel) {
   try {
     const alerts = await loadReportAlerts(file.fileId, detailedAlertsBucket(file));
     return getSanitizedAlerts(alerts, accessLevel).map(a => ({
-      name: a.alert, risk: a.risk, confidence: a.confidence,
-      description: a.description || 'No description available',
-      solution:    a.solution    || 'No solution provided',
+      name: a.alert, pluginId: a.pluginId, risk: a.risk, confidence: a.confidence,
+      description: a.description || '',
+      solution:    a.solution    || '',
       reference:   a.reference   || '',
       cweid: a.cweid, wascid: a.wascid,
       totalOccurrences: a.totalOccurrences || a.occurrenceCount || 0,
@@ -981,127 +663,6 @@ async function fetchFullAlertsFromGridFS(scanResult, zapSection, accessLevel) {
     // Summary alerts from the scan document — the plan's severity filter applies here too.
     zapSection.detailedAlerts = getSanitizedAlerts(zapSection.detailedAlerts, accessLevel);
   }
-}
-
-// ─── HTML renderer (Puppeteer) ──────────────────────────────────────────────────
-
-async function renderHtmlToPdfBuffer(html) {
-  if (!puppeteer) throw new Error('Puppeteer not available');
-  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    return await page.pdf({ format: 'A4', printBackground: true,
-      margin: { top: '14mm', bottom: '14mm', left: '14mm', right: '14mm' } });
-  } finally { await browser.close(); }
-}
-
-function sharedCss() {
-  const fontUrl = pathToFileURL(FONTS.regular).toString();
-  return `
-    @font-face { font-family: NotoSansJP; src: url('${fontUrl}'); }
-    * { box-sizing: border-box; }
-    body { font-family: NotoSansJP, Arial, sans-serif; color: ${COLORS.text}; }
-    h1 { color: ${COLORS.primary}; font-size: 22px; margin: 0 0 6px; }
-    h2 { color: ${COLORS.primary}; font-size: 16px; margin: 18px 0 8px; }
-    h3 { color: ${COLORS.primary}; font-size: 12px; margin: 12px 0 6px; }
-    h4 { color: ${COLORS.accent};  font-size: 10px; margin: 10px 0 4px; }
-    p, li, td, th { font-size: 10px; line-height: 1.45; }
-    p  { margin: 0 0 6px; overflow-wrap: anywhere; word-break: break-word; }
-    ul { margin: 0 0 6px 18px; padding: 0; }
-    .page-break { page-break-before: always; }
-    .meta { display: flex; flex-wrap: wrap; gap: 14px; color: ${COLORS.textLight}; font-size: 9px; margin-bottom: 6px; }
-    .kv  { margin: 2px 0; }
-    .k   { color: ${COLORS.textLight}; }
-    .ok  { color: ${COLORS.success}; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { border: 1px solid ${COLORS.border}; padding: 6px; vertical-align: top; overflow-wrap: anywhere; }
-    th { background: #f3f4f6; text-align: left; }
-    .vuln { border-top: 1px solid ${COLORS.border}; padding-top: 8px; margin-top: 8px; }
-  `;
-}
-
-function buildSingleLanguageReportHtml({ scanData, aiAnalysis, vulnerabilities, lang, disclaimer, diagnosis }) {
-  const L = lang;
-  const hdr  = scanData?.header || {};
-  const summ = scanData?.summary || {};
-  const title     = typeof hdr.title      === 'object' ? hdr.title[L]      : (hdr.title || 'Security Scan Report');
-  const riskLabel = typeof summ.riskLabel === 'object' ? summ.riskLabel[L] : (summ.riskLabel || 'Overall Risk');
-  const riskLevel = typeof summ.riskLevel === 'object' ? summ.riskLevel[L] : (summ.riskLevel || 'N/A');
-  const aiTitle   = escapeHtml(aiAnalysis?.title || (L === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis'));
-
-  const renderBlocks = blocks => (Array.isArray(blocks) ? blocks : []).map(b => {
-    if (!b) return '';
-    if (b.type === 'paragraph')  return `<p>${escapeHtml(b.text || '')}</p>`;
-    if (b.type === 'bullets')    return `<ul>${(b.items || []).map(it => `<li>${escapeHtml(it)}</li>`).join('')}</ul>`;
-    if (b.type === 'bold_text')  return `<p><strong>${escapeHtml(b.label || '')}</strong> ${escapeHtml(b.text || '')}</p>`;
-    return b.text ? `<p>${escapeHtml(b.text)}</p>` : '';
-  }).join('');
-
-  const aiSections = (aiAnalysis?.sections || []).map(s => {
-    const hd = s?.heading ? `<h3>${escapeHtml(s.heading)}</h3>` : '';
-    return `${hd}${renderBlocks(s?.content)}`;
-  }).join('');
-
-  const scanSections = (scanData?.sections || []).map(s => {
-    const st = typeof s.title === 'object' ? s.title[L] : s.title || '';
-    const items = (s.items || []).map(it => {
-      const lbl = typeof it.label === 'object' ? it.label[L] : it.label || '';
-      let val = it.value;
-      if (typeof val === 'object' && val) val = val[L] || val.en || '';
-      return `<div class="kv"><span class="k">${escapeHtml(lbl)}:</span> <span>${escapeHtml(String(val ?? ''))}</span></div>`;
-    }).join('');
-    return `<section><h3>${escapeHtml(st)}</h3>${items}</section>`;
-  }).join('');
-
-  const vulnHtml = (() => {
-    const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
-    if (!list.length) return `<p class="ok">${L === 'ja' ? '脆弱性は検出されませんでした。' : 'No vulnerabilities detected.'}</p>`;
-    return list.map((v, i) => `
-      <div class="vuln">
-        <h3>${i + 1}. ${escapeHtml(v?.name || v?.alert || '')}</h3>
-        <div class="meta">
-          <span>${escapeHtml(L === 'ja' ? 'リスク' : 'Risk')}: ${escapeHtml(String(v?.risk || ''))}</span>
-          <span>${escapeHtml(L === 'ja' ? '信頼度' : 'Confidence')}: ${escapeHtml(String(v?.confidence || ''))}</span>
-        </div>
-        ${v?.description ? `<h4>${escapeHtml(L === 'ja' ? '説明' : 'Description')}</h4><p>${escapeHtml(v.description)}</p>` : ''}
-        ${v?.solution    ? `<h4>${escapeHtml(L === 'ja' ? '推奨される修正方法' : 'Recommended Solution')}</h4><p>${escapeHtml(v.solution)}</p>` : ''}
-        ${v?.reference   ? `<h4>${escapeHtml(L === 'ja' ? '参考情報' : 'References')}</h4><p>${escapeHtml(v.reference)}</p>` : ''}
-      </div>`).join('');
-  })();
-
-  const histHtml = `<table>
-    <thead><tr>${(diagnosis?.headers || []).map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
-    <tbody>${(diagnosis?.rows || []).map(r => `<tr>${(r || []).map(c => `<td>${escapeHtml(String(c ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody>
-  </table>`;
-
-  return `<!doctype html><html lang="${L === 'ja' ? 'ja' : 'en'}"><head><meta charset="utf-8"/>
-  <style>${sharedCss()}</style></head><body>
-  <h1>${escapeHtml(title)}</h1>
-  <div class="meta">
-    <span>${escapeHtml(L === 'ja' ? 'スキャンURL' : 'Scan URL')}: ${escapeHtml(hdr.target || '')}</span>
-    <span>${escapeHtml(L === 'ja' ? '生成日' : 'Generated')}: ${escapeHtml((() => { const dr = hdr.dateRaw || hdr.date || ''; const dd = dr instanceof Date ? dr : (dr ? new Date(dr) : null); return dd && !isNaN(dd.getTime()) ? formatCoverDate(dd, L) : String(dr); })())}</span>
-    <span>${escapeHtml(L === 'ja' ? 'スキャンID' : 'Scan ID')}: ${escapeHtml(hdr.scanId || '')}</span>
-  </div>
-  <h2>${escapeHtml(L === 'ja' ? 'エグゼクティブサマリー' : 'Executive Summary')}</h2>
-  <p><strong>${escapeHtml(riskLabel)}:</strong> ${escapeHtml(String(riskLevel))}</p>
-  <h2>${aiTitle}</h2>${aiSections}
-  <h2>${escapeHtml(L === 'ja' ? 'スキャン結果' : 'Scan Results')}</h2>${scanSections}
-  <h2>${escapeHtml(L === 'ja' ? '脆弱性の詳細と修正方法' : 'Vulnerability Details & Remediation')}</h2>${vulnHtml}
-  <div class="page-break"></div>
-  <h2>${escapeHtml(disclaimer?.title || (L === 'ja' ? '免責事項' : 'Disclaimer'))}</h2>
-  ${String(disclaimer?.body || '').split('\n').map(l => `<p>${escapeHtml(l)}</p>`).join('')}
-  <div class="page-break"></div>
-  <h2>${escapeHtml(diagnosis?.title || (L === 'ja' ? '診断履歴' : 'Scan History'))}</h2>${histHtml}
-  </body></html>`;
-}
-
-function buildBilingualReportHtml({ enHtml, jaHtml }) {
-  const extract = html => { const m = String(html || '').match(/<body[^>]*>([\s\S]*?)<\/body>/i); return m ? m[1] : html; };
-  const fontUrl = pathToFileURL(FONTS.regular).toString();
-  return `<!doctype html><html><head><meta charset="utf-8"/>
-  <style>@font-face{font-family:NotoSansJP;src:url('${fontUrl}')} ${sharedCss()}</style></head>
-  <body>${extract(enHtml)}<div class="page-break"></div>${extract(jaHtml)}</body></html>`;
 }
 
 // ─── PDFKit text helpers ────────────────────────────────────────────────────────
@@ -1185,6 +746,13 @@ function findFittingSubstring(doc, text, opts, maxH) {
   let cut = Math.max(1, lo);
   while (cut > 1 && !/\s/.test(raw[cut - 1])) cut--;
   if (cut <= 1) cut = Math.max(1, lo);
+  // Japanese has no spaces to break at: backing up to the last space stranded a
+  // bullet marker ("•") at the foot of a page with its text on the next one.
+  // Between CJK characters any position is a valid line break, so use the fit.
+  if (cut < lo * 0.5 && /[　-ヿ㐀-鿿＀-￯]/.test(raw.slice(cut, lo))) {
+    cut = Math.max(1, lo);
+    if (/[\uD800-\uDBFF]/.test(raw[cut - 1] || '')) cut--; // never split a surrogate pair
+  }
   while (cut > 1 && !isBoldBalanced(raw.slice(0, cut))) {
     let b = cut - 1; while (b > 1 && !/\s/.test(raw[b - 1])) b--; if (b <= 1) break; cut = b;
   }
@@ -1423,12 +991,12 @@ function renderCoverPage(doc, scanData, lang, ts) {
 
   // 4. Scan URL
   doc.font('NotoSans').fontSize(12).fillColor(COLORS.text)
-      .text(`${lang === 'ja' ? 'スキャンURL' : 'Scan URL'}: ${targetS}`, ML, 318, { width: cw, align: 'center' });
+      .text(`${t(lang, 'scanUrl')}: ${targetS}`, ML, 318, { width: cw, align: 'center' });
 
   // 5. Date & Scan ID
   doc.fontSize(10).fillColor(COLORS.textLight)
-      .text(`${lang === 'ja' ? '生成日' : 'Generated'}: ${dateS}`, ML, 348, { width: cw, align: 'center' })
-      .text(`${lang === 'ja' ? 'スキャンID' : 'Scan ID'}: ${scanIdS}`, ML, 363, { width: cw, align: 'center' });
+      .text(`${t(lang, 'generated')}: ${dateS}`, ML, 348, { width: cw, align: 'center' })
+      .text(`${t(lang, 'scanId')}: ${scanIdS}`, ML, 363, { width: cw, align: 'center' });
 
   // 6. Bottom rule
   doc.moveTo(ML, H - 80).lineTo(W - MR, H - 80).lineWidth(0.5).stroke(COLORS.border);
@@ -1484,13 +1052,10 @@ function renderTemplateContentBlock(ctx, block) {
 }
 
 function renderAiAnalysisSection(ctx, aiAnalysis, lang) {
-  const sectionTitle = lang === 'ja' ? 'AIによるセキュリティ分析' : 'AI-Generated Security Analysis';
+  const sectionTitle = t(lang, 'aiSectionTitle');
   if (!aiAnalysis) {
     addTemplateSectionHeader(ctx, sectionTitle);
-    const notice = lang === 'ja'
-      ? 'AIによる分析はモデルのクォータ制限により生成できませんでした。すべてのスキャン結果と検出内容は以下に記載されています。'
-      : 'AI analysis could not be generated due to model quota limitations. All scan findings and security results are included below.';
-    writeFlowText(ctx, notice, { lineGap: 3, fontSize: 10, color: COLORS.textLight });
+    writeFlowText(ctx, t(lang, 'aiUnavailable'), { lineGap: 3, fontSize: 10, color: COLORS.textLight });
     ctx.doc.moveDown(0.5);
     return;
   }
@@ -1509,9 +1074,9 @@ function renderAiAnalysisSection(ctx, aiAnalysis, lang) {
 
 function renderScanResultsSection(ctx, scanData, lang) {
   const doc = ctx.doc;
-  addTemplateSectionHeader(ctx, lang === 'ja' ? 'スキャン結果' : 'Scan Results');
+  addTemplateSectionHeader(ctx, t(lang, 'scanResults'));
   doc.font('NotoSans').fontSize(10).fillColor(COLORS.textLight)
-     .text(lang === 'ja' ? 'スキャン結果の詳細' : 'Scan Results Details');
+     .text(t(lang, 'scanResultsDetails'));
   doc.moveDown(0.4);
 
   (scanData.sections || []).forEach(section => {
@@ -1535,11 +1100,11 @@ function renderScanResultsSection(ctx, scanData, lang) {
 
 function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
   const doc = ctx.doc;
-  addTemplateSectionHeader(ctx, lang === 'ja' ? '脆弱性の詳細と修正方法' : 'Vulnerability Details & Remediation');
+  addTemplateSectionHeader(ctx, t(lang, 'vulnDetailsTitle'));
 
   if (!vulnerabilities?.length) {
     doc.font('NotoSans').fontSize(11).fillColor(COLORS.success)
-       .text(lang === 'ja' ? '脆弱性は検出されませんでした' : 'No vulnerabilities detected');
+       .text(t(lang, 'noVulnerabilities'));
     doc.moveDown(0.5); return;
   }
 
@@ -1549,32 +1114,32 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
      doc.font('NotoSans-Bold').fontSize(11).fillColor(COLORS.text)
        .text(`${idx + 1}. ${vName}`, { width: ctx.contentWidth });
     doc.font('NotoSans').fontSize(9).fillColor(COLORS.textLight)
-       .text(`${lang === 'ja' ? 'リスク' : 'Risk'}: `, { continued: true })
+       .text(`${t(lang, 'risk')}: `, { continued: true })
        .fillColor(getRiskColor(v.risk)).font('NotoSans-Bold')
-       .text(lang === 'ja' ? getRiskLabel(v.risk, 'ja') : (v.risk || 'Unknown'), { continued: true })
+       .text(riskLabel(v.risk, lang), { continued: true })
        .fillColor(COLORS.textLight).font('NotoSans')
-       .text(`  |  ${lang === 'ja' ? '信頼度' : 'Confidence'}: `, { continued: true })
-       .fillColor(COLORS.text).text(v.confidence || 'Unknown');
+       .text(`  |  ${t(lang, 'confidence')}: `, { continued: true })
+       .fillColor(COLORS.text).text(confidenceLabel(v.confidence, lang));
     doc.moveDown(0.2);
 
     if (v.description) {
       ensureSpace(ctx, 30);
       doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.primary)
-         .text(lang === 'ja' ? '説明:' : 'Description:');
+         .text(t(lang, 'description'));
       writeFlowText(ctx, v.description, { lineGap: 2, fontSize: 9, color: COLORS.text });
       doc.moveDown(0.2);
     }
     if (v.solution) {
       ensureSpace(ctx, 30);
       doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.success)
-         .text(lang === 'ja' ? '推奨される修正方法:' : 'Recommended Solution:');
+         .text(t(lang, 'solution'));
       writeFlowText(ctx, v.solution, { lineGap: 2, fontSize: 9, color: COLORS.text });
       doc.moveDown(0.2);
     }
     if (v.sampleUrls && v.sampleUrls.length > 0) {
       ensureSpace(ctx, 30);
       doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.warning)
-         .text(lang === 'ja' ? '影響を受けるURL (一部):' : 'Affected URLs (Sample):');
+         .text(t(lang, 'affectedUrls'));
       v.sampleUrls.forEach((urlObj) => {
           const urlStr = typeof urlObj === 'string' ? urlObj : urlObj.uri || urlObj.url || String(urlObj);
           if (urlStr) {
@@ -1602,7 +1167,7 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
         const metaBits = [
           occ.method ? String(occ.method) : null,
           occ.url ? String(occ.url) : null,
-          occ.param ? `${lang === 'ja' ? 'パラメータ' : 'param'}: ${occ.param}` : null
+          occ.param ? `${t(lang, 'param')}: ${occ.param}` : null
         ].filter(Boolean).join('  ');
         const meta = sanitizeEvidenceForPdf(`#${oIdx + 1}  ${metaBits}`);
         doc.font('NotoSans-Bold').fontSize(8);
@@ -1611,15 +1176,15 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
 
       ensureSpace(ctx, lineH('NotoSans-Bold', 9) + shown[0].metaH + labelH + evidenceH);
       doc.font('NotoSans-Bold').fontSize(9).fillColor(COLORS.primary)
-         .text(lang === 'ja' ? 'リクエスト / レスポンスの証跡:' : 'Request / Response Evidence:', { width });
+         .text(t(lang, 'evidence'), { width });
       doc.moveDown(0.1);
 
       shown.forEach(({ occ, meta, metaH }) => {
         ensureSpace(ctx, metaH + labelH + evidenceH);
         writeEvidenceText(ctx, meta, { font: 'NotoSans-Bold', fontSize: 8, lineGap: 0, color: COLORS.text });
 
-        [[occ.request, lang === 'ja' ? 'リクエスト:' : 'Request:'],
-         [occ.response, lang === 'ja' ? 'レスポンス:' : 'Response:']].forEach(([part, label]) => {
+        [[occ.request, t(lang, 'request')],
+         [occ.response, t(lang, 'response')]].forEach(([part, label]) => {
           if (!part) return;
           ensureSpace(ctx, labelH + evidenceH);
           doc.font('NotoSans-Bold').fontSize(8).fillColor(COLORS.textLight).text(label, { width });
@@ -1632,16 +1197,14 @@ function renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang) {
       if (rawTotal > shown.length) {
         ensureSpace(ctx, 12);
         doc.font('NotoSans').fontSize(7).fillColor(COLORS.textLight)
-           .text(lang === 'ja'
-             ? `他 ${rawTotal - shown.length} 件のリクエスト/レスポンスはJSONエクスポートに含まれます`
-             : `${rawTotal - shown.length} more request/response pair(s) available in the JSON export`, { width });
+           .text(t(lang, 'moreEvidence', { n: rawTotal - shown.length }), { width });
       }
       doc.moveDown(0.2);
     }
 
     if (v.reference) {
       ensureSpace(ctx, 16);
-      writeFlowText(ctx, `${lang === 'ja' ? '参考情報' : 'References'}: ${v.reference}`,
+      writeFlowText(ctx, `${t(lang, 'references')}: ${v.reference}`,
         { lineGap: 0, fontSize: 8, color: COLORS.textLight });
     }
     doc.moveDown(0.4);
@@ -1762,25 +1325,11 @@ function drawTablePaged(ctx, startX, startY, colWidths, rows, { allowPageBreaks 
 
 // HTTP Basic scans: say exactly which checks ran signed in. Neutral wording — the
 // report never names the scan engines.
-const AUTH_SCOPE_TEXT = {
-  en: {
-    title: 'Assessment scope',
-    body: 'This assessment signed in to the site with HTTP Basic authentication. The vulnerability scan, the page capture and the performance audit ran as the signed-in user, and the credentials were sent only to the site itself. The security-header grade and the site configuration checks ran without credentials: they reflect the public response the site gives before sign-in.'
-  },
-  ja: {
-    title: '評価範囲',
-    body: '本診断では、HTTPベーシック認証でサイトにサインインしました。脆弱性診断、ページキャプチャ、パフォーマンス監査はサインイン済みのユーザーとして実施し、認証情報は対象サイトにのみ送信しました。セキュリティヘッダーの評価とサイト構成のチェックは認証情報を使用せずに実施しており、サインイン前にサイトが返す公開の応答を反映しています。'
-  }
-};
+// HTTP Basic scans used to carry an extra scope section here (EN/JA), saying
+// the header grade and site configuration checks ran without credentials. They now
+// run signed in (authFastScanService), so every scan type has the same sections.
 
-function renderAuthScopeNote(ctx, lang) {
-  const t = AUTH_SCOPE_TEXT[lang === 'ja' ? 'ja' : 'en'];
-  addTemplateSectionHeader(ctx, t.title);
-  writeFlowText(ctx, sanitizeTextForPdf(t.body, lang), { lineGap: 4, fontSize: 10, color: COLORS.text });
-  ctx.doc.moveDown(0.6);
-}
-
-function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, ts, { authScope = null } = {}) {
+function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, ts) {
   renderCoverPage(doc, scanData, lang, ts);
   doc.addPage();
 
@@ -1795,7 +1344,6 @@ function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, 
   // Page 3+: All scan results (Gemini-driven), as before
   ctx.addFramedPage();
   renderExecutiveSummarySection(ctx, scanData, lang);
-  if (authScope === 'basic') renderAuthScopeNote(ctx, lang);
   renderAiAnalysisSection(ctx, aiAnalysis, lang);
   renderScanResultsSection(ctx, scanData, lang);
   renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
@@ -1805,10 +1353,9 @@ function renderTemplateReport(doc, scanData, aiAnalysis, vulnerabilities, lang, 
   renderFinalPage(ctx);
 }
 
-function renderTemplateZapReport(doc, vulnerabilities, lang, ts, { authScope = null } = {}) {
+function renderTemplateZapReport(doc, vulnerabilities, lang, ts) {
   const ctx = createCtx(doc, ts);
   ctx.initFramedPage();
-  if (authScope === 'basic') renderAuthScopeNote(ctx, lang);
   renderVulnerabilityDetailsSection(ctx, vulnerabilities, lang);
   ctx.addFramedPage();
   renderFinalPage(ctx);
@@ -1861,8 +1408,6 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
   }
   console.log(`[PDF][${analysisId}] Scan data present: pagespeed=${!!scanResult.pagespeedResult} observatory=${!!scanResult.observatoryResult} urlscan=${!!scanResult.urlscanResult} zap=${!!scanResult.zapResult} webcheck=${!!scanResult.webCheckResult}`);
 
-  const isJa = lang === 'ja';
-
   // Elapsed time, not console.time: overlapping jobs shared one console.time label,
   // so a second PDF logged a warning and the first one's total came out wrong.
   const startedAt = Date.now();
@@ -1893,77 +1438,42 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
     }
   }
 
-  const vulnsEn = zapSection?.detailedAlerts || [];
-  let aiToUse = aiAnalysis, vulnsToUse = vulnsEn;
+  const findings = zapSection?.detailedAlerts || [];
 
-  if (isJa && (aiAnalysis || vulnsEn.length)) {
-    console.log(`[PDF][${analysisId}] Starting JA translation… (${elapsed()})`);
-    try {
-      const out = await Promise.race([
-        translateReportToJapanese({ aiAnalysis, vulnsEn, scanData }, { logLabel: `PDF][${analysisId}` }),
-        timeout(TRANSLATION_CEILING_MS, 'JA translation timed out')
-      ]);
-      aiToUse    = out.aiToUse;
-      vulnsToUse = out.vulnsToUse;
-    } catch (e) {
-      // Only reached if the whole stage exceeds the ceiling — per-area failures are
-      // already handled inside translateReportToJapanese. Degrade gracefully:
-      // static AI summary + English findings (occurrences preserved for evidence).
-      console.warn(`[PDF][${analysisId}] JA translation stage failed (${e.message}) — static AI summary + English findings`);
-      aiToUse    = aiAnalysis ? buildJapaneseAiAnalysisFromScanData(scanData, vulnsEn) : null;
-      vulnsToUse = vulnsEn;
-    }
-    console.log(`[PDF][${analysisId}] JA translation completed (${elapsed()})`);
-  }
-
-  const disclaimer = getDisclaimerContent(lang);
   const scanHistory = scanData?.scanHistory || null;
   const diagnosis = {
-    title: projectLangValue(scanHistory?.title, lang) || (lang === 'ja' ? '診断履歴' : 'Scan History'),
-    headers: (scanHistory?.headers && scanHistory.headers[lang]) ? scanHistory.headers[lang] : (lang === 'ja' ? ['日付', '実行ユーザー', 'ステータス'] : ['Date', 'Executed by', 'Status']),
-    rows: (scanHistory?.rows && scanHistory.rows[lang]) ? scanHistory.rows[lang] : [[
-      lang === 'ja' ? (scanHistoryRows[0]?.dateJa || '') : (scanHistoryRows[0]?.dateEn || ''),
-      lang === 'ja' ? (scanHistoryRows[0]?.executedByJa || '') : (scanHistoryRows[0]?.executedByEn || ''),
-      lang === 'ja' ? getStatusLabel(scanHistoryRows[0]?.status, 'ja') : (scanHistoryRows[0]?.status || 'unknown')
-    ]]
+    title:   projectLangValue(scanHistory?.title, lang) || t(lang, 'scanHistory'),
+    headers: scanHistory?.headers?.[lang] || ['historyDate', 'historyExecutedBy', 'historyStatus'].map(k => t(lang, k)),
+    rows:    scanHistory?.rows?.[lang] || []
   };
 
-  if (!isJa) {
-    // Japanese from the scanned site (quoted in the AI analysis, the findings or
-    // scan values) is translated; what cannot be is drawn in Japanese. Raw HTTP
-    // evidence and URLs stay verbatim, and the scan-history table is not passed.
-    const { passages, translated } = await translateJapaneseForEnglishReport(
-      { scanData, aiAnalysis: aiToUse, vulnerabilities: vulnsToUse },
-      { logLabel: `PDF][${analysisId}` }
-    );
-    if (passages) console.log(`[PDF][${analysisId}] EN: translated ${translated}/${passages} Japanese passage(s) from the scanned site (${elapsed()})`);
-  }
-
-  if (PDF_RENDERER === 'html') {
-    try {
-      const html = buildSingleLanguageReportHtml({ scanData, aiAnalysis: aiToUse, vulnerabilities: vulnsToUse, lang, disclaimer, diagnosis });
-      return await renderHtmlToPdfBuffer(html);
-    } catch (e) { console.warn('⚠️ HTML renderer failed:', e.message); }
-  }
-
-  console.log(`[PDF][${analysisId}] Rendering PDFKit document…`);
+  // Template text is loaded before localization so the language gate covers it.
   const tsBase = await getReportTemplateStaticContent({ lang });
   const ts = buildTemplateStaticOverrides(tsBase, { lang, scanData });
   ts.diagnosisTitle   = diagnosis.title;
   ts.diagnosisHeaders = diagnosis.headers;
   ts.diagnosisRows    = diagnosis.rows;
 
+  // Every prose field in the report language, or REPORT_LOCALIZATION_INCOMPLETE
+  // (nothing is rendered). Evidence, URLs, references and scan values are data:
+  // never translated, never sent.
+  console.log(`[PDF][${analysisId}] Localizing report (${elapsed()})`);
+  const localized = await localizeReport(
+    { findings, aiAnalysis, scanData, template: ts },
+    lang,
+    { logLabel: analysisId }
+  );
+  console.log(`[PDF][${analysisId}] Localization complete (${elapsed()})`);
+
   const doc = makePdfDoc({
     Title:   `Security Scan Report (${lang.toUpperCase()}) - ${scanResult.target}`,
     Author:  'SSDT',
     Subject: 'Security Analysis'
   });
-  
+
   console.log(`[PDF][${analysisId}] Rendering PDF (${elapsed()})`);
   const buf = collectBuffer(doc);
-  renderTemplateReport(doc, scanData, aiToUse, vulnsToUse, lang, ts, {
-    authScope: scanResult.authScanResult?.authMethod === 'basic' ? 'basic' : null
-  });
+  renderTemplateReport(doc, scanData, localized.aiAnalysis, localized.findings, lang, ts);
   doc.end();
   const out = await buf;
   console.log(`[PDF][${analysisId}] PDF completed in ${elapsed()}`);
@@ -1975,41 +1485,30 @@ async function generateSingleLanguagePdf(scanResult, lang = 'en', accessLevel = 
  */
 async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-high') {
   console.log(`📄 Starting ZAP ${lang.toUpperCase()} PDF generation…`);
-  const isJa = lang === 'ja';
 
   let vulnerabilities = (await loadReportFindings(scanResult, accessLevel)) || [];
 
   if (!vulnerabilities.length && scanResult.zapResult?.summaryAlerts) {
     const filtered = getSanitizedAlerts(scanResult.zapResult.summaryAlerts, accessLevel);
     vulnerabilities = filtered.map(a => ({
-      name: a.alert, risk: a.risk, confidence: a.confidence,
-      description: a.description || 'No description available',
-      solution:    a.solution    || 'No solution provided',
+      name: a.alert, pluginId: a.pluginId, risk: a.risk, confidence: a.confidence,
+      description: a.description || '',
+      solution:    a.solution    || '',
       reference: a.reference || '', cweid: a.cweid, wascid: a.wascid,
-      totalOccurrences: a.totalOccurrences || 0, 
+      totalOccurrences: a.totalOccurrences || 0,
       sampleUrls: a.sampleUrls || a.occurrences?.slice(0, 10).map(o => o.uri || o) || [],
       urls: [] // occurrence URLs stripped
     }));
   }
 
-  let vulnsToUse = vulnerabilities;
-  if (isJa && vulnerabilities.length) {
-    try {
-      const out = await Promise.race([
-        translateReportToJapanese({ aiAnalysis: null, vulnsEn: vulnerabilities, scanData: null }, { logLabel: 'ZAP-PDF' }),
-        timeout(TRANSLATION_CEILING_MS, 'JA translation timed out')
-      ]);
-      vulnsToUse = out.vulnsToUse;
-    } catch (e) {
-      console.warn('[PDF] JA vuln translation stage failed:', e.message);
-      // vulnsToUse stays as English vulnerabilities — ZAP PDF still includes all findings
-    }
-  } else if (!isJa && vulnerabilities.length) {
-    await translateJapaneseForEnglishReport({ vulnerabilities }, { logLabel: 'ZAP-PDF' });
-  }
-
-  const ts  = await getReportTemplateStaticContent({ lang });
+  const ts = await getReportTemplateStaticContent({ lang });
   const tsFinal = buildTemplateStaticOverrides(ts, { lang });
+
+  const localized = await localizeReport(
+    { findings: vulnerabilities, aiAnalysis: null, template: { finalPageLines: tsFinal.finalPageLines } },
+    lang,
+    { logLabel: `ZAP-PDF ${scanResult.analysisId || ''}`.trim() }
+  );
 
   const doc = makePdfDoc({
     // Document properties are client-visible in any PDF reader — keep them free of
@@ -2019,11 +1518,9 @@ async function generateZapPdf(scanResult, lang = 'en', accessLevel = 'critical-h
     Subject: 'Detailed Vulnerability Analysis'
   });
   const buf = collectBuffer(doc);
-  renderTemplateZapReport(doc, vulnsToUse, lang, tsFinal, {
-    authScope: (scanResult.authScanResult || scanResult.zapResult)?.authMethod === 'basic' ? 'basic' : null
-  });
+  renderTemplateZapReport(doc, localized.findings, lang, tsFinal);
   doc.end();
   return buf;
 }
 
-module.exports = { generateSingleLanguagePdf, generateZapPdf, translateReportToJapanese, translateJapaneseForEnglishReport, collectJapanesePassages, buildAiAnalysisFromRefinedReport, buildScanHistoryTable, renderVulnerabilityDetailsSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts, renderAuthScopeNote, AUTH_SCOPE_TEXT };
+module.exports = { generateSingleLanguagePdf, generateZapPdf, reportVersion, buildAiAnalysisFromRefinedReport, buildScanHistoryTable, renderVulnerabilityDetailsSection, renderAiAnalysisSection, buildEvidenceText, sanitizeEvidenceForPdf, registerPdfFonts, _buildScanDataForPdf: buildScanDataForPdf };

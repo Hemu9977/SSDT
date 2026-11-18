@@ -667,6 +667,15 @@ router.get('/detailed-report-pdf/:scanId', auth, async (req, res) => {
           error: error.message
         });
       }
+      // A report whose prose could not be fully localized is never sent (no PDF was
+      // rendered). REPORT_TRANSLATION_UNAVAILABLE: the translation service could not be
+      // used — retry later. Completed translations are stored, so a retry is cheaper.
+      if (['REPORT_LOCALIZATION_INCOMPLETE', 'REPORT_TRANSLATION_UNAVAILABLE'].includes(error?.code)) {
+        return res.status(503).json({
+          errorCode: error.code,
+          error: 'Report could not be fully localized'
+        });
+      }
       res.status(500).json({
         error: 'Failed to generate ZAP PDF report',
         details: error.message

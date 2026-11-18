@@ -39,7 +39,8 @@ function resolvePdfJobResponse(meta, fileExists, now = Date.now(), timeoutMs = D
   }
 
   if (meta.status === 'failed') {
-    const code = meta.errorCode === 'GEMINI_KEY_EXHAUSTED' ? 429 : 500;
+    const code = meta.errorCode === 'GEMINI_KEY_EXHAUSTED' ? 429
+      : ['REPORT_LOCALIZATION_INCOMPLETE', 'REPORT_TRANSLATION_UNAVAILABLE'].includes(meta.errorCode) ? 503 : 500;
     return { code, kind: 'failed', body: { status: 'failed', errorCode: meta.errorCode, error: meta.error } };
   }
 
@@ -61,8 +62,13 @@ function resolvePdfJobResponse(meta, fileExists, now = Date.now(), timeoutMs = D
  * A completed job is only reusable while its PDF file still exists; pending/processing
  * jobs are reusable (the caller separately rejects orphaned/timed-out ones). Pure.
  */
-function shouldReuseJob(existingMeta, fileExists) {
+function shouldReuseJob(existingMeta, fileExists, currentReportVersion) {
   if (!existingMeta) return false;
+  // A job built by different report code (an older deploy: e.g. before reports
+  // were fully localized) is never handed out as the new report, whatever state
+  // it is in. A pending job from an older version belongs to a process that no
+  // longer exists, so waiting on it would only end in a timeout.
+  if (currentReportVersion !== undefined && existingMeta.reportVersion !== currentReportVersion) return false;
   if (existingMeta.status === 'completed') return !!fileExists;
   return existingMeta.status === 'pending' || existingMeta.status === 'processing';
 }

@@ -468,6 +468,9 @@ module.exports = {
   maskIdentityTokens,
   assertNoLeakage,
   REDACTED,
+  // Same identity patterns maskIdentityTokens applies, in the same order — used by
+  // the report localization scrubber (i18n/protectTokens.js).
+  IDENTITY_PATTERNS: [URL_PATTERN, EMAIL_PATTERN, IPV6_PATTERN, IPV4_PATTERN, BARE_DOMAIN_PATTERN],
   // exported for unit tests only
   _guardrailMode,
 };

@@ -3,7 +3,7 @@
 /**
  * Credentials never reach a user-facing output or an AI prompt:
  *   - PDF evidence (EN and JA), drawn text captured from PDFKit
- *   - the PDF "Assessment scope" note for HTTP Basic scans (EN and JA)
+ *   - no Basic-only "Assessment scope" section in the PDF (sections match other scans)
  *   - JSON export / evidence endpoints (getSanitizedAlerts)
  *   - the Gemini report input (sanitizeScanForLLM + getSanitizedZapReport)
  *   - the JA translation payload sent to Gemini for the PDF
@@ -72,14 +72,12 @@ test('PDF evidence never draws a credential (EN and JA), even from unredacted st
   }
 });
 
-test('PDF assessment-scope note for Basic scans renders in EN and JA, with no engine names', () => {
-  const en = drawn('en', (ctx) => pdf.renderAuthScopeNote(ctx, 'en'));
-  const ja = drawn('ja', (ctx) => pdf.renderAuthScopeNote(ctx, 'ja'));
-  assert.match(en.replace(/\n/g, ' '), /Assessment scope/);
-  assert.match(en.replace(/\n/g, ' '), /without credentials/);
-  assert.match(ja, /評価範囲/);
-  const banned = /ZAP|OWASP|WebCheck|urlscan|Observatory|PageSpeed|Lighthouse|Gemini|Mozilla/i;
-  for (const t of [pdf.AUTH_SCOPE_TEXT.en.body, pdf.AUTH_SCOPE_TEXT.ja.body, en, ja]) assert.ok(!banned.test(t), 'engine name in customer-facing text');
+test('PDF: HTTP Basic reports carry no extra scope section (same sections as every other scan)', () => {
+  // The section said the header grade and site checks ran without credentials; they
+  // now run signed in, and tests/pdfLocalization.test.js compares the drawn sections.
+  assert.equal(pdf.renderAuthScopeNote, undefined);
+  assert.equal(pdf.AUTH_SCOPE_TEXT, undefined);
+  assert.ok(!/Assessment scope|評価範囲/.test(fs.readFileSync(path.join(BACKEND, 'services/pdfService.js'), 'utf8')));
 });
 
 test('JSON export / evidence endpoints: every alert they return is redacted', () => {
@@ -127,15 +125,37 @@ test('Gemini report input: no credential after sanitizeScanForLLM + getSanitized
 });
 
 test('JA PDF translation payload sent to Gemini carries no credential and no raw evidence', async () => {
+  const { createLocalizer } = require('../services/reportLocalization');
+  const { isApprovedWord } = require('../i18n/languageAudit');
+  // A Japanese stand-in for the model: every ordinary English word becomes Japanese.
+  const fakeJa = (s) => s.split(/(\{\{T\d+\}\})/).map(p => (/^\{\{T\d+\}\}$/.test(p) ? p
+    : p.replace(/[A-Za-z][A-Za-z'’-]*/g, w => (isApprovedWord(w) ? w : '訳語')))).join('');
   const sent = [];
-  const findings = getSanitizedAlerts(legacyVulns().map(v => ({ ...v, alert: v.name })), 'all');
-  await pdf.translateReportToJapanese({ vulnsEn: findings }, {
-    translateVulnChunk: async (chunk) => { sent.push(JSON.stringify(chunk)); return chunk; }
+  const rows = new Map();
+  const localizer = createLocalizer({
+    logger: () => {},
+    store: { getMany: async (ids) => new Map(ids.filter(i => rows.has(i)).map(i => [i, rows.get(i)])),
+      putIfAbsent: async (list) => list.forEach(r => rows.set(r.id, r.translation)), touch() {} },
+    translate: async (units) => { sent.push(JSON.stringify(units)); return { translations: new Map(units.map(u => [u.id, fakeJa(u.text)])) }; },
   });
+  // Legacy, unscrubbed prose as well as unredacted evidence: the prose quotes a
+  // credential header, a bearer token and a session cookie.
+  const findings = getSanitizedAlerts(legacyVulns().map(v => ({ ...v, alert: v.name,
+    name: 'Unlisted Custom Finding Title',
+    description: `The response echoed the request header.\nAuthorization: ${AUTH}\nThe client also sent Bearer abcdefghijklmnop0123456789 and sid=legacy-session-value to https://t.example/admin/ for alice@t.example.`,
+    solution: 'Remove the echo of credentials from responses.' })), 'all');
+  const out = await localizer.localizeReport({ findings }, 'ja');
   assert.ok(sent.length > 0, 'translation was requested');
   for (const payload of sent) {
     assert.deepEqual(leaks(payload), []);
-    assert.ok(!payload.includes('legacy-session-value'));
-    assert.ok(!/"occurrences"|"request"|"response"/.test(payload), 'raw evidence sent for translation');
+    for (const s of ['legacy-session-value', 'abcdefghijklmnop0123456789', 't.example', 'alice@', 'https://']) {
+      assert.ok(!payload.includes(s), `${s} sent for translation`);
+    }
+    assert.ok(!/"occurrences"|"request"|"response"|HTTP\/1\.1/.test(payload), 'raw evidence sent for translation');
   }
+  // The localized prose that will be drawn carries no credential either: a quoted
+  // credential header is redacted the way evidence is.
+  assert.deepEqual(leaks(JSON.stringify(out.findings)), [], 'credential in the localized findings');
+  assert.match(out.findings[0].description, /Authorization: Basic \[REDACTED\]/);
+  assert.equal(out.findings[0].occurrences, findings[0].occurrences, 'evidence objects are passed through untouched');
 });

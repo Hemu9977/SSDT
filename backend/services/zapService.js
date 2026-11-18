@@ -172,6 +172,7 @@ function groupAlertsByUrl(alerts) {
     if (!grouped[key]) {
       grouped[key] = {
         alert: alert.alert,
+        pluginId: alert.pluginId,
         risk: alert.risk,
         confidence: alert.confidence,
         description: alert.description,
@@ -327,6 +328,7 @@ async function createDualVersionAlerts(alerts, client = null) {
   // DETAILED VERSION: All URLs, all data
   const detailedAlerts = grouped.map(alert => ({
     alert: alert.alert,
+    pluginId: alert.pluginId,
     risk: alert.risk,
     confidence: alert.confidence,
     description: alert.description,

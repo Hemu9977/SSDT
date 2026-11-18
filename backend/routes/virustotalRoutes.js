@@ -5,7 +5,7 @@ const { runZapScan, stopCombinedScan } = require('../services/zapService');
 const { stopWebCheckScan, getFullResults } = require('../services/webCheckService');
 const { SCREENSHOT_BUCKET } = require('../services/inHouse/pageCapture');
 const gridfsService = require('../services/gridfsService');
-const { generateSingleLanguagePdf } = require('../services/pdfService');
+const { generateSingleLanguagePdf, reportVersion } = require('../services/pdfService');
 const ScanResult = require('../models/ScanResult');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
@@ -961,7 +961,9 @@ const PDF_ACTIVE_TTL_S = 30 * 60;      // 30 minutes — dedup window
 const PDF_JOB_TIMEOUT_MS = 300000; // Increase timeout to allow slow AI + translation runs to finish (5 minutes)
 
 function timeout(ms, message) {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
+  // unref: the deadline of a job that already finished must not keep a timer (and,
+  // in tests and scripts, the process) alive for the full five minutes.
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms).unref());
 }
 
 function _pdfMetaKey(jobId)              { return `pdf:job:${jobId}`; }
@@ -1095,7 +1097,7 @@ router.post('/pdf-job', auth, async (req, res) => {
               lastUpdated: Date.now()
             });
           } catch (_) {}
-        } else if (shouldReuseJob(existingMeta, fileExists)) {
+        } else if (shouldReuseJob(existingMeta, fileExists, reportVersion())) {
           console.log(`[PDF] Reusing existing job  jobId=${existingJobId} status=${existingMeta.status} analysisId=${analysisId} lang=${lang}`);
           return res.json({ jobId: existingJobId });
         } else {
@@ -1112,6 +1114,7 @@ router.post('/pdf-job', auth, async (req, res) => {
   const meta = {
     jobId,
     status: 'pending',
+    reportVersion: reportVersion(),
     lang,
     analysisId,
     userId: req.user.id,
@@ -1328,6 +1331,15 @@ router.get('/download-pdf/:id', auth, async (req, res) => {
       return res.status(400).json({
         errorCode: err.code,
         error: err.message
+      });
+    }
+    // A report whose prose could not be fully localized is never sent (no PDF was
+    // rendered). REPORT_TRANSLATION_UNAVAILABLE: the translation service could not be
+    // used — retry later. Completed translations are stored, so a retry is cheaper.
+    if (['REPORT_LOCALIZATION_INCOMPLETE', 'REPORT_TRANSLATION_UNAVAILABLE'].includes(err?.code)) {
+      return res.status(503).json({
+        errorCode: err.code,
+        error: 'Report could not be fully localized'
       });
     }
     res.status(500).json({
